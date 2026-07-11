@@ -4,7 +4,7 @@
 - Build label: `baseline`
 - Scenario: `coding-session` (24 scripted turns per run)
 - Model: `deepseek-v4-flash` (concrete model, not a router)
-- Effort: `max`
+- Effort: `low` (configured default; the machine-readable run records are authoritative)
 - Runs: 3
 - Completed scripted turns: 72/72
 - Provider requests: 277

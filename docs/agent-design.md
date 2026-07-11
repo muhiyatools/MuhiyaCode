@@ -5,8 +5,8 @@ MuhiyaCode treats model turns—not individual tool bytes—as the dominant cost
 ## Prompt compiler
 
 - The full prompt is stable across turns and held below a regression ceiling of roughly 1,900 estimated tokens.
-- Conversational tasks use a separate sub-180-token prompt and expose no local tools (only web search when the gateway proves support).
-- Workspace, date, shell, model profile, effort directives, and feature availability are the only environment substitutions.
+- Conversational and toolful tasks share one stable full prompt and pinned tool surface; task-specific policy stays in the user-message brief.
+- Workspace, shell, model profile, effort directives, and feature availability are session-stable substitutions. The current date rides in the task brief.
 - Task class and budgets live in a compact final user-message brief, preserving the system prefix for provider caching.
 - Provider family addenda are short and target known tool-call failure modes; leaked DSML or a single JSON call can be rescued without accepting unknown tool names.
 
@@ -32,4 +32,3 @@ An incomplete plan causes bounded continuation instead of a premature "continue?
 ## Regression gates
 
 Tests enforce prompt-size ceilings, stable prompt bytes, lite-tool isolation, history folding/intactness, range coverage and migration fixtures, effort/class budgets, bounded outputs, subagent limits/reuse, steering, final landing, and real streamed integration turns.
-

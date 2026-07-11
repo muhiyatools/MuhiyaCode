@@ -115,7 +115,7 @@ Slash commands: `/reasoning`, `/goal`, `/plan`, `/resume`, `/new`, `/context`, `
 
 ### Prefix caching
 
-The system prompt and tool schemas are composed once per session and stay byte-identical on every turn and every task (no lite/full switching), and settled history is rewritten only under real context pressure. That keeps DeepSeek's implicit prefix cache warm across the whole session. Point the client at a concrete model (`deepseek-v4-pro`, `deepseek-v4-flash`) rather than the gateway's `muhiya-ai-router`, which re-selects a model per request and fragments the provider-side cache.
+The system prompt and tool schemas are composed once per session and stay byte-identical on every turn and every task (no lite/full switching), and settled history is rewritten only under real context pressure. That keeps DeepSeek's implicit prefix cache warm across the whole session. Point the client at a concrete model (`deepseek-v4-pro`, `deepseek-v4-flash`) rather than the gateway's `muhiya-ai-router`, which re-selects a model per request and fragments the provider-side cache. `/context` shows provider-faithful cache accounting and attributable prefix changes; see [prompt-caching.md](docs/prompt-caching.md) for interpretation and provider limits.
 
 ## MCP
 
@@ -156,7 +156,7 @@ See [security.md](docs/security.md) for the complete threat model.
 
 ## Agent and token design
 
-The full system prompt has a regression ceiling below roughly 1,900 estimated tokens; conversational turns use a separate prompt below 180. Stable instructions stay byte-identical for provider prefix caching, while task classification and budgets are appended to the user turn. Completed tasks fold tool payloads, stale reads are superseded, large context compacts into a durable structured summary, and identical/covered reads are blocked only while their source results remain intact.
+The single full system prompt has a regression ceiling below roughly 1,900 estimated tokens. Stable instructions stay byte-identical for provider prefix caching, while task classification and budgets are appended to the user turn. Completed tasks fold tool payloads, stale reads are superseded, large context compacts into a durable structured summary, and identical/covered reads are blocked only while their source results remain intact.
 
 See [agent-design.md](docs/agent-design.md) and [architecture.md](docs/architecture.md).
 
@@ -185,4 +185,3 @@ goreleaser release --snapshot --clean
 ## Scope
 
 MuhiyaCode currently targets terminal workflows, OpenAI-compatible chat-completions gateways, local workspaces, gateway-hosted web search, and MCP. ACP, an LSP implementation, IDE extensions, and hosted credit/billing systems are not part of this repository.
-

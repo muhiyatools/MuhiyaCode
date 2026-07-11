@@ -113,9 +113,21 @@ the `len/4` estimate rather than actual `prompt_tokens`.
 | A13 Dual-shape usage parsing + hit/miss display + miss attribution | **Adopt** | Extend `Usage` with distinct read/miss fields and unavailable semantics; add PrefixShape hashing and reason labels (D5, D6). |
 | A14 Mock-endpoint cache-hit guard test (release gating) | **Adopt** | Offline, deterministic, measures exactly what we control (byte-stable prefixes). Threshold per SC-001/SC-005 (D7). |
 | A15 Live A/B benchmark harness | **Adapt** | Build a scripted realistic-workload harness with JSON metrics output for the before/after protocol (FR-010, D8). TTL-idle arm optional. |
-| Cache-impact PR governance (CI metadata gates) | **Reject (defer)** | Repo has no git/CI yet. Constitution gates + the guard tests cover the risk. Revisit when CI exists. |
+| Cache-impact PR governance (CI metadata gates) | **Adapt** | The repository has GitHub CI; deterministic prefix, retry, resume, and mock cache-guard tests provide the executable gate. Additional PR metadata is deferred until the workflow needs it. |
 | Memory folded into prefix once per session | **Reject (n/a)** | MuhiyaCode does not inject memory into the main prompt per turn; knowledge briefing is embedded once per subagent run. No change needed. |
 | Skills index in prefix, bodies on demand | **Reject (n/a)** | No evidence of skill bodies entering the prompt; verify during implementation, no design change. |
+
+### Implementation evidence and deviations
+
+D1-D12 were implemented without a design-level deviation. The live harness inherited the
+configured `low` effort in both arms; the earlier baseline prose label of `max` was incorrect,
+while the machine-readable run records and comparison consistently record `low`.
+
+The three-run improved arm measured 96.5602% mean steady-state cache reads versus 96.5699%
+baseline. Its 0.452 percentage-point range meets SC-005 and all runs recorded zero unattributed
+misses, but SC-001's 99% threshold was not met. PrefixShape and invalidation ledgers recorded no
+client-side change for those misses, so they are provider-attributed rather than an unexplained
+implementation defect. The limitation is registered in `docs/prompt-caching.md`.
 
 ## Part D — Decisions
 

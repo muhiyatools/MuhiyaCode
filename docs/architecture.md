@@ -38,10 +38,11 @@ terminate on cancellation; no package-global worker goroutines are allowed.
    ancestors, including symlinks and Windows junctions.
 4. Every assistant tool call has exactly one ordered tool result, including
    cancellation and failure paths.
-5. Within a task, model request prefixes are byte-stable. Folding, trimming,
-   and compaction occur only at deliberate boundaries.
-6. Chat-class turns use the lite prompt and no local tool schemas. Toolful
-   prompts and schemas have regression budgets enforced in tests.
+5. Across a session, model request prefixes are byte-stable. Folding, trimming,
+   compaction, model changes, and tool-surface changes occur only at deliberate,
+   attributable boundaries.
+6. All task classes use one stable full prompt and pinned tool surface. Prompt
+   and schema regression budgets are enforced in tests.
 7. Independent subagents may run concurrently, but edits and ordinary tools
    stay ordered. Read-only subagents have physically restricted tool registries.
 8. A task never silently dies at a turn cap: it escalates once when warranted,

@@ -1,0 +1,32 @@
+{
+  "generated_at": "2026-07-11T15:51:52.0570638Z",
+  "baseline_dir": "specs/001-prompt-cache-optimization/benchmarks/baseline",
+  "improved_dir": "specs/001-prompt-cache-optimization/benchmarks/improved",
+  "scenarios": {
+    "coding-session": {
+      "model": "deepseek-v4-flash",
+      "effort": "low",
+      "baseline_runs": 3,
+      "improved_runs": 3,
+      "baseline_steady_state_rates": [
+        0.9674732452997746,
+        0.9645425978770926,
+        0.9650812934822843
+      ],
+      "improved_steady_state_rates": [
+        0.9683130000411698,
+        0.9637914380866783,
+        0.9647002330743815
+      ],
+      "baseline_mean": 0.9656990455530505,
+      "improved_mean": 0.9656015570674098,
+      "improved_variance_percentage_points": 0.4521561954491493,
+      "baseline_total_cost": null,
+      "improved_total_cost": null,
+      "cost_delta": null,
+      "unattributed_misses": 0,
+      "meets_steady_state_target": false,
+      "meets_variance_target": true
+    }
+  }
+}

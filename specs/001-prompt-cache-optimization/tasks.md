@@ -208,7 +208,7 @@ prefix-of relationship between consecutive requests) + V5 (live: improved arm
       `internal/orchestrator/cachehit_guard_test.go` (D7; depends T011, T024)
 - [X] T033 [P] [US1] Retry/reconnect byte-identity test: retried request marshals identically
       to the original attempt — in `internal/gateway/provider_retry_test.go` (contract W8)
-- [ ] T034 [US1] Capture the IMPROVED arm (3 runs, same scenarios/model/effort/fixture as
+- [X] T034 [US1] Capture the IMPROVED arm (3 runs, same scenarios/model/effort/fixture as
       T014) to `specs/001-prompt-cache-optimization/benchmarks/improved/`, then produce the
       comparison report: SC-001 (≥0.99 steady-state on improved, baseline below), SC-003
       (steady-state uncached ≈ new tail), SC-005 (variance ≤ 1pp, total-cost delta stated),
@@ -272,19 +272,19 @@ defect.
 an adopt/adapt/reject entry reflecting what was actually built; every benchmark miss maps to a
 register entry or a filed defect (SC-007 audit trail).
 
-- [ ] T041 [US3] Write `docs/prompt-caching.md`: user-facing cache guide (how caching works,
+- [X] T041 [US3] Write `docs/prompt-caching.md`: user-facing cache guide (how caching works,
       how to read `/context` and the activity tag, model-pinning guidance) + the provider
       limitations register seeded from research.md Part E and populated with observed evidence
       from `specs/001-prompt-cache-optimization/benchmarks/` (cold start, TTL/eviction,
       64-token block granularity, per-model scoping, router fragmentation, reporting variance,
       thinking-mode replay) (FR-011; D12; depends T014, T034)
-- [ ] T042 [P] [US3] Reconcile existing docs with implemented behavior: README.md
+- [X] T042 [P] [US3] Reconcile existing docs with implemented behavior: README.md
       "Prefix caching" + "Agent and token design" sections; `docs/agent-design.md` (stale
       "separate sub-180-token prompt" claim vs audited single stable prompt — verify against
       code and fix whichever is stale); `docs/architecture.md` invariants #5/#6 (prefix
       stability strengthens from "within a task" to session-scoped-with-attributable-events)
       (Constitution workflow gate)
-- [ ] T043 [US3] Update `specs/001-prompt-cache-optimization/research.md` Part C with any
+- [X] T043 [US3] Update `specs/001-prompt-cache-optimization/research.md` Part C with any
       implementation-time deviations from decisions D1–D12, and file defects for any
       benchmark miss that attribution could not explain (must be zero per SC-007; depends
       T034)
@@ -295,13 +295,13 @@ register entry or a filed defect (SC-007 audit trail).
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T044 Full gate run per quickstart V0: `go mod verify`, `go fmt ./...` diff-clean,
+- [X] T044 Full gate run per quickstart V0: `go mod verify`, `go fmt ./...` diff-clean,
       `go vet ./...`, `go test ./... -count=1` at repository root; on a CGO-capable runner
       also `CGO_ENABLED=1 go test -race ./... -count=1` (Constitution IX; SC-006)
 - [ ] T045 [P] Execute the quickstart V6 live UX spot-check list (MCP session, `/mcp`
       mid-session, cross-day resume, `/compact`, cache-less endpoint, external file edit) and
       record outcomes in `specs/001-prompt-cache-optimization/benchmarks/v6-spotchecks.md`
-- [ ] T046 Verify the system-prompt regression ceiling (~1,900 estimated tokens) and the
+- [X] T046 Verify the system-prompt regression ceiling (~1,900 estimated tokens) and the
       conversational-prompt budget still hold after prompt changes, adjusting ceiling tests
       only with justification, in `internal/orchestrator/prompt_stability_test.go`
       (Constitution II — no quality-affecting prompt growth/shrinkage snuck in)
