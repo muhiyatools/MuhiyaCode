@@ -10,6 +10,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -55,6 +56,7 @@ type turnResult struct {
 type runResult struct {
 	Scenario            string                         `json:"scenario"`
 	Build               string                         `json:"build"`
+	GitCommit           string                         `json:"git_commit"`
 	RunIndex            int                            `json:"run_index"`
 	Model               string                         `json:"model"`
 	Effort              contract.EffortLevel           `json:"effort"`
@@ -222,7 +224,8 @@ func executeOne(opts options, fixture, outDir string, sourcePaths state.Paths, s
 	started := time.Now().UTC()
 	result := runResult{
 		Scenario: "coding-session", Build: opts.buildLabel, RunIndex: runIndex,
-		Model: settings.Provider.ActiveModelID, Effort: settings.Effort, StartedAt: started,
+		GitCommit: currentGitCommit(),
+		Model:     settings.Provider.ActiveModelID, Effort: settings.Effort, StartedAt: started,
 		PriceSource: strings.TrimSpace(opts.prices.Source), InvalidationByCause: map[string]int{},
 	}
 	workspace, err := os.MkdirTemp("", "cachebench-workspace-*")
@@ -294,6 +297,14 @@ func executeOne(opts options, fixture, outDir string, sourcePaths state.Paths, s
 	}
 	finalizeResult(&result, app, opts.prices, started)
 	return result, nil
+}
+
+func currentGitCommit() string {
+	output, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func finalizeResult(result *runResult, app *command.Application, prices priceTable, started time.Time) {
