@@ -16,19 +16,25 @@ const (
 )
 
 type HistorySnapshot struct {
-	Version        int                `json:"version"`
-	CompactSummary string             `json:"compactSummary,omitempty"`
-	Messages       []contract.Message `json:"messages"`
-	LastTaskStart  int                `json:"lastTaskStart"`
+	Version           int                `json:"version"`
+	CompactSummary    string             `json:"compactSummary,omitempty"`
+	Messages          []contract.Message `json:"messages"`
+	LastTaskStart     int                `json:"lastTaskStart"`
+	RewriteVersion    int                `json:"rewriteVersion,omitempty"`
+	LastWindowStart   int                `json:"lastWindowStart,omitempty"`
+	WindowInitialized bool               `json:"windowInitialized,omitempty"`
 }
 
 type History struct {
-	mu             sync.RWMutex
-	messages       []contract.Message
-	compactSummary string
-	lastTaskStart  int
-	superseded     map[string]struct{}
-	persist        func(HistorySnapshot) error
+	mu                sync.RWMutex
+	messages          []contract.Message
+	compactSummary    string
+	lastTaskStart     int
+	rewriteVersion    int
+	lastWindowStart   int
+	windowInitialized bool
+	superseded        map[string]struct{}
+	persist           func(HistorySnapshot) error
 }
 
 func NewHistory(snapshot HistorySnapshot, persist func(HistorySnapshot) error) *History {
@@ -36,7 +42,16 @@ func NewHistory(snapshot HistorySnapshot, persist func(HistorySnapshot) error) *
 		snapshot = HistorySnapshot{Version: 1}
 	}
 	start := min(max(snapshot.LastTaskStart, 0), len(snapshot.Messages))
-	return &History{messages: cloneMessages(snapshot.Messages), compactSummary: snapshot.CompactSummary, lastTaskStart: start, superseded: make(map[string]struct{}), persist: persist}
+	return &History{
+		messages:          cloneMessages(snapshot.Messages),
+		compactSummary:    snapshot.CompactSummary,
+		lastTaskStart:     start,
+		rewriteVersion:    max(0, snapshot.RewriteVersion),
+		lastWindowStart:   max(0, snapshot.LastWindowStart),
+		windowInitialized: snapshot.WindowInitialized,
+		superseded:        make(map[string]struct{}),
+		persist:           persist,
+	}
 }
 
 func (h *History) Snapshot() HistorySnapshot {
@@ -77,6 +92,12 @@ func (h *History) EstimatedTokens() int {
 	return h.estimatedLocked()
 }
 
+func (h *History) RewriteVersion() int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.rewriteVersion
+}
+
 func EstimateTokens(text string) int { return (len(text)+3)/4 + 4 }
 
 func EstimateMessageTokens(message contract.Message) int {
@@ -88,9 +109,19 @@ func EstimateMessageTokens(message contract.Message) int {
 }
 
 func (h *History) BuildRequest(system string, contextLimit, reserve int) []contract.Message {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return assembleRequest(h.messages, h.compactSummary, system, contextLimit, reserve)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	request, start := assembleRequestWithStart(h.messages, h.compactSummary, system, contextLimit, reserve)
+	changed := !h.windowInitialized || start != h.lastWindowStart
+	if h.windowInitialized && start > h.lastWindowStart {
+		h.rewriteVersion++
+	}
+	h.lastWindowStart = start
+	h.windowInitialized = true
+	if changed {
+		h.saveLocked()
+	}
+	return request
 }
 
 func (h *History) MarkSuperseded(callIDs []string) {
@@ -134,6 +165,7 @@ func (h *History) TrimAged(keepFull, trimmedChars, minBatch int) bool {
 		tail := content[len(content)-tailSize:]
 		h.messages[index].Content = head + "\n" + TrimNote + "\n" + tail
 	}
+	h.rewriteVersion++
 	h.saveLocked()
 	return true
 }
@@ -161,6 +193,7 @@ func (h *History) FoldCompletedTasks() int {
 	if !changed {
 		return 0
 	}
+	h.rewriteVersion++
 	h.saveLocked()
 	return max(0, before-h.estimatedLocked())
 }
@@ -191,6 +224,9 @@ func (h *History) CompactTo(summary string, keepRecentUnits int) {
 	h.messages = cloneMessages(kept)
 	h.compactSummary = summary
 	h.lastTaskStart = max(0, h.lastTaskStart-removed)
+	h.rewriteVersion++
+	h.lastWindowStart = 0
+	h.windowInitialized = false
 	h.saveLocked()
 }
 
@@ -211,6 +247,11 @@ func GroupUnits(messages []contract.Message) [][]contract.Message {
 }
 
 func assembleRequest(messages []contract.Message, summary, system string, contextLimit, reserve int) []contract.Message {
+	result, _ := assembleRequestWithStart(messages, summary, system, contextLimit, reserve)
+	return result
+}
+
+func assembleRequestWithStart(messages []contract.Message, summary, system string, contextLimit, reserve int) ([]contract.Message, int) {
 	budget := max(8_000, contextLimit-reserve)
 	header := []contract.Message{{Role: contract.RoleSystem, Content: system}}
 	if summary != "" {
@@ -237,7 +278,7 @@ func assembleRequest(messages []contract.Message, summary, system string, contex
 	for _, unit := range units[start:] {
 		result = append(result, cloneMessages(unit)...)
 	}
-	return result
+	return result, start
 }
 
 func foldCalls(calls []contract.ToolCall) []contract.ToolCall {
@@ -295,7 +336,15 @@ func (h *History) estimatedLocked() int {
 }
 
 func (h *History) snapshotLocked() HistorySnapshot {
-	return HistorySnapshot{Version: 1, CompactSummary: h.compactSummary, Messages: cloneMessages(h.messages), LastTaskStart: h.lastTaskStart}
+	return HistorySnapshot{
+		Version:           1,
+		CompactSummary:    h.compactSummary,
+		Messages:          cloneMessages(h.messages),
+		LastTaskStart:     h.lastTaskStart,
+		RewriteVersion:    h.rewriteVersion,
+		LastWindowStart:   h.lastWindowStart,
+		WindowInitialized: h.windowInitialized,
+	}
 }
 
 func (h *History) saveLocked() {

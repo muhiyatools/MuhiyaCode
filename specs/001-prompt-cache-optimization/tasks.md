@@ -31,13 +31,13 @@ there is no way to re-measure the "before" arm honestly after behavior changes m
 
 **Purpose**: Reproducibility and fixtures for everything that follows
 
-- [ ] T001 Initialize version control for baseline reproducibility: run `git init`, add a
+- [X] T001 Initialize version control for baseline reproducibility: run `git init`, add a
       `.gitignore` for build artifacts, and create an initial commit of the unmodified tree at
       repository root (quickstart Prerequisites; enables a tagged `baseline` tree)
-- [ ] T002 [P] Create the benchmark workspace fixture — a small representative project with
+- [X] T002 [P] Create the benchmark workspace fixture — a small representative project with
       files to read/search/edit across ≥20 scripted turns — in `benchmarks/cachebench/fixture/`
       (data-model §7 BenchmarkScenario inputs)
-- [ ] T003 [P] Record the green starting gate: run `go mod verify`, `go vet ./...`,
+- [X] T003 [P] Record the green starting gate: run `go mod verify`, `go vet ./...`,
       `go test ./... -count=1` and save the summary to
       `specs/001-prompt-cache-optimization/benchmarks/gate-start.txt` (quickstart V0;
       Constitution I baseline)
@@ -55,41 +55,41 @@ plan.md W1).
 **⚠️ CRITICAL**: No user story implementation may begin before this phase completes — T014
 (baseline) is the last gate.
 
-- [ ] T004 Extend the usage model with distinct nullable cache fields `CacheReadTokens`,
+- [X] T004 Extend the usage model with distinct nullable cache fields `CacheReadTokens`,
       `CacheMissTokens`, plus `MissDerived`, keeping the legacy single `CachedTokens` as a
       derived display value, in `internal/contract/types.go` (data-model §1; D5)
-- [ ] T005 Parse provider usage per the precedence rules — DeepSeek top-level
+- [X] T005 Parse provider usage per the precedence rules — DeepSeek top-level
       `prompt_cache_hit_tokens`/`prompt_cache_miss_tokens` first, OpenAI nested
       `prompt_tokens_details.cached_tokens` with derived miss second, nulls otherwise; verbatim
       values, no clamping, malformed usage yields nulls + diagnostic without failing the
       request — in `internal/gateway/sse.go` (`mergeUsage`, currently lines ~147-171)
       (contracts/cache-metrics.md Parsing; depends T004)
-- [ ] T006 [P] Implement `UsageRecord` append-only persistence: JSONL writer/loader for
+- [X] T006 [P] Implement `UsageRecord` append-only persistence: JSONL writer/loader for
       `sessions/<id>/usage.jsonl` with all data-model §1 fields, writing a record even when
       usage is absent (`attribution=n/a`), in `internal/state/session.go`
-- [ ] T007 Emit one `UsageRecord` per request from the turn loop — seq, timestamp, model sent,
+- [X] T007 Emit one `UsageRecord` per request from the turn loop — seq, timestamp, model sent,
       parsed usage, `cold-start` attribution for the first request after start/resume — wired
       in `internal/orchestrator/engine.go` (depends T004, T005, T006)
-- [ ] T008 Rebuild `SessionUsageAggregate` by folding `usage.jsonl` on session load so
+- [X] T008 Rebuild `SessionUsageAggregate` by folding `usage.jsonl` on session load so
       cumulative billed/cached figures survive resume, in `internal/orchestrator/engine.go` and
       `internal/command/application.go` (data-model §2; fixes the audit's resume-reset gap;
       depends T006)
-- [ ] T009 [P] Create `PrefixShape` (hashes of exact system-message bytes, canonical tools
+- [X] T009 [P] Create `PrefixShape` (hashes of exact system-message bytes, canonical tools
       bytes, history rewrite-version, model ID) and `CompareShape` returning per-region reasons,
       in new file `internal/orchestrator/prefixshape.go` (data-model §3; D6)
-- [ ] T010 [P] Create the `InvalidationEvent` ledger — taxonomy, trigger, scope, pressure,
+- [X] T010 [P] Create the `InvalidationEvent` ledger — taxonomy, trigger, scope, pressure,
       request_seq; append-only persistence with the session; survives resume — in new file
       `internal/orchestrator/invalidation.go` plus its carrier in `internal/state/session.go`
       (data-model §4; contracts/invalidation-events.md)
-- [ ] T011 Compute `PrefixShape` before every send, compare with the previous request, stamp
+- [X] T011 Compute `PrefixShape` before every send, compare with the previous request, stamp
       `prefix_changed`/`change_reasons` into the `UsageRecord`, and implement the attribution
       algorithm (`n/a` → `cold-start` → `agent` → `provider`) exactly per
       contracts/invalidation-events.md, in `internal/orchestrator/engine.go` (depends T007,
       T009, T010)
-- [ ] T012 Usage-parsing unit tests: golden fixtures for both provider shapes, zero-vs-null
+- [X] T012 Usage-parsing unit tests: golden fixtures for both provider shapes, zero-vs-null
       distinction, derived-miss flagging, contradictory payload stored-as-reported, malformed
       payload → nulls, in `internal/gateway/sse_usage_test.go` (quickstart V3 / SC-004)
-- [ ] T013 Build the live benchmark harness: scripted ≥20-turn scenarios over the fixture,
+- [X] T013 Build the live benchmark harness: scripted ≥20-turn scenarios over the fixture,
       N-run repetition, JSON output per contracts/cache-metrics.md (per-request verbatim
       records, both hit rates, latency, derived cost + price source, `unattributed_misses`),
       plus a raw provider-payload log as ground truth, in `benchmarks/cachebench/main.go`

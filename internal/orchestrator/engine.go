@@ -28,28 +28,32 @@ const (
 )
 
 type Persistence struct {
-	AddEvent         func(context.Context, string, string, string) error
-	AppendTranscript func(context.Context, map[string]any) error
-	WritePlan        func(context.Context, string) error
+	AddEvent           func(context.Context, string, string, string) error
+	AppendTranscript   func(context.Context, map[string]any) error
+	AppendUsage        func(context.Context, contract.UsageRecord) error
+	AppendInvalidation func(context.Context, contract.InvalidationEvent) error
+	WritePlan          func(context.Context, string) error
 }
 
 type RescueFunc func(string, []string) ([]contract.ToolCall, string)
 
 type EngineConfig struct {
-	Settings    *contract.Settings
-	Secrets     contract.Secrets
-	Session     contract.Session
-	Provider    contract.Provider
-	Registry    *Registry
-	History     *History
-	Inspection  *InspectionLedger
-	Knowledge   *Knowledge
-	Callbacks   contract.Callbacks
-	Persistence Persistence
-	Prompt      PromptContext
-	InitialPlan contract.Plan
-	Rescue      RescueFunc
-	Redact      func(string) string
+	Settings             *contract.Settings
+	Secrets              contract.Secrets
+	Session              contract.Session
+	Provider             contract.Provider
+	Registry             *Registry
+	History              *History
+	Inspection           *InspectionLedger
+	Knowledge            *Knowledge
+	Callbacks            contract.Callbacks
+	Persistence          Persistence
+	Prompt               PromptContext
+	InitialPlan          contract.Plan
+	InitialUsageRecords  []contract.UsageRecord
+	InitialInvalidations []contract.InvalidationEvent
+	Rescue               RescueFunc
+	Redact               func(string) string
 }
 
 type Engine struct {
@@ -83,6 +87,12 @@ type Engine struct {
 
 	taskMu          sync.Mutex
 	sessionUsage    contract.Usage
+	usageRecords    []contract.UsageRecord
+	usageAggregate  contract.SessionUsageAggregate
+	requestSeq      int
+	firstAfterStart bool
+	lastShape       *PrefixShape
+	invalidations   *InvalidationLedger
 	taskAgentUsage  contract.Usage
 	taskAgentRuns   int
 	taskAgentReused int
@@ -113,7 +123,35 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 	if config.Knowledge == nil {
 		config.Knowledge = NewKnowledge(KnowledgeSnapshot{Version: 1}, nil)
 	}
-	return &Engine{settings: config.Settings, secrets: config.Secrets, session: config.Session, provider: config.Provider, registry: config.Registry, history: config.History, inspection: config.Inspection, knowledge: config.Knowledge, callbacks: config.Callbacks, persistence: config.Persistence, prompt: config.Prompt, plan: config.InitialPlan, rescue: config.Rescue, redactFn: config.Redact}, nil
+	usageRecords := append([]contract.UsageRecord(nil), config.InitialUsageRecords...)
+	aggregate := contract.AggregateUsage(usageRecords)
+	requestSeq := 0
+	for _, record := range usageRecords {
+		requestSeq = max(requestSeq, record.Seq)
+	}
+	ledger := NewInvalidationLedger(config.InitialInvalidations, config.Persistence.AppendInvalidation)
+	return &Engine{
+		settings:        config.Settings,
+		secrets:         config.Secrets,
+		session:         config.Session,
+		provider:        config.Provider,
+		registry:        config.Registry,
+		history:         config.History,
+		inspection:      config.Inspection,
+		knowledge:       config.Knowledge,
+		callbacks:       config.Callbacks,
+		persistence:     config.Persistence,
+		prompt:          config.Prompt,
+		plan:            config.InitialPlan,
+		rescue:          config.Rescue,
+		redactFn:        config.Redact,
+		sessionUsage:    usageFromAggregate(aggregate),
+		usageRecords:    usageRecords,
+		usageAggregate:  aggregate,
+		requestSeq:      requestSeq,
+		firstAfterStart: true,
+		invalidations:   ledger,
+	}, nil
 }
 
 func (e *Engine) IsBusy() bool {
@@ -181,6 +219,25 @@ func (e *Engine) Usage() contract.Usage {
 	return e.sessionUsage
 }
 
+func (e *Engine) UsageAggregate() contract.SessionUsageAggregate {
+	e.taskMu.Lock()
+	defer e.taskMu.Unlock()
+	return cloneUsageAggregate(e.usageAggregate)
+}
+
+func (e *Engine) UsageRecords() []contract.UsageRecord {
+	e.taskMu.Lock()
+	defer e.taskMu.Unlock()
+	return cloneUsageRecords(e.usageRecords)
+}
+
+func (e *Engine) InvalidationEvents() []contract.InvalidationEvent {
+	if e.invalidations == nil {
+		return nil
+	}
+	return e.invalidations.Events()
+}
+
 func (e *Engine) CurrentPlan() contract.Plan {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -199,16 +256,25 @@ func (e *Engine) Compact(ctx context.Context) (string, error) {
 }
 
 type ContextReport struct {
-	HistoryTokens int
-	ContextLimit  int
-	Percent       float64
-	Usage         contract.Usage
+	HistoryTokens  int
+	ContextLimit   int
+	Percent        float64
+	Usage          contract.Usage
+	UsageAggregate contract.SessionUsageAggregate
+	Invalidations  []contract.InvalidationEvent
 }
 
 func (e *Engine) ContextReport() ContextReport {
 	history := e.history.EstimatedTokens()
 	limit := e.contextLimit()
-	return ContextReport{HistoryTokens: history, ContextLimit: limit, Percent: float64(history) / float64(max(1, limit)) * 100, Usage: e.Usage()}
+	return ContextReport{
+		HistoryTokens:  history,
+		ContextLimit:   limit,
+		Percent:        float64(history) / float64(max(1, limit)) * 100,
+		Usage:          e.Usage(),
+		UsageAggregate: e.UsageAggregate(),
+		Invalidations:  e.InvalidationEvents(),
+	}
 }
 
 func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, stats contract.TaskStats, runErr error) {
@@ -247,7 +313,9 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	if profile.Onboarding && ShouldConsiderOnboarding(userPrompt) && e.callbacks.Ask != nil {
 		e.callbacks.EmitStatus("Clarifying the task...")
 		questions, usage := GenerateOnboardingQuestions(ctx, e.provider, e.settings.Provider.SubagentModelID, userPrompt)
-		e.addUsage(usage)
+		if err := e.recordAuxUsage(ctx, e.settings.Provider.SubagentModelID, usage); err != nil {
+			return "", stats, fmt.Errorf("persist onboarding usage: %w", err)
+		}
 		if len(questions) > 0 {
 			if answers, err := e.callbacks.Ask(ctx, questions); err == nil {
 				modelPrompt = PromptWithAnswers(userPrompt, answers)
@@ -361,6 +429,14 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		}
 		e.callbacks.EmitStatus("Thinking...")
 		messages := e.history.BuildRequest(promptText, e.contextLimit(), outputReserveTokens)
+		shape, err := NewPrefixShape(promptText, definitions, e.history.RewriteVersion(), e.settings.Provider.ActiveModelID)
+		if err != nil {
+			return "", stats, fmt.Errorf("compute request prefix shape: %w", err)
+		}
+		var changeReasons []string
+		if e.lastShape != nil {
+			changeReasons = CompareShape(*e.lastShape, shape)
+		}
 		toolChoice := "auto"
 		if isFinal {
 			toolChoice = "none"
@@ -372,7 +448,10 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		if err != nil {
 			return "", stats, err
 		}
-		e.addUsage(response.Usage)
+		if err := e.recordMainUsage(ctx, e.settings.Provider.ActiveModelID, response.Usage, changeReasons); err != nil {
+			return "", stats, fmt.Errorf("persist request usage: %w", err)
+		}
+		e.lastShape = &shape
 		if e.callbacks.Usage != nil {
 			e.callbacks.Usage(e.Usage())
 		}
@@ -730,8 +809,10 @@ func (e *Engine) compact(ctx context.Context, reason string) error {
 	temperature := .1
 	response, err := e.provider.Chat(ctx, contract.ChatRequest{Messages: request, ModelID: e.settings.Provider.ActiveModelID, MaxTokens: 1600, Temperature: &temperature, Reasoning: contract.ReasoningLow})
 	summary := ""
+	if usageErr := e.recordAuxUsage(ctx, e.settings.Provider.ActiveModelID, response.Usage); usageErr != nil {
+		return fmt.Errorf("persist compaction usage: %w", usageErr)
+	}
 	if err == nil {
-		e.addUsage(response.Usage)
 		summary = strings.TrimSpace(response.Content)
 	}
 	if summary == "" {
@@ -813,17 +894,142 @@ func (e *Engine) redact(value string) string {
 	return value
 }
 
-func (e *Engine) addUsage(usage contract.Usage) {
+func (e *Engine) addTaskAgentUsage(usage contract.Usage) {
 	e.taskMu.Lock()
-	e.sessionUsage = e.sessionUsage.Add(usage)
+	e.taskAgentUsage = e.taskAgentUsage.Add(usage)
 	e.taskMu.Unlock()
 }
 
-func (e *Engine) addAgentUsage(usage contract.Usage) {
+func (e *Engine) recordMainUsage(ctx context.Context, model string, usage contract.Usage, changeReasons []string) error {
 	e.taskMu.Lock()
-	e.sessionUsage = e.sessionUsage.Add(usage)
-	e.taskAgentUsage = e.taskAgentUsage.Add(usage)
-	e.taskMu.Unlock()
+	defer e.taskMu.Unlock()
+	attribution := contract.CacheAttributionNA
+	if usage.CacheReadTokens != nil && usage.CacheMissTokens != nil {
+		switch {
+		case e.firstAfterStart:
+			attribution = contract.CacheAttributionColdStart
+		case len(changeReasons) > 0:
+			attribution = contract.CacheAttributionAgent
+		default:
+			attribution = contract.CacheAttributionProvider
+		}
+	}
+	record := usageRecord(model, usage, changeReasons, attribution)
+	if err := e.appendUsageLocked(ctx, &record); err != nil {
+		return err
+	}
+	e.firstAfterStart = false
+	return nil
+}
+
+func (e *Engine) recordAuxUsage(ctx context.Context, model string, usage contract.Usage) error {
+	e.taskMu.Lock()
+	defer e.taskMu.Unlock()
+	record := usageRecord(model, usage, nil, contract.CacheAttributionNA)
+	return e.appendUsageLocked(ctx, &record)
+}
+
+func (e *Engine) appendUsageLocked(ctx context.Context, record *contract.UsageRecord) error {
+	record.Seq = e.requestSeq + 1
+	if record.At.IsZero() {
+		record.At = time.Now().UTC()
+	}
+	if e.persistence.AppendUsage != nil {
+		if err := e.persistence.AppendUsage(ctx, *record); err != nil {
+			return err
+		}
+	}
+	e.requestSeq = record.Seq
+	e.usageRecords = append(e.usageRecords, cloneUsageRecord(*record))
+	e.usageAggregate = contract.AggregateUsage(e.usageRecords)
+	e.sessionUsage = usageFromAggregate(e.usageAggregate)
+	return nil
+}
+
+func usageRecord(model string, usage contract.Usage, reasons []string, attribution contract.CacheAttribution) contract.UsageRecord {
+	prompt := nullableUsageValue(usage.PromptTokens, usage.PromptTokensAvailable)
+	completion := nullableUsageValue(usage.CompletionTokens, usage.CompletionTokensAvailable)
+	read := cloneIntPointer(usage.CacheReadTokens)
+	miss := cloneIntPointer(usage.CacheMissTokens)
+	return contract.UsageRecord{
+		At:                 time.Now().UTC(),
+		Model:              model,
+		PromptTokens:       prompt,
+		CompletionTokens:   completion,
+		CacheReadTokens:    read,
+		CacheMissTokens:    miss,
+		MissDerived:        usage.MissDerived,
+		HitRate:            contract.HitRate(read, miss),
+		PrefixChanged:      len(reasons) > 0,
+		ChangeReasons:      append([]string{}, reasons...),
+		Attribution:        attribution,
+		UsageContradictory: usage.Contradictory,
+		Diagnostic:         usage.Diagnostic,
+	}
+}
+
+func nullableUsageValue(value int, available bool) *int {
+	if !available && value == 0 {
+		return nil
+	}
+	copy := value
+	return &copy
+}
+
+func cloneIntPointer(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func usageFromAggregate(aggregate contract.SessionUsageAggregate) contract.Usage {
+	usage := contract.Usage{
+		PromptTokens:              aggregate.SumPrompt,
+		CompletionTokens:          aggregate.SumCompletion,
+		TotalTokens:               aggregate.SumPrompt + aggregate.SumCompletion,
+		CachedTokens:              aggregate.SumCacheRead,
+		PromptTokensAvailable:     aggregate.PromptAvailable > 0,
+		CompletionTokensAvailable: aggregate.CompletionAvailable > 0,
+	}
+	if aggregate.CacheAvailable > 0 {
+		usage.CacheReadTokens = cloneIntPointer(&aggregate.SumCacheRead)
+		usage.CacheMissTokens = cloneIntPointer(&aggregate.SumCacheMiss)
+	}
+	return usage
+}
+
+func cloneUsageAggregate(value contract.SessionUsageAggregate) contract.SessionUsageAggregate {
+	value.SessionHitRate = cloneFloatPointer(value.SessionHitRate)
+	value.SteadyStateHitRate = cloneFloatPointer(value.SteadyStateHitRate)
+	return value
+}
+
+func cloneFloatPointer(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneUsageRecords(records []contract.UsageRecord) []contract.UsageRecord {
+	result := make([]contract.UsageRecord, len(records))
+	for i, record := range records {
+		result[i] = cloneUsageRecord(record)
+	}
+	return result
+}
+
+func cloneUsageRecord(record contract.UsageRecord) contract.UsageRecord {
+	record.PromptTokens = cloneIntPointer(record.PromptTokens)
+	record.CompletionTokens = cloneIntPointer(record.CompletionTokens)
+	record.CacheReadTokens = cloneIntPointer(record.CacheReadTokens)
+	record.CacheMissTokens = cloneIntPointer(record.CacheMissTokens)
+	record.HitRate = cloneFloatPointer(record.HitRate)
+	record.ChangeReasons = append([]string{}, record.ChangeReasons...)
+	return record
 }
 
 func (e *Engine) trackKnowledge(outcome toolOutcome) {

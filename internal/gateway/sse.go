@@ -3,6 +3,8 @@ package gateway
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"sort"
 	"strings"
 
@@ -21,10 +23,31 @@ type partialCall struct {
 	id, name, arguments string
 }
 
+type usageNumberState uint8
+
+const (
+	usageNumberMissing usageNumberState = iota
+	usageNumberNull
+	usageNumberValid
+	usageNumberMalformed
+)
+
+type usageNumber struct {
+	state usageNumberState
+	value int
+}
+
 type StreamAccumulator struct {
 	content, reasoning, finish string
 	calls                      map[int]*partialCall
 	usage                      contract.Usage
+	promptTokens               usageNumber
+	completionTokens           usageNumber
+	totalTokens                usageNumber
+	deepSeekCacheRead          usageNumber
+	deepSeekCacheMiss          usageNumber
+	openAICacheRead            usageNumber
+	usageDiagnostics           []string
 	malformed                  int
 	received                   bool
 	onToken, onReasoning       func(string)
@@ -44,15 +67,30 @@ func (a *StreamAccumulator) ConsumeLine(raw string) error {
 		return nil
 	}
 	var chunk map[string]any
-	if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(&chunk); err != nil {
 		a.malformed++
 		if a.malformed > 20 {
 			return fmt.Errorf("provider stream is not valid SSE JSON: %w", err)
 		}
 		return nil
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		a.malformed++
+		if a.malformed > 20 {
+			if err == nil {
+				err = fmt.Errorf("multiple JSON values")
+			}
+			return fmt.Errorf("provider stream is not valid SSE JSON: %w", err)
+		}
+		return nil
+	}
 	a.received = true
-	a.mergeUsage(chunk["usage"])
+	if usage, ok := chunk["usage"]; ok {
+		a.mergeUsage(usage)
+	}
 	choices, _ := chunk["choices"].([]any)
 	for _, rawChoice := range choices {
 		choice, _ := rawChoice.(map[string]any)
@@ -145,29 +183,136 @@ func (a *StreamAccumulator) ingestCalls(value any) {
 }
 
 func (a *StreamAccumulator) mergeUsage(value any) {
-	raw, _ := value.(map[string]any)
-	if raw == nil {
+	if value == nil {
 		return
 	}
-	if value, ok := numberValue(raw["prompt_tokens"]); ok {
-		a.usage.PromptTokens = value
+	raw, ok := value.(map[string]any)
+	if !ok {
+		a.addUsageDiagnostic("usage must be an object")
+		a.rebuildUsage()
+		return
 	}
-	if value, ok := numberValue(raw["completion_tokens"]); ok {
-		a.usage.CompletionTokens = value
+	a.mergeUsageNumber(&a.promptTokens, raw, "prompt_tokens", "usage.prompt_tokens")
+	a.mergeUsageNumber(&a.completionTokens, raw, "completion_tokens", "usage.completion_tokens")
+	a.mergeUsageNumber(&a.totalTokens, raw, "total_tokens", "usage.total_tokens")
+	a.mergeUsageNumber(&a.deepSeekCacheRead, raw, "prompt_cache_hit_tokens", "usage.prompt_cache_hit_tokens")
+	a.mergeUsageNumber(&a.deepSeekCacheMiss, raw, "prompt_cache_miss_tokens", "usage.prompt_cache_miss_tokens")
+
+	if detailsValue, exists := raw["prompt_tokens_details"]; exists {
+		switch details := detailsValue.(type) {
+		case nil:
+			a.openAICacheRead = usageNumber{state: usageNumberNull}
+		case map[string]any:
+			a.mergeUsageNumber(&a.openAICacheRead, details, "cached_tokens", "usage.prompt_tokens_details.cached_tokens")
+		default:
+			a.openAICacheRead = usageNumber{state: usageNumberMalformed}
+			a.addUsageDiagnostic("usage.prompt_tokens_details must be an object")
+		}
 	}
-	if value, ok := numberValue(raw["total_tokens"]); ok {
-		a.usage.TotalTokens = value
+	a.rebuildUsage()
+}
+
+func (a *StreamAccumulator) mergeUsageNumber(target *usageNumber, raw map[string]any, key, path string) {
+	value, exists := raw[key]
+	if !exists {
+		return
 	}
-	cached := 0
-	if details, ok := raw["prompt_tokens_details"].(map[string]any); ok {
-		cached, _ = numberValue(details["cached_tokens"])
+	if value == nil {
+		*target = usageNumber{state: usageNumberNull}
+		return
 	}
-	if deepseek, ok := numberValue(raw["prompt_cache_hit_tokens"]); ok && deepseek > cached {
-		cached = deepseek
+	number, ok := numberValue(value)
+	if !ok {
+		*target = usageNumber{state: usageNumberMalformed}
+		a.addUsageDiagnostic(path + " must be an integer")
+		return
 	}
-	if cached > 0 {
-		a.usage.CachedTokens = cached
+	*target = usageNumber{state: usageNumberValid, value: number}
+}
+
+func (a *StreamAccumulator) rebuildUsage() {
+	usage := contract.Usage{}
+	if a.promptTokens.state == usageNumberValid {
+		usage.PromptTokens = a.promptTokens.value
+		usage.PromptTokensAvailable = true
 	}
+	if a.completionTokens.state == usageNumberValid {
+		usage.CompletionTokens = a.completionTokens.value
+		usage.CompletionTokensAvailable = true
+	}
+	if a.totalTokens.state == usageNumberValid {
+		usage.TotalTokens = a.totalTokens.value
+	}
+
+	readBlocked := false
+	switch a.deepSeekCacheRead.state {
+	case usageNumberValid:
+		setCacheRead(&usage, a.deepSeekCacheRead.value)
+	case usageNumberMalformed:
+		readBlocked = true
+	}
+	if usage.CacheReadTokens == nil && !readBlocked && a.openAICacheRead.state == usageNumberValid {
+		setCacheRead(&usage, a.openAICacheRead.value)
+	}
+
+	switch a.deepSeekCacheMiss.state {
+	case usageNumberValid:
+		miss := a.deepSeekCacheMiss.value
+		usage.CacheMissTokens = &miss
+	case usageNumberMissing, usageNumberNull:
+		if a.openAICacheRead.state == usageNumberValid && usage.PromptTokensAvailable && usage.CacheReadTokens != nil {
+			miss, ok := subtractInt(usage.PromptTokens, *usage.CacheReadTokens)
+			if ok {
+				usage.CacheMissTokens = &miss
+				usage.MissDerived = true
+			} else {
+				usage.Contradictory = true
+				a.addUsageDiagnostic("derived cache miss exceeds the integer range")
+			}
+		}
+	}
+
+	if a.promptTokens.state == usageNumberValid && a.deepSeekCacheRead.state == usageNumberValid && a.deepSeekCacheMiss.state == usageNumberValid &&
+		!sumEquals(a.deepSeekCacheRead.value, a.deepSeekCacheMiss.value, a.promptTokens.value) {
+		usage.Contradictory = true
+	}
+	if a.promptTokens.state == usageNumberValid && a.openAICacheRead.state == usageNumberValid && a.openAICacheRead.value > a.promptTokens.value {
+		usage.Contradictory = true
+	}
+	if usage.PromptTokensAvailable && usage.PromptTokens < 0 || usage.CacheReadTokens != nil && *usage.CacheReadTokens < 0 || usage.CacheMissTokens != nil && *usage.CacheMissTokens < 0 {
+		usage.Contradictory = true
+	}
+	usage.Diagnostic = strings.Join(a.usageDiagnostics, "; ")
+	a.usage = usage
+}
+
+func (a *StreamAccumulator) addUsageDiagnostic(message string) {
+	for _, existing := range a.usageDiagnostics {
+		if existing == message {
+			return
+		}
+	}
+	a.usageDiagnostics = append(a.usageDiagnostics, message)
+}
+
+func setCacheRead(usage *contract.Usage, value int) {
+	read := value
+	usage.CacheReadTokens = &read
+	usage.CachedTokens = read
+}
+
+func subtractInt(left, right int) (int, bool) {
+	if right > 0 && left < minInt+right || right < 0 && left > maxInt+right {
+		return 0, false
+	}
+	return left - right, true
+}
+
+func sumEquals(left, right, expected int) bool {
+	if right > 0 && left > maxInt-right || right < 0 && left < minInt-right {
+		return false
+	}
+	return left+right == expected
 }
 
 func stringValue(value any) string {
@@ -178,13 +323,54 @@ func stringValue(value any) string {
 func numberValue(value any) (int, bool) {
 	switch number := value.(type) {
 	case float64:
+		if math.IsNaN(number) || math.IsInf(number, 0) || math.Trunc(number) != number || number < float64(minInt) || number >= -float64(minInt) {
+			return 0, false
+		}
 		return int(number), true
+	case float32:
+		return numberValue(float64(number))
 	case json.Number:
 		value, err := number.Int64()
-		return int(value), err == nil
+		if err != nil || int64(int(value)) != value {
+			return 0, false
+		}
+		return int(value), true
 	case int:
 		return number, true
+	case int8:
+		return int(number), true
+	case int16:
+		return int(number), true
+	case int32:
+		return int(number), true
+	case int64:
+		if int64(int(number)) != number {
+			return 0, false
+		}
+		return int(number), true
+	case uint:
+		if uint64(number) > uint64(maxInt) {
+			return 0, false
+		}
+		return int(number), true
+	case uint8:
+		return int(number), true
+	case uint16:
+		return int(number), true
+	case uint32:
+		if uint64(number) > uint64(maxInt) {
+			return 0, false
+		}
+		return int(number), true
+	case uint64:
+		if number > uint64(maxInt) {
+			return 0, false
+		}
+		return int(number), true
 	default:
 		return 0, false
 	}
 }
+
+const maxInt = int(^uint(0) >> 1)
+const minInt = -maxInt - 1

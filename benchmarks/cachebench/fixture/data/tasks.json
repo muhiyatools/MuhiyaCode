@@ -1,0 +1,5 @@
+[
+  {"id": 1, "title": "Document the cache benchmark", "status": "done"},
+  {"id": 2, "title": "Add deterministic stats output", "status": "doing"},
+  {"id": 3, "title": "Cover invalid JSON errors", "status": "todo"}
+]

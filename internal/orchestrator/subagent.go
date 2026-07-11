@@ -89,7 +89,7 @@ func (e *Engine) runSubagentTool(ctx context.Context, raw json.RawMessage) (stri
 	if result.Status == "done" && len(result.Report) >= 80 && (input.Agent == "explore" || input.Agent == "plan") && e.knowledge != nil {
 		e.knowledge.AddReport(input.Agent, input.Title, input.Task, result.Report)
 	}
-	e.addAgentUsage(result.Usage)
+	e.addTaskAgentUsage(result.Usage)
 	if e.persistence.AddEvent != nil {
 		summary, _ := json.Marshal(map[string]any{"runId": result.RunID, "agent": result.Agent, "title": result.Title, "status": result.Status, "turns": result.Turns, "toolCalls": result.ToolCalls, "usage": result.Usage, "task": truncateEllipsis(input.Task, 2000), "report": truncateEllipsis(result.Report, 4000)})
 		_ = e.persistence.AddEvent(ctx, "agent", "run_summary", e.redact(string(summary)))
@@ -129,6 +129,11 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 	for turn := 1; turn <= maxTurns; turn++ {
 		result.Turns = turn
 		response, err := e.provider.Chat(ctx, contract.ChatRequest{Messages: messages, Tools: definitions, ModelID: modelID, Reasoning: Profile(e.effort()).AgentReasoning})
+		if usageErr := e.recordAuxUsage(ctx, modelID, response.Usage); usageErr != nil {
+			result.Status = "failed"
+			result.Report = "persist subagent usage: " + usageErr.Error()
+			break
+		}
 		if err != nil {
 			result.Status = statusFromContext(ctx, "failed")
 			result.Report = err.Error()

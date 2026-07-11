@@ -1,0 +1,21 @@
+Prompt cache optimization starting gate
+Date: 2026-07-11
+Baseline commit: d35e16f
+
+go mod verify
+PASS - all modules verified
+
+go vet ./...
+PASS - no diagnostics
+
+go test ./... -count=1
+PASS
+  internal/command       0.596s
+  internal/gateway       3.634s
+  internal/mcpclient     0.454s
+  internal/orchestrator  0.610s
+  internal/state         1.228s
+  internal/tui           0.965s
+  internal/workspace     0.986s
+
+Packages without tests: cmd/muhiyacode, internal/buildinfo, internal/contract.

@@ -76,6 +76,76 @@ func (s *Sessions) AppendTranscript(sessionID string, value map[string]any) erro
 	return file.Sync()
 }
 
+func (s *Sessions) AppendUsage(sessionID string, record contract.UsageRecord) error {
+	return s.appendJSONLine(sessionID, "usage.jsonl", record)
+}
+
+func (s *Sessions) UsageRecords(sessionID string) ([]contract.UsageRecord, error) {
+	return readSessionJSONLines[contract.UsageRecord](s.DB.paths, sessionID, "usage.jsonl")
+}
+
+func (s *Sessions) AppendInvalidation(sessionID string, event contract.InvalidationEvent) error {
+	return s.appendJSONLine(sessionID, "invalidations.jsonl", event)
+}
+
+func (s *Sessions) InvalidationEvents(sessionID string) ([]contract.InvalidationEvent, error) {
+	return readSessionJSONLines[contract.InvalidationEvent](s.DB.paths, sessionID, "invalidations.jsonl")
+}
+
+func (s *Sessions) appendJSONLine(sessionID, name string, value any) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	dir, err := SessionDir(s.DB.paths, sessionID)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	line, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+	file, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	if _, err := file.Write(append(line, '\n')); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
+func readSessionJSONLines[T any](paths Paths, sessionID, name string) ([]T, error) {
+	dir, err := SessionDir(paths, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(filepath.Join(dir, name))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var result []T
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	for line := 1; scanner.Scan(); line++ {
+		var value T
+		if err := json.Unmarshal(scanner.Bytes(), &value); err != nil {
+			return nil, fmt.Errorf("decode %s line %d: %w", name, line, err)
+		}
+		result = append(result, value)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read %s: %w", name, err)
+	}
+	return result, nil
+}
+
 func (s *Sessions) WritePlan(sessionID, content string) error {
 	dir, err := SessionDir(s.DB.paths, sessionID)
 	if err != nil {

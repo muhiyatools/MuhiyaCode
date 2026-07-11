@@ -22,14 +22,15 @@ import (
 )
 
 type ApplicationOptions struct {
-	Context     context.Context
-	Workspace   string
-	SessionID   string
-	NewSession  bool
-	Title       string
-	Callbacks   contract.Callbacks
-	DisableMCP  bool
-	MCPDeadline time.Duration
+	Context          context.Context
+	Workspace        string
+	SessionID        string
+	NewSession       bool
+	Title            string
+	Callbacks        contract.Callbacks
+	DisableMCP       bool
+	MCPDeadline      time.Duration
+	RawUsageObserver gateway.RawUsageObserver
 }
 
 // Application is the composition root for one CLI process. Packages below it
@@ -96,7 +97,7 @@ func OpenApplication(options ApplicationOptions) (*Application, error) {
 	if app.mcpWait <= 0 {
 		app.mcpWait = 900 * time.Millisecond
 	}
-	app.provider = gateway.NewOpenAICompatible(gateway.Config{Settings: settings, APIKey: secrets.ProviderAPIKey})
+	app.provider = gateway.NewOpenAICompatible(gateway.Config{Settings: settings, APIKey: secrets.ProviderAPIKey, RawUsageObserver: options.RawUsageObserver})
 	if secrets.ProviderAPIKey != "" {
 		active, ok := state.ActiveModel(settings)
 		if !ok || active.ContextLimit <= 0 {
@@ -428,6 +429,14 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	if err := a.sessions.ReadJSON(session.ID, "knowledge.json", orchestrator.KnowledgeSnapshot{Version: 1, Files: map[string]string{}}, &knowledgeSnapshot); err != nil {
 		return runtimeBundle{}, err
 	}
+	usageRecords, err := a.sessions.UsageRecords(session.ID)
+	if err != nil {
+		return runtimeBundle{}, fmt.Errorf("load session usage: %w", err)
+	}
+	invalidationEvents, err := a.sessions.InvalidationEvents(session.ID)
+	if err != nil {
+		return runtimeBundle{}, fmt.Errorf("load session invalidations: %w", err)
+	}
 	history := orchestrator.NewHistory(historySnapshot, func(value orchestrator.HistorySnapshot) error {
 		return a.sessions.WriteJSON(session.ID, "history.json", value)
 	})
@@ -509,15 +518,23 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			AppendTranscript: func(_ context.Context, value map[string]any) error {
 				return a.sessions.AppendTranscript(session.ID, value)
 			},
+			AppendUsage: func(_ context.Context, record contract.UsageRecord) error {
+				return a.sessions.AppendUsage(session.ID, record)
+			},
+			AppendInvalidation: func(_ context.Context, event contract.InvalidationEvent) error {
+				return a.sessions.AppendInvalidation(session.ID, event)
+			},
 			WritePlan: func(_ context.Context, content string) error { return a.sessions.WritePlan(session.ID, content) },
 		},
 		Prompt: orchestrator.PromptContext{
 			Workspace: session.WorkspacePath, Shell: shell, Date: time.Now().Format("2006-01-02"),
 			Model: active.Name, ModelAddendum: profile.PromptAddendum, SubagentModel: subagent.Name,
 		},
-		InitialPlan: parsePlan(planText),
-		Rescue:      gateway.RescueToolCalls,
-		Redact:      func(value string) string { return state.Redact(value, a.secrets) },
+		InitialPlan:          parsePlan(planText),
+		InitialUsageRecords:  usageRecords,
+		InitialInvalidations: invalidationEvents,
+		Rescue:               gateway.RescueToolCalls,
+		Redact:               func(value string) string { return state.Redact(value, a.secrets) },
 	})
 	if err != nil {
 		if manager != nil {

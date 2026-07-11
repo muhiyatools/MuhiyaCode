@@ -155,10 +155,17 @@ type FunctionDefinition struct {
 }
 
 type Usage struct {
-	PromptTokens     int `json:"promptTokens,omitempty"`
-	CompletionTokens int `json:"completionTokens,omitempty"`
-	TotalTokens      int `json:"totalTokens,omitempty"`
-	CachedTokens     int `json:"cachedTokens,omitempty"`
+	PromptTokens              int    `json:"promptTokens,omitempty"`
+	CompletionTokens          int    `json:"completionTokens,omitempty"`
+	TotalTokens               int    `json:"totalTokens,omitempty"`
+	CachedTokens              int    `json:"cachedTokens,omitempty"`
+	CacheReadTokens           *int   `json:"cacheReadTokens,omitempty"`
+	CacheMissTokens           *int   `json:"cacheMissTokens,omitempty"`
+	MissDerived               bool   `json:"missDerived,omitempty"`
+	Contradictory             bool   `json:"contradictory,omitempty"`
+	Diagnostic                string `json:"diagnostic,omitempty"`
+	PromptTokensAvailable     bool   `json:"-"`
+	CompletionTokensAvailable bool   `json:"-"`
 }
 
 func (u Usage) Add(next Usage) Usage {
@@ -167,11 +174,42 @@ func (u Usage) Add(next Usage) Usage {
 		total = next.PromptTokens + next.CompletionTokens
 	}
 	return Usage{
-		PromptTokens:     u.PromptTokens + next.PromptTokens,
-		CompletionTokens: u.CompletionTokens + next.CompletionTokens,
-		TotalTokens:      u.TotalTokens + total,
-		CachedTokens:     u.CachedTokens + next.CachedTokens,
+		PromptTokens:              u.PromptTokens + next.PromptTokens,
+		CompletionTokens:          u.CompletionTokens + next.CompletionTokens,
+		TotalTokens:               u.TotalTokens + total,
+		CachedTokens:              u.CachedTokens + next.CachedTokens,
+		CacheReadTokens:           addNullableInt(u.CacheReadTokens, next.CacheReadTokens),
+		CacheMissTokens:           addNullableInt(u.CacheMissTokens, next.CacheMissTokens),
+		MissDerived:               u.MissDerived || next.MissDerived,
+		Contradictory:             u.Contradictory || next.Contradictory,
+		Diagnostic:                joinDiagnostic(u.Diagnostic, next.Diagnostic),
+		PromptTokensAvailable:     u.PromptTokensAvailable || next.PromptTokensAvailable || u.PromptTokens != 0 || next.PromptTokens != 0,
+		CompletionTokensAvailable: u.CompletionTokensAvailable || next.CompletionTokensAvailable || u.CompletionTokens != 0 || next.CompletionTokens != 0,
 	}
+}
+
+func addNullableInt(left, right *int) *int {
+	if left == nil && right == nil {
+		return nil
+	}
+	total := 0
+	if left != nil {
+		total += *left
+	}
+	if right != nil {
+		total += *right
+	}
+	return &total
+}
+
+func joinDiagnostic(left, right string) string {
+	if left == "" {
+		return right
+	}
+	if right == "" || left == right {
+		return left
+	}
+	return left + "; " + right
 }
 
 type ChatRequest struct {

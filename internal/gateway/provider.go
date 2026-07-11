@@ -19,13 +19,24 @@ import (
 )
 
 type Config struct {
-	Settings        contract.Settings
-	APIKey          string
-	Client          *http.Client
-	IdleTimeout     time.Duration
-	RequestLifetime time.Duration
-	MaxRetries      int
+	Settings         contract.Settings
+	APIKey           string
+	Client           *http.Client
+	IdleTimeout      time.Duration
+	RequestLifetime  time.Duration
+	MaxRetries       int
+	RawUsageObserver RawUsageObserver
 }
+
+// RawUsagePayload exposes the provider's unmodified usage object for benchmark
+// ground-truth logs. It contains no authorization headers or API key.
+type RawUsagePayload struct {
+	At      time.Time       `json:"at"`
+	Model   string          `json:"model"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+type RawUsageObserver func(RawUsagePayload) error
 
 type OpenAICompatible struct {
 	mu     sync.RWMutex
@@ -153,8 +164,16 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	for scanner.Scan() {
 		idle.Reset(cfg.IdleTimeout)
-		if err := acc.ConsumeLine(scanner.Text()); err != nil {
+		line := scanner.Text()
+		if err := acc.ConsumeLine(line); err != nil {
 			return contract.ChatResponse{}, acc.ReceivedData(), 0, err
+		}
+		if cfg.RawUsageObserver != nil {
+			if usage, ok := rawUsageFromSSELine(line); ok {
+				if err := cfg.RawUsageObserver(RawUsagePayload{At: time.Now().UTC(), Model: model.ID, Payload: usage}); err != nil {
+					return contract.ChatResponse{}, acc.ReceivedData(), 0, fmt.Errorf("record raw provider usage: %w", err)
+				}
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -175,6 +194,26 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	visible, inlineReasoning := SplitThinkBlocks(result.Content)
 	reasoning := strings.TrimSpace(strings.Join(nonempty(result.Reasoning, inlineReasoning), "\n"))
 	return contract.ChatResponse{Content: visible, Reasoning: reasoning, ToolCalls: result.ToolCalls, Usage: result.Usage}, acc.ReceivedData(), 0, nil
+}
+
+func rawUsageFromSSELine(line string) (json.RawMessage, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "data:") {
+		return nil, false
+	}
+	data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	if data == "" || data == "[DONE]" {
+		return nil, false
+	}
+	var envelope map[string]json.RawMessage
+	if json.Unmarshal([]byte(data), &envelope) != nil {
+		return nil, false
+	}
+	usage, exists := envelope["usage"]
+	if !exists {
+		return nil, false
+	}
+	return append(json.RawMessage(nil), usage...), true
 }
 
 func (p *OpenAICompatible) ListModels(ctx context.Context) ([]contract.Model, error) {

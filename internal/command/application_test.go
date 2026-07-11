@@ -92,6 +92,12 @@ func TestApplicationDiscoversModelRunsAndResumes(t *testing.T) {
 	if got := resumed.Runtime().Session.ID; got != sessionID {
 		t.Fatalf("resumed session %q, want %q", got, sessionID)
 	}
+	if aggregate := resumed.Runtime().Engine.UsageAggregate(); aggregate.Requests != 1 || aggregate.SumPrompt != 11 || aggregate.SumCompletion != 4 || aggregate.UnavailableRequests != 1 {
+		t.Fatalf("resumed usage aggregate = %+v", aggregate)
+	}
+	if usage := resumed.Runtime().Engine.Usage(); usage.TotalTokens != 15 {
+		t.Fatalf("resumed legacy usage = %+v", usage)
+	}
 	if events := resumed.Recent(); len(events) < 2 || events[len(events)-1].Content != "Hello from Go." {
 		t.Fatalf("resumed events = %#v", events)
 	}
