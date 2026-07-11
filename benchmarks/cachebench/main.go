@@ -336,7 +336,7 @@ func countUnattributed(records []contract.UsageRecord, events []contract.Invalid
 }
 
 func deriveCost(aggregate contract.SessionUsageAggregate, prices priceTable) *float64 {
-	if strings.TrimSpace(prices.Source) == "" {
+	if strings.TrimSpace(prices.Source) == "" || (prices.UncachedInputPerMillion == 0 && prices.CacheReadPerMillion == 0 && prices.OutputPerMillion == 0) {
 		return nil
 	}
 	cost := (float64(aggregate.SumCacheMiss)*prices.UncachedInputPerMillion +
