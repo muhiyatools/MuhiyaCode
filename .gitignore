@@ -1,0 +1,16 @@
+/bin/
+/dist/
+/coverage.out
+/*.exe
+*.test
+*.out
+*.prof
+*.log
+vendor/
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.idea/
+.vscode/
+tmp/
