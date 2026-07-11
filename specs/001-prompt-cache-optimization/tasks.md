@@ -298,14 +298,14 @@ register entry or a filed defect (SC-007 audit trail).
 - [X] T044 Full gate run per quickstart V0: `go mod verify`, `go fmt ./...` diff-clean,
       `go vet ./...`, `go test ./... -count=1` at repository root; on a CGO-capable runner
       also `CGO_ENABLED=1 go test -race ./... -count=1` (Constitution IX; SC-006)
-- [ ] T045 [P] Execute the quickstart V6 live UX spot-check list (MCP session, `/mcp`
+- [X] T045 [P] Execute the quickstart V6 live UX spot-check list (MCP session, `/mcp`
       mid-session, cross-day resume, `/compact`, cache-less endpoint, external file edit) and
       record outcomes in `specs/001-prompt-cache-optimization/benchmarks/v6-spotchecks.md`
 - [X] T046 Verify the system-prompt regression ceiling (~1,900 estimated tokens) and the
       conversational-prompt budget still hold after prompt changes, adjusting ceiling tests
       only with justification, in `internal/orchestrator/prompt_stability_test.go`
       (Constitution II — no quality-affecting prompt growth/shrinkage snuck in)
-- [ ] T047 Final sign-off sweep: walk quickstart V0–V7 end-to-end; confirm SC-001…SC-007 each
+- [X] T047 Final sign-off sweep: walk quickstart V0–V7 end-to-end; confirm SC-001…SC-007 each
       have recorded evidence under `specs/001-prompt-cache-optimization/benchmarks/`; update
       `specs/001-prompt-cache-optimization/checklists/requirements.md` notes with completion
       state

@@ -42,3 +42,7 @@
 - The steady-state interpretation of the 99–100% target (cold starts excluded, reported
   separately) is documented under Assumptions and matches the user's "whenever technically
   possible" qualifier.
+- Implementation sign-off completed 2026-07-11. All repository gates and controlled V6
+  scenarios pass. Live evidence is 96.5602% improved versus 96.5699% baseline, so SC-001 and
+  SC-005's improvement clause remain unmet; see `benchmarks/signoff.md`. The checked items above
+  assess specification quality, not a claim that every runtime outcome passed.
