@@ -9,7 +9,6 @@ type PromptContext struct {
 	Workspace     string
 	OS            string
 	Shell         string
-	Date          string
 	Model         string
 	ModelAddendum string
 	HasWeb        bool
@@ -18,7 +17,7 @@ type PromptContext struct {
 }
 
 // SystemPrompt is the single, session-stable instruction block. It is composed
-// only from session-invariant facts (workspace, OS, shell, date, model,
+// only from session-invariant facts (workspace, OS, shell, model,
 // capabilities) so its serialized bytes never change between turns or tasks in
 // a session. That byte-stability is what lets DeepSeek's implicit prefix cache
 // hit on every request after the first. All per-turn state — task class,
@@ -61,8 +60,8 @@ Stay inside the workspace unless the user explicitly permits outside access. Ref
 
 ENVIRONMENT
 Workspace: %s
-OS: %s | shell: %s | date: %s | model: %s
+OS: %s | shell: %s | model: %s
 Use shell-compatible commands. %s
 %s
-%s`, c.Workspace, c.OS, c.Shell, c.Date, c.Model, c.ModelAddendum, web, agents))
+%s`, c.Workspace, c.OS, c.Shell, c.Model, c.ModelAddendum, web, agents))
 }

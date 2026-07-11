@@ -19,6 +19,13 @@ type WebSearch struct {
 	Client  *http.Client
 }
 
+type WebSearchProbeResult string
+
+const (
+	WebSearchProbeSupported   WebSearchProbeResult = "supported"
+	WebSearchProbeUnsupported WebSearchProbeResult = "unsupported"
+)
+
 // WebSearchTool exposes gateway-hosted search through the common agent tool
 // boundary. The gateway remains responsible for retrieval and source policy.
 type WebSearchTool struct{ Searcher WebSearch }
@@ -50,6 +57,13 @@ func (t WebSearchTool) Execute(ctx context.Context, raw json.RawMessage) (string
 }
 
 func (w WebSearch) Supported(ctx context.Context) bool {
+	result, definitive, _ := w.Probe(ctx)
+	return definitive && result == WebSearchProbeSupported
+}
+
+// Probe distinguishes definitive capability results from transient transport
+// failures so callers can preserve a persisted last-good snapshot.
+func (w WebSearch) Probe(ctx context.Context) (WebSearchProbeResult, bool, error) {
 	if w.Client == nil {
 		w.Client = &http.Client{}
 	}
@@ -60,7 +74,7 @@ func (w WebSearch) Supported(ctx context.Context) bool {
 		w.headers(req)
 		response, err := w.Client.Do(req)
 		if err != nil {
-			return false
+			return "", false, err
 		}
 		var payload map[string]any
 		_ = json.NewDecoder(response.Body).Decode(&payload)
@@ -69,21 +83,22 @@ func (w WebSearch) Supported(ctx context.Context) bool {
 			continue
 		}
 		if response.StatusCode < 200 || response.StatusCode >= 300 {
-			return false
+			return "", false, fmt.Errorf("capabilities probe returned %d", response.StatusCode)
 		}
 		if features, ok := payload["features"].(map[string]any); ok && features["web_search"] == true {
-			return true
+			return WebSearchProbeSupported, true, nil
 		}
 		if tools, ok := payload["tools"].([]any); ok {
 			for _, raw := range tools {
 				tool, _ := raw.(map[string]any)
 				if tool["name"] == "web_search" && tool["available"] != false {
-					return true
+					return WebSearchProbeSupported, true, nil
 				}
 			}
 		}
+		return WebSearchProbeUnsupported, true, nil
 	}
-	return false
+	return WebSearchProbeUnsupported, true, nil
 }
 
 func (w WebSearch) Search(ctx context.Context, args map[string]any) (string, error) {

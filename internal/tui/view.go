@@ -117,6 +117,9 @@ func (m *Model) renderActivity() string {
 	if m.usage.TotalTokens > 0 {
 		status += "  " + m.palette.faint.Render(formatTokens(m.usage.TotalTokens)+" tokens")
 	}
+	if tag := cacheTag(m.usage); tag != "" {
+		status += "  " + m.palette.brandSoft.Render(tag)
+	}
 	lines := []string{fitLine(" "+mark+" "+m.palette.muted.Render(status), m.width)}
 	if m.reasoning != "" {
 		lines = append(lines, fitLine("   "+m.palette.faint.Render("· "+oneLine(m.reasoning, max(12, m.width-8))), m.width))
@@ -574,13 +577,38 @@ func diffLines(output string) []string {
 
 func taskSummary(stats contract.TaskStats) string {
 	parts := []string{formatDuration(time.Duration(stats.DurationMS) * time.Millisecond), string(stats.Effort), stats.TaskClass, formatTokens(stats.Usage.TotalTokens) + " billed", fmt.Sprintf("%d tools", stats.ToolCalls)}
+	if stats.Usage.CacheReadTokens != nil && stats.Usage.CacheMissTokens != nil {
+		parts = append(parts, formatTokens(*stats.Usage.CacheReadTokens)+" cached", formatTokens(*stats.Usage.CacheMissTokens)+" new")
+	} else {
+		parts = append(parts, "cache unavailable")
+	}
 	if stats.AgentRuns > 0 {
 		parts = append(parts, fmt.Sprintf("%d agents", stats.AgentRuns))
 	}
 	if len(stats.FilesChanged) > 0 {
 		parts = append(parts, fmt.Sprintf("%d files", len(stats.FilesChanged)))
 	}
+	if len(stats.Invalidations) > 0 {
+		event := stats.Invalidations[len(stats.Invalidations)-1]
+		parts = append(parts, fmt.Sprintf("cache prefix changed: %s (%s)", event.Cause, event.Scope))
+	}
 	return strings.Join(parts, " · ")
+}
+
+func cacheTag(usage contract.Usage) string {
+	if usage.CacheReadTokens == nil || usage.CacheMissTokens == nil {
+		return ""
+	}
+	rate := contract.HitRate(usage.CacheReadTokens, usage.CacheMissTokens)
+	label := "cache n/a"
+	if rate != nil {
+		label = fmt.Sprintf("cache %.0f%%", *rate*100)
+	}
+	newLabel := formatTokens(*usage.CacheMissTokens) + " new"
+	if usage.MissDerived {
+		newLabel += " derived"
+	}
+	return fmt.Sprintf("%s (%s read / %s)", label, formatTokens(*usage.CacheReadTokens), newLabel)
 }
 
 func modelDisplay(settings *contract.Settings, id string) string {

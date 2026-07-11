@@ -25,7 +25,7 @@ func TestEngineExecutesToolAndFinalizes(t *testing.T) {
 			events = append(events, role+":"+kind)
 			return nil
 		}},
-		Prompt: PromptContext{Shell: "pwsh", Date: "2026-07-10", Model: "test"},
+		Prompt: PromptContext{Shell: "pwsh", Model: "test"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -55,7 +55,7 @@ func TestEngineExecutesToolAndFinalizes(t *testing.T) {
 func TestEngineChatUsesStablePromptAndTools(t *testing.T) {
 	provider := &scriptedProvider{responses: []contract.ChatResponse{{Content: "Hello."}}}
 	settings := engineSettings()
-	engine, _ := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "s", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{Date: "2026-07-10"}})
+	engine, _ := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "s", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{}})
 	answer, stats, err := engine.Run(context.Background(), "hi")
 	if err != nil || answer != "Hello." || stats.TaskClass != "chat" {
 		t.Fatalf("answer=%q stats=%+v err=%v", answer, stats, err)
@@ -83,7 +83,7 @@ func TestEngineHiTwiceKeepsStablePrefix(t *testing.T) {
 	provider := &scriptedProvider{responses: []contract.ChatResponse{{Content: "Hi there!"}, {Content: "Hello again!"}}}
 	settings := engineSettings()
 	settings.Effort = contract.EffortLow
-	engine, _ := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "s", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{Date: "2026-07-11", Model: "deepseek-v4-pro"}})
+	engine, _ := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "s", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{Model: "deepseek-v4-pro"}})
 	if _, _, err := engine.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}

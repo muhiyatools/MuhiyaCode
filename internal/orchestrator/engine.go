@@ -17,14 +17,10 @@ import (
 )
 
 const (
-	outputReserveTokens = 12_000
-	hardTurnCeiling     = 120
-	maxPlanContinues    = 8
-	// History-rewrite pressure gates. Below these fractions of the context
-	// window, settled history is never rewritten so the DeepSeek prefix cache
-	// keeps hitting across turns and tasks.
-	foldPressureRatio = 0.55
-	trimPressureRatio = 0.65
+	outputReserveTokens   = 12_000
+	hardTurnCeiling       = 120
+	maxPlanContinues      = 8
+	maintenanceFloorRatio = 0.60
 )
 
 type Persistence struct {
@@ -36,6 +32,13 @@ type Persistence struct {
 }
 
 type RescueFunc func(string, []string) ([]contract.ToolCall, string)
+
+type BoundaryToolChange struct {
+	Tools []contract.Tool
+	Scope string
+}
+
+type BoundaryToolSource func() (BoundaryToolChange, bool, error)
 
 type EngineConfig struct {
 	Settings             *contract.Settings
@@ -52,24 +55,26 @@ type EngineConfig struct {
 	InitialPlan          contract.Plan
 	InitialUsageRecords  []contract.UsageRecord
 	InitialInvalidations []contract.InvalidationEvent
+	BoundaryTools        BoundaryToolSource
 	Rescue               RescueFunc
 	Redact               func(string) string
 }
 
 type Engine struct {
-	settings    *contract.Settings
-	secrets     contract.Secrets
-	session     contract.Session
-	provider    contract.Provider
-	registry    *Registry
-	history     *History
-	inspection  *InspectionLedger
-	knowledge   *Knowledge
-	callbacks   contract.Callbacks
-	persistence Persistence
-	prompt      PromptContext
-	rescue      RescueFunc
-	redactFn    func(string) string
+	settings      *contract.Settings
+	secrets       contract.Secrets
+	session       contract.Session
+	provider      contract.Provider
+	registry      *Registry
+	history       *History
+	inspection    *InspectionLedger
+	knowledge     *Knowledge
+	callbacks     contract.Callbacks
+	persistence   Persistence
+	prompt        PromptContext
+	rescue        RescueFunc
+	redactFn      func(string) string
+	boundaryTools BoundaryToolSource
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -85,29 +90,39 @@ type Engine struct {
 	planMu   sync.Mutex
 	planMode bool
 
-	taskMu          sync.Mutex
-	sessionUsage    contract.Usage
-	usageRecords    []contract.UsageRecord
-	usageAggregate  contract.SessionUsageAggregate
-	requestSeq      int
-	firstAfterStart bool
-	lastShape       *PrefixShape
-	invalidations   *InvalidationLedger
-	taskAgentUsage  contract.Usage
-	taskAgentRuns   int
-	taskAgentReused int
-	taskAgentCap    int
-	taskPeakContext float64
-	taskDuplicates  int
-	taskOverBudget  int
-	runCounter      int
-	callCounts      map[string]int
+	taskMu                sync.Mutex
+	sessionUsage          contract.Usage
+	usageRecords          []contract.UsageRecord
+	usageAggregate        contract.SessionUsageAggregate
+	requestSeq            int
+	firstAfterStart       bool
+	lastShape             *PrefixShape
+	invalidations         *InvalidationLedger
+	latestPromptTokens    int
+	latestPromptAvailable bool
+	maintenancePasses     int
+	maintenanceLatched    bool
+	taskAgentUsage        contract.Usage
+	taskAgentRuns         int
+	taskAgentReused       int
+	taskAgentCap          int
+	taskPeakContext       float64
+	taskDuplicates        int
+	taskOverBudget        int
+	runCounter            int
+	callCounts            map[string]int
 }
 
 type toolOutcome struct {
 	Call   contract.ToolCall
 	Output string
 	Failed bool
+}
+
+type pressureSnapshot struct {
+	Tokens    int
+	Estimated bool
+	Ratio     float64
 }
 
 func NewEngine(config EngineConfig) (*Engine, error) {
@@ -126,31 +141,38 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 	usageRecords := append([]contract.UsageRecord(nil), config.InitialUsageRecords...)
 	aggregate := contract.AggregateUsage(usageRecords)
 	requestSeq := 0
+	latestPromptTokens, latestPromptAvailable := 0, false
 	for _, record := range usageRecords {
 		requestSeq = max(requestSeq, record.Seq)
+		if record.PromptTokens != nil {
+			latestPromptTokens, latestPromptAvailable = *record.PromptTokens, true
+		}
 	}
 	ledger := NewInvalidationLedger(config.InitialInvalidations, config.Persistence.AppendInvalidation)
 	return &Engine{
-		settings:        config.Settings,
-		secrets:         config.Secrets,
-		session:         config.Session,
-		provider:        config.Provider,
-		registry:        config.Registry,
-		history:         config.History,
-		inspection:      config.Inspection,
-		knowledge:       config.Knowledge,
-		callbacks:       config.Callbacks,
-		persistence:     config.Persistence,
-		prompt:          config.Prompt,
-		plan:            config.InitialPlan,
-		rescue:          config.Rescue,
-		redactFn:        config.Redact,
-		sessionUsage:    usageFromAggregate(aggregate),
-		usageRecords:    usageRecords,
-		usageAggregate:  aggregate,
-		requestSeq:      requestSeq,
-		firstAfterStart: true,
-		invalidations:   ledger,
+		settings:              config.Settings,
+		secrets:               config.Secrets,
+		session:               config.Session,
+		provider:              config.Provider,
+		registry:              config.Registry,
+		history:               config.History,
+		inspection:            config.Inspection,
+		knowledge:             config.Knowledge,
+		callbacks:             config.Callbacks,
+		persistence:           config.Persistence,
+		prompt:                config.Prompt,
+		plan:                  config.InitialPlan,
+		rescue:                config.Rescue,
+		redactFn:              config.Redact,
+		boundaryTools:         config.BoundaryTools,
+		sessionUsage:          usageFromAggregate(aggregate),
+		usageRecords:          usageRecords,
+		usageAggregate:        aggregate,
+		requestSeq:            requestSeq,
+		firstAfterStart:       true,
+		invalidations:         ledger,
+		latestPromptTokens:    latestPromptTokens,
+		latestPromptAvailable: latestPromptAvailable,
 	}, nil
 }
 
@@ -166,6 +188,53 @@ func (e *Engine) SetEffort(level contract.EffortLevel) {
 	e.effortMu.Lock()
 	e.settings.Effort = level
 	e.effortMu.Unlock()
+}
+
+// SwitchModel applies a user-requested model change only at an idle task
+// boundary, refreshes the model-dependent prompt fields, and records the
+// invalidation before the next request can transmit the new prefix.
+func (e *Engine) SwitchModel(ctx context.Context, role, id, name, addendum string) error {
+	e.mu.Lock()
+	if e.cancel != nil {
+		e.mu.Unlock()
+		return errors.New("cannot switch models while a task is running")
+	}
+	oldPrompt := e.prompt
+	oldMain, oldSubagent := e.settings.Provider.ActiveModelID, e.settings.Provider.SubagentModelID
+	old := oldMain
+	if role == "subagent" {
+		old = oldSubagent
+		if old == id {
+			e.mu.Unlock()
+			return nil
+		}
+		e.settings.Provider.SubagentModelID = id
+		e.prompt.SubagentModel = name
+	} else {
+		role = "main"
+		if old == id {
+			e.mu.Unlock()
+			return nil
+		}
+		e.settings.Provider.ActiveModelID = id
+		e.prompt.Model = name
+		e.prompt.ModelAddendum = addendum
+	}
+	e.mu.Unlock()
+
+	event := contract.InvalidationEvent{
+		Cause: contract.InvalidationModelSwitch, Trigger: contract.InvalidationUserAction,
+		Scope: fmt.Sprintf("%s model changed from %s to %s", role, old, id), RequestSeq: e.nextRequestSeq(),
+	}
+	if err := e.recordInvalidation(ctx, event); err != nil {
+		e.mu.Lock()
+		e.settings.Provider.ActiveModelID = oldMain
+		e.settings.Provider.SubagentModelID = oldSubagent
+		e.prompt = oldPrompt
+		e.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
 func (e *Engine) effort() contract.EffortLevel {
@@ -248,32 +317,52 @@ func (e *Engine) Compact(ctx context.Context) (string, error) {
 	if e.IsBusy() {
 		return "", errors.New("cannot compact while a task is running")
 	}
+	pressure := e.contextPressure()
 	if err := e.compact(ctx, "manual"); err != nil {
 		return "", err
 	}
+	if err := e.recordInvalidation(ctx, contract.InvalidationEvent{
+		Cause: contract.InvalidationUserCompact, Trigger: contract.InvalidationUserAction,
+		Scope: "user requested /compact", Pressure: floatPointer(pressure.Ratio), RequestSeq: e.nextRequestSeq(),
+	}); err != nil {
+		return "", err
+	}
+	e.resetMaintenanceLatch()
 	e.emitContext(0)
 	return "Conversation compacted.", nil
 }
 
 type ContextReport struct {
-	HistoryTokens  int
-	ContextLimit   int
-	Percent        float64
-	Usage          contract.Usage
-	UsageAggregate contract.SessionUsageAggregate
-	Invalidations  []contract.InvalidationEvent
+	HistoryTokens      int
+	ContextLimit       int
+	Percent            float64
+	Usage              contract.Usage
+	UsageAggregate     contract.SessionUsageAggregate
+	Invalidations      []contract.InvalidationEvent
+	PressureTokens     int
+	PressureEstimated  bool
+	PressurePercent    float64
+	MaintenanceLatched bool
 }
 
 func (e *Engine) ContextReport() ContextReport {
 	history := e.history.EstimatedTokens()
 	limit := e.contextLimit()
+	pressure := e.contextPressure()
+	e.taskMu.Lock()
+	latched := e.maintenanceLatched
+	e.taskMu.Unlock()
 	return ContextReport{
-		HistoryTokens:  history,
-		ContextLimit:   limit,
-		Percent:        float64(history) / float64(max(1, limit)) * 100,
-		Usage:          e.Usage(),
-		UsageAggregate: e.UsageAggregate(),
-		Invalidations:  e.InvalidationEvents(),
+		HistoryTokens:      history,
+		ContextLimit:       limit,
+		Percent:            float64(history) / float64(max(1, limit)) * 100,
+		Usage:              e.Usage(),
+		UsageAggregate:     e.UsageAggregate(),
+		Invalidations:      e.InvalidationEvents(),
+		PressureTokens:     pressure.Tokens,
+		PressureEstimated:  pressure.Estimated,
+		PressurePercent:    pressure.Ratio * 100,
+		MaintenanceLatched: latched,
 	}
 }
 
@@ -305,6 +394,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	}()
 	started := time.Now()
 	usageStart := e.Usage()
+	eventStart := len(e.InvalidationEvents())
 	profile := Profile(e.effort())
 	assessment := Classify(userPrompt, e.previous)
 	e.previous = assessment.Class
@@ -329,6 +419,9 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	e.taskPeakContext = 0
 	e.callCounts = make(map[string]int)
 	e.taskMu.Unlock()
+	if err := e.applyBoundaryToolChange(ctx); err != nil {
+		return "", stats, err
+	}
 	filesChanged := make(map[string]bool)
 	toolCalls, checksRun, turns, folded := 0, 0, 0, 0
 	doneCriteria := ""
@@ -336,6 +429,10 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		e.taskMu.Lock()
 		stats = contract.TaskStats{DurationMS: time.Since(started).Milliseconds(), Effort: profile.Level, TaskClass: string(assessment.Class), Usage: subtractUsage(e.sessionUsage, usageStart), AgentUsage: e.taskAgentUsage, PeakContextPercent: e.taskPeakContext, ToolCalls: toolCalls, AgentRuns: e.taskAgentRuns, AgentRunsReused: e.taskAgentReused, Turns: turns, ChecksRun: checksRun, FoldedTokens: folded, DisciplineScore: max(0, 100-min(24, e.taskDuplicates*8)-min(16, e.taskOverBudget*2)), DoneCriteria: doneCriteria}
 		e.taskMu.Unlock()
+		allEvents := e.InvalidationEvents()
+		if eventStart < len(allEvents) {
+			stats.Invalidations = append([]contract.InvalidationEvent(nil), allEvents[eventStart:]...)
+		}
 		for file := range filesChanged {
 			stats.FilesChanged = append(stats.FilesChanged, file)
 		}
@@ -345,17 +442,17 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		}
 	}()
 
-	// Fold prior tasks only under real context pressure. Rewriting settled
-	// history busts DeepSeek's prefix cache, so a session that stays well
-	// under its window keeps every earlier message byte-for-byte and reuses
-	// the whole cached prefix across tasks.
-	if e.history.EstimatedTokens() > int(float64(e.contextLimit())*foldPressureRatio) {
-		folded = e.history.FoldCompletedTasks()
-	}
 	if err := e.persistMessage(ctx, "user", "message", userPrompt, map[string]any{"role": "user", "content": userPrompt, "createdAt": time.Now().UTC().Format(time.RFC3339Nano)}); err != nil {
 		return "", stats, err
 	}
+	// Establish the boundary before maintenance so every completed prior task
+	// is eligible. Folding and trimming then commit as one rewrite/event.
 	e.history.MarkTaskStart()
+	maintenance, err := e.runMaintenanceBoundary(ctx, profile)
+	if err != nil {
+		return "", stats, err
+	}
+	folded = maintenance.FoldedTokens
 	brief := budget.Brief
 	if plan := e.planBlock(); plan != "" {
 		brief = plan + "\n" + brief
@@ -417,18 +514,35 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		}
 		if e.needsCompact(live) {
 			e.callbacks.EmitStatus("Compacting context...")
+			pressure := e.contextPressure()
 			if err := e.compact(ctx, "automatic: context nearly full"); err != nil {
 				e.history.Append(contract.Message{Role: contract.RoleSystem, Content: "Automatic compaction failed; continue using the bounded recent context."})
+			} else if err := e.recordInvalidation(ctx, contract.InvalidationEvent{
+				Cause: contract.InvalidationCompact, Trigger: contract.InvalidationPressure,
+				Scope: "automatic structured-summary compaction", Pressure: floatPointer(pressure.Ratio),
+				RequestSeq: e.nextRequestSeq(),
+			}); err != nil {
+				return "", stats, err
+			} else {
+				e.resetMaintenanceLatch()
 			}
 		}
 		// Trim aged tool payloads only when the window is genuinely filling.
 		// Trimming rewrites history and busts the prefix cache, so it must not
 		// run on every turn — only once pressure crosses the threshold.
-		if e.history.EstimatedTokens() > int(float64(e.contextLimit())*trimPressureRatio) {
-			e.history.TrimAged(live.KeepFullToolOutputs, live.TrimmedToolOutputChars, 4)
-		}
 		e.callbacks.EmitStatus("Thinking...")
-		messages := e.history.BuildRequest(promptText, e.contextLimit(), outputReserveTokens)
+		built := e.history.BuildRequestWithMetadata(promptText, e.contextLimit(), outputReserveTokens)
+		if built.WindowDropped {
+			pressure := e.contextPressure()
+			if err := e.recordInvalidation(ctx, contract.InvalidationEvent{
+				Cause: contract.InvalidationWindowDrop, Trigger: contract.InvalidationPressure,
+				Scope:    fmt.Sprintf("request window dropped %d previously transmitted unit(s)", built.DroppedUnits),
+				Pressure: floatPointer(pressure.Ratio), RequestSeq: e.nextRequestSeq(),
+			}); err != nil {
+				return "", stats, err
+			}
+		}
+		messages := built.Messages
 		shape, err := NewPrefixShape(promptText, definitions, e.history.RewriteVersion(), e.settings.Provider.ActiveModelID)
 		if err != nil {
 			return "", stats, fmt.Errorf("compute request prefix shape: %w", err)
@@ -453,7 +567,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		}
 		e.lastShape = &shape
 		if e.callbacks.Usage != nil {
-			e.callbacks.Usage(e.Usage())
+			e.callbacks.Usage(response.Usage)
 		}
 		e.emitContext(response.Usage.PromptTokens)
 		if doneCriteria == "" {
@@ -552,9 +666,10 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 // from the task brief (e.g. agents<=0) and is enforced at execution time, not
 // by adding or removing schemas.
 func (e *Engine) sessionDefinitions() []contract.ToolDefinition {
-	definitions := e.registry.Definitions(nil)
+	definitions := e.registry.BaseDefinitions(nil)
 	definitions = append(definitions, updatePlanDefinition(), askUserDefinition(), proposeChangesDefinition())
 	definitions = append(definitions, runSubagentDefinition(e.subagentSpecs()))
+	definitions = append(definitions, e.registry.MCPDefinitions(nil)...)
 	return definitions
 }
 
@@ -826,8 +941,102 @@ func (e *Engine) compact(ctx context.Context, reason string) error {
 }
 
 func (e *Engine) needsCompact(profile EffortProfile) bool {
+	return e.contextPressure().Ratio >= profile.CompactThreshold
+}
+
+func (e *Engine) contextPressure() pressureSnapshot {
+	e.taskMu.Lock()
+	reported, available := e.latestPromptTokens, e.latestPromptAvailable
+	e.taskMu.Unlock()
+	input := e.history.PressureInput(reported, available)
 	usable := max(8000, e.contextLimit()-outputReserveTokens)
-	return float64(e.history.EstimatedTokens()) > float64(usable)*profile.CompactThreshold
+	return pressureSnapshot{Tokens: input.Tokens, Estimated: input.Estimated, Ratio: float64(input.Tokens) / float64(usable)}
+}
+
+func (e *Engine) runMaintenanceBoundary(ctx context.Context, profile EffortProfile) (MaintenanceResult, error) {
+	pressure := e.contextPressure()
+	e.taskMu.Lock()
+	if pressure.Ratio < maintenanceFloorRatio {
+		e.maintenancePasses = 0
+		e.maintenanceLatched = false
+		e.taskMu.Unlock()
+		return MaintenanceResult{}, nil
+	}
+	latched := e.maintenanceLatched
+	e.taskMu.Unlock()
+	if latched {
+		return MaintenanceResult{}, nil
+	}
+
+	result := e.history.Maintain(profile.KeepFullToolOutputs, profile.TrimmedToolOutputChars, 4)
+	if !result.Changed {
+		return result, nil
+	}
+	cause := contract.InvalidationTrim
+	parts := make([]string, 0, 2)
+	if result.Folded {
+		cause = contract.InvalidationFold
+		parts = append(parts, fmt.Sprintf("folded completed-task context; reduced %d estimated token(s)", result.FoldedTokens))
+	}
+	if result.TrimmedTools > 0 {
+		parts = append(parts, fmt.Sprintf("trimmed %d aged tool result(s)", result.TrimmedTools))
+	}
+	if err := e.recordInvalidation(ctx, contract.InvalidationEvent{
+		Cause: cause, Trigger: contract.InvalidationPressure, Scope: strings.Join(parts, "; "),
+		Pressure: floatPointer(pressure.Ratio), RequestSeq: e.nextRequestSeq(),
+	}); err != nil {
+		return result, err
+	}
+	e.taskMu.Lock()
+	e.maintenancePasses++
+	if e.maintenancePasses >= 2 {
+		e.maintenanceLatched = true
+	}
+	e.taskMu.Unlock()
+	return result, nil
+}
+
+func (e *Engine) applyBoundaryToolChange(ctx context.Context) error {
+	if e.boundaryTools == nil {
+		return nil
+	}
+	change, changed, err := e.boundaryTools()
+	if err != nil || !changed {
+		return err
+	}
+	if err := e.recordInvalidation(ctx, contract.InvalidationEvent{
+		Cause: contract.InvalidationToolsetChange, Trigger: contract.InvalidationBoundary,
+		Scope: change.Scope, RequestSeq: e.nextRequestSeq(),
+	}); err != nil {
+		return err
+	}
+	e.registry.ReplacePrefix("mcp__", change.Tools...)
+	return nil
+}
+
+func (e *Engine) recordInvalidation(ctx context.Context, event contract.InvalidationEvent) error {
+	if e.invalidations == nil {
+		return errors.New("invalidation ledger is unavailable")
+	}
+	return e.invalidations.Record(ctx, event)
+}
+
+func (e *Engine) nextRequestSeq() int {
+	e.taskMu.Lock()
+	defer e.taskMu.Unlock()
+	return e.requestSeq + 1
+}
+
+func (e *Engine) resetMaintenanceLatch() {
+	e.taskMu.Lock()
+	e.maintenancePasses = 0
+	e.maintenanceLatched = false
+	e.taskMu.Unlock()
+}
+
+func floatPointer(value float64) *float64 {
+	copy := value
+	return &copy
 }
 
 func (e *Engine) contextLimit() int {
@@ -918,6 +1127,10 @@ func (e *Engine) recordMainUsage(ctx context.Context, model string, usage contra
 	if err := e.appendUsageLocked(ctx, &record); err != nil {
 		return err
 	}
+	if usage.PromptTokensAvailable || usage.PromptTokens != 0 {
+		e.latestPromptTokens = usage.PromptTokens
+		e.latestPromptAvailable = true
+	}
 	e.firstAfterStart = false
 	return nil
 }
@@ -926,6 +1139,24 @@ func (e *Engine) recordAuxUsage(ctx context.Context, model string, usage contrac
 	e.taskMu.Lock()
 	defer e.taskMu.Unlock()
 	record := usageRecord(model, usage, nil, contract.CacheAttributionNA)
+	return e.appendUsageLocked(ctx, &record)
+}
+
+func (e *Engine) recordIsolatedUsage(ctx context.Context, model string, usage contract.Usage, coldStart bool, reasons []string) error {
+	e.taskMu.Lock()
+	defer e.taskMu.Unlock()
+	attribution := contract.CacheAttributionNA
+	if usage.CacheReadTokens != nil && usage.CacheMissTokens != nil {
+		switch {
+		case coldStart:
+			attribution = contract.CacheAttributionColdStart
+		case len(reasons) > 0:
+			attribution = contract.CacheAttributionAgent
+		default:
+			attribution = contract.CacheAttributionProvider
+		}
+	}
+	record := usageRecord(model, usage, reasons, attribution)
 	return e.appendUsageLocked(ctx, &record)
 }
 
@@ -1194,5 +1425,24 @@ func summarizeRead(output string) string {
 func filepathSlash(value string) string { return strings.ReplaceAll(value, "\\", "/") }
 
 func subtractUsage(total, before contract.Usage) contract.Usage {
-	return contract.Usage{PromptTokens: max(0, total.PromptTokens-before.PromptTokens), CompletionTokens: max(0, total.CompletionTokens-before.CompletionTokens), TotalTokens: max(0, total.TotalTokens-before.TotalTokens), CachedTokens: max(0, total.CachedTokens-before.CachedTokens)}
+	result := contract.Usage{
+		PromptTokens: max(0, total.PromptTokens-before.PromptTokens), CompletionTokens: max(0, total.CompletionTokens-before.CompletionTokens),
+		TotalTokens: max(0, total.TotalTokens-before.TotalTokens), CachedTokens: max(0, total.CachedTokens-before.CachedTokens),
+		PromptTokensAvailable: total.PromptTokensAvailable, CompletionTokensAvailable: total.CompletionTokensAvailable,
+	}
+	if total.CacheReadTokens != nil {
+		value := *total.CacheReadTokens
+		if before.CacheReadTokens != nil {
+			value -= *before.CacheReadTokens
+		}
+		result.CacheReadTokens = &value
+	}
+	if total.CacheMissTokens != nil {
+		value := *total.CacheMissTokens
+		if before.CacheMissTokens != nil {
+			value -= *before.CacheMissTokens
+		}
+		result.CacheMissTokens = &value
+	}
+	return result
 }

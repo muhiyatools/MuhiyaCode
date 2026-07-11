@@ -114,7 +114,7 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 		maxTokens = profile.MaxOutputTokens
 	}
 	body := map[string]any{
-		"model": model.ID, "messages": input.Messages, "temperature": temperature,
+		"model": model.ID, "messages": replayMessages(input.Messages, profile, input.Reasoning), "temperature": temperature,
 		"top_p": profile.TopP, "max_tokens": maxTokens, "stream": true,
 		"stream_options": map[string]any{"include_usage": true},
 	}
@@ -194,6 +194,21 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	visible, inlineReasoning := SplitThinkBlocks(result.Content)
 	reasoning := strings.TrimSpace(strings.Join(nonempty(result.Reasoning, inlineReasoning), "\n"))
 	return contract.ChatResponse{Content: visible, Reasoning: reasoning, ToolCalls: result.ToolCalls, Usage: result.Usage}, acc.ReceivedData(), 0, nil
+}
+
+func replayMessages(messages []contract.Message, profile ModelProfile, reasoning contract.ReasoningTier) []contract.Message {
+	result := make([]contract.Message, len(messages))
+	copy(result, messages)
+	for index := range result {
+		// Never replay captured reasoning. DeepSeek thinking-mode tool-call
+		// turns require the key to exist, so emit only the minimal empty form.
+		result[index].ReasoningContent = nil
+		if profile.Family == "deepseek" && reasoning != "" && result[index].Role == contract.RoleAssistant && len(result[index].ToolCalls) > 0 {
+			empty := ""
+			result[index].ReasoningContent = &empty
+		}
+	}
+	return result
 }
 
 func rawUsageFromSSELine(line string) (json.RawMessage, bool) {

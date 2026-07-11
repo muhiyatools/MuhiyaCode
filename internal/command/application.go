@@ -43,6 +43,7 @@ type Application struct {
 	settings   *contract.Settings
 	secrets    contract.Secrets
 	provider   *gateway.OpenAICompatible
+	probeStore *state.ProbeStore
 	callbacks  contract.Callbacks
 	disableMCP bool
 	mcpWait    time.Duration
@@ -54,8 +55,6 @@ type Application struct {
 	activeCheckpoint *workspace.CheckpointStore
 	activeMCP        *mcpclient.Manager
 	activeRegistry   *orchestrator.Registry
-	webFingerprint   string
-	webSupported     bool
 }
 
 type runtimeBundle struct {
@@ -89,10 +88,15 @@ func OpenApplication(options ApplicationOptions) (*Application, error) {
 		return nil, err
 	}
 	store := &state.Sessions{DB: db, Secrets: secrets}
+	probeStore, err := state.NewProbeStore(paths)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	app := &Application{
 		ctx: ctx, paths: paths, db: db, sessions: store, settings: &settings,
 		secrets: secrets, callbacks: options.Callbacks, disableMCP: options.DisableMCP,
-		mcpWait: options.MCPDeadline,
+		mcpWait: options.MCPDeadline, probeStore: probeStore,
 	}
 	if app.mcpWait <= 0 {
 		app.mcpWait = 900 * time.Millisecond
@@ -205,6 +209,7 @@ func (a *Application) Actions() tui.Actions {
 			a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
 			return nil
 		},
+		SetModel: func(ctx context.Context, role, id string) error { return a.setModel(ctx, role, id) },
 		SetPermission: func(_ context.Context, mode contract.PermissionMode) error {
 			a.mu.Lock()
 			active := a.activeWorkspace
@@ -272,6 +277,39 @@ func (a *Application) Actions() tui.Actions {
 	}
 }
 
+func (a *Application) setModel(ctx context.Context, role, id string) error {
+	var selected contract.Model
+	found := false
+	for _, model := range a.settings.Provider.Models {
+		if model.ID == id {
+			selected, found = model, true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("unknown model %q", id)
+	}
+	a.mu.Lock()
+	engine := a.runtime.Engine
+	a.mu.Unlock()
+	if engine == nil {
+		return errors.New("runtime engine is unavailable")
+	}
+	addendum := ""
+	if role != "subagent" {
+		role = "main"
+		addendum = gateway.ResolveModelProfile(selected.ID + " " + selected.Name).PromptAddendum
+	}
+	if err := engine.SwitchModel(ctx, role, selected.ID, selected.Name, addendum); err != nil {
+		return err
+	}
+	if err := state.SaveSettings(*a.settings, a.paths); err != nil {
+		return err
+	}
+	a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
+	return nil
+}
+
 func (a *Application) mcpActions() tui.MCPActions {
 	return tui.MCPActions{
 		List: func(_ context.Context) ([]tui.MCPServerInfo, error) { return a.mcpServerInfos() },
@@ -295,7 +333,7 @@ func (a *Application) mcpActions() tui.MCPActions {
 			if err := state.UpsertMCPServer(server, a.paths); err != nil {
 				return err
 			}
-			a.refreshMCP(ctx)
+			a.refreshMCP(ctx, "mcp add "+name)
 			return nil
 		},
 		Remove: func(ctx context.Context, name string) error {
@@ -306,14 +344,14 @@ func (a *Application) mcpActions() tui.MCPActions {
 			if !removed {
 				return fmt.Errorf("MCP server not found: %s", name)
 			}
-			a.refreshMCP(ctx)
+			a.refreshMCP(ctx, "mcp remove "+name)
 			return nil
 		},
 		SetEnabled: func(ctx context.Context, name string, enabled bool) error {
 			if err := a.setMCPEnabled(name, enabled); err != nil {
 				return err
 			}
-			a.refreshMCP(ctx)
+			a.refreshMCP(ctx, fmt.Sprintf("mcp %s %s", map[bool]string{true: "enable", false: "disable"}[enabled], name))
 			return nil
 		},
 		Authorize: func(ctx context.Context, name string) error {
@@ -330,11 +368,17 @@ func (a *Application) mcpActions() tui.MCPActions {
 			}}); err != nil {
 				return err
 			}
-			a.refreshMCP(ctx)
+			a.refreshMCP(ctx, "mcp authorize "+name)
 			return nil
 		},
 		Test: func(ctx context.Context, _ string) ([]tui.MCPServerInfo, error) {
-			a.refreshMCP(ctx)
+			a.mu.Lock()
+			manager := a.activeMCP
+			a.mu.Unlock()
+			if manager != nil {
+				manager.Refresh(ctx, a.mcpWait)
+				a.emitMCPProblems(manager)
+			}
 			return a.mcpServerInfos()
 		},
 	}
@@ -476,8 +520,23 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	if err != nil {
 		return runtimeBundle{}, err
 	}
+	webSupported, probeChanged, probeScope, err := a.webSearchAvailable(ctx)
+	if err != nil {
+		return runtimeBundle{}, err
+	}
+	if probeChanged {
+		nextSeq := 1
+		for _, record := range usageRecords {
+			nextSeq = max(nextSeq, record.Seq+1)
+		}
+		event := contract.InvalidationEvent{At: time.Now().UTC(), Cause: contract.InvalidationProbeChange, Trigger: contract.InvalidationConfigChange, Scope: probeScope, RequestSeq: nextSeq}
+		if err := a.sessions.AppendInvalidation(session.ID, event); err != nil {
+			return runtimeBundle{}, err
+		}
+		invalidationEvents = append(invalidationEvents, event)
+	}
 	registry := orchestrator.NewRegistry(service.Tools()...)
-	if a.webSearchAvailable(ctx) {
+	if webSupported {
 		registry.Add(gateway.WebSearchTool{Searcher: gateway.WebSearch{BaseURL: a.settings.Provider.BaseURL, APIKey: a.secrets.ProviderAPIKey, Client: &http.Client{Timeout: 30 * time.Second}}})
 	}
 
@@ -491,7 +550,14 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 				return false, nil
 			}
 			return a.callbacks.Confirm(ctx, message)
-		}, registry.Add)
+		}, nil)
+		pinned, err := manager.PinnedTools()
+		if err != nil {
+			return runtimeBundle{}, err
+		}
+		for _, tool := range pinned {
+			registry.Add(tool)
+		}
 		manager.Refresh(a.ctx, a.mcpWait)
 		a.emitMCPProblems(manager)
 	}
@@ -527,14 +593,21 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			WritePlan: func(_ context.Context, content string) error { return a.sessions.WritePlan(session.ID, content) },
 		},
 		Prompt: orchestrator.PromptContext{
-			Workspace: session.WorkspacePath, Shell: shell, Date: time.Now().Format("2006-01-02"),
+			Workspace: session.WorkspacePath, Shell: shell,
 			Model: active.Name, ModelAddendum: profile.PromptAddendum, SubagentModel: subagent.Name,
 		},
 		InitialPlan:          parsePlan(planText),
 		InitialUsageRecords:  usageRecords,
 		InitialInvalidations: invalidationEvents,
-		Rescue:               gateway.RescueToolCalls,
-		Redact:               func(value string) string { return state.Redact(value, a.secrets) },
+		BoundaryTools: func() (orchestrator.BoundaryToolChange, bool, error) {
+			if manager == nil {
+				return orchestrator.BoundaryToolChange{}, false, nil
+			}
+			change, changed, err := manager.TakeBoundaryChange()
+			return orchestrator.BoundaryToolChange{Tools: change.Tools, Scope: change.Scope}, changed, err
+		},
+		Rescue: gateway.RescueToolCalls,
+		Redact: func(value string) string { return state.Redact(value, a.secrets) },
 	})
 	if err != nil {
 		if manager != nil {
@@ -552,28 +625,33 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	return runtimeBundle{runtime: tui.Runtime{Engine: engine, Session: session, Settings: a.settings}, recent: recent, workspace: service, checkpoint: checkpoint, mcp: manager, registry: registry}, nil
 }
 
-func (a *Application) webSearchAvailable(ctx context.Context) bool {
-	fingerprint := a.settings.Provider.BaseURL + "\x00" + a.secrets.ProviderAPIKey
-	a.mu.Lock()
-	if fingerprint == a.webFingerprint {
-		supported := a.webSupported
-		a.mu.Unlock()
-		return supported
-	}
-	a.mu.Unlock()
+func (a *Application) webSearchAvailable(ctx context.Context) (bool, bool, string, error) {
+	fingerprint := state.ProbeFingerprint(a.settings.Provider.BaseURL, a.secrets.ProviderAPIKey)
+	previous, exists := a.probeStore.Get(fingerprint)
 	if strings.TrimSpace(a.settings.Provider.BaseURL) == "" || strings.TrimSpace(a.secrets.ProviderAPIKey) == "" {
-		a.mu.Lock()
-		a.webFingerprint, a.webSupported = fingerprint, false
-		a.mu.Unlock()
-		return false
+		return false, false, "", nil
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 1500*time.Millisecond)
 	defer cancel()
-	supported := (gateway.WebSearch{BaseURL: a.settings.Provider.BaseURL, APIKey: a.secrets.ProviderAPIKey}).Supported(probeCtx)
-	a.mu.Lock()
-	a.webFingerprint, a.webSupported = fingerprint, supported
-	a.mu.Unlock()
-	return supported
+	result, definitive, _ := (gateway.WebSearch{BaseURL: a.settings.Provider.BaseURL, APIKey: a.secrets.ProviderAPIKey}).Probe(probeCtx)
+	if !definitive {
+		if exists {
+			return previous.WebSearch == state.ProbeSupported, false, "", nil
+		}
+		if err := a.probeStore.Put(state.ProbeSnapshot{Fingerprint: fingerprint, WebSearch: state.ProbeUnsupported, CheckedAt: time.Now().UTC()}); err != nil {
+			return false, false, "", err
+		}
+		return false, false, "", nil
+	}
+	current := state.ProbeUnsupported
+	if result == gateway.WebSearchProbeSupported {
+		current = state.ProbeSupported
+	}
+	if err := a.probeStore.Put(state.ProbeSnapshot{Fingerprint: fingerprint, WebSearch: current, CheckedAt: time.Now().UTC()}); err != nil {
+		return false, false, "", err
+	}
+	changed := exists && previous.WebSearch != current
+	return current == state.ProbeSupported, changed, fmt.Sprintf("web_search probe changed from %s to %s", previous.WebSearch, current), nil
 }
 
 func (a *Application) setAPIKey(ctx context.Context, key string) error {
@@ -583,9 +661,6 @@ func (a *Application) setAPIKey(ctx context.Context, key string) error {
 		return err
 	}
 	a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
-	a.mu.Lock()
-	a.webFingerprint = ""
-	a.mu.Unlock()
 	if a.secrets.ProviderAPIKey == "" || len(a.settings.Provider.Models) > 0 {
 		return nil
 	}
@@ -623,17 +698,14 @@ func (a *Application) listSkills() ([]tui.Skill, error) {
 	return result, nil
 }
 
-func (a *Application) refreshMCP(ctx context.Context) {
+func (a *Application) refreshMCP(ctx context.Context, scope string) {
 	a.mu.Lock()
 	manager := a.activeMCP
-	registry := a.activeRegistry
 	a.mu.Unlock()
 	if manager == nil {
 		return
 	}
-	if registry != nil {
-		registry.RemovePrefix("mcp__")
-	}
+	manager.RequestSurfaceRefresh(scope)
 	manager.Refresh(ctx, a.mcpWait)
 	a.emitMCPProblems(manager)
 }

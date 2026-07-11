@@ -117,29 +117,29 @@ prefix-of relationship between consecutive requests) + V5 (live: improved arm
 
 ### Deterministic tool surface (research D1, D3; defects G1/G2/G5)
 
-- [ ] T015 [P] [US1] Implement the `ToolSurfaceSnapshot` persisted schema cache — entry per
+- [X] T015 [P] [US1] Implement the `ToolSurfaceSnapshot` persisted schema cache — entry per
       server-spec fingerprint (transport, command/URL, args, env with **sorted keys**),
       canonicalized tools sorted by namespaced name, `captured_at`, `spec_version` — as an
       additive store in `internal/state/` (new file `internal/state/toolcache.go`;
       data-model §5)
-- [ ] T016 [P] [US1] Add one-time schema canonicalization at registration and namespaced-name
+- [X] T016 [P] [US1] Add one-time schema canonicalization at registration and namespaced-name
       sorting for the MCP block (workspace tools and engine built-ins keep their existing fixed
       order) in `internal/orchestrator/registry.go` and `internal/mcpclient/manager.go`
       (contract W3)
-- [ ] T017 [US1] Pin the session tool surface: at session build, register the cached MCP
+- [X] T017 [US1] Pin the session tool surface: at session build, register the cached MCP
       surface *before the first request* as forwarding entries that route execution to live
       tools once handshakes complete; live handshake results update ONLY the disk cache (next
       session), never the in-session registry — in `internal/mcpclient/manager.go`
       (currently registers per-tool via `onTool` at lines ~136-160) and
       `internal/command/application.go` (build path ~485-486) (depends T015, T016)
-- [ ] T018 [US1] Enforce `/mcp` action rules: list/test never touch the registry;
+- [X] T018 [US1] Enforce `/mcp` action rules: list/test never touch the registry;
       add/remove/enable/disable/authorize apply at a task boundary and record a
       `toolset-change` event; remove the blanket `RemovePrefix("mcp__")`+Refresh from read-only
       paths — in `internal/command/application.go` (~297-338, 609-622) (depends T010, T017)
-- [ ] T019 [US1] Handle first-ever (uncached) servers: absent a cache entry the server
+- [X] T019 [US1] Handle first-ever (uncached) servers: absent a cache entry the server
       contributes nothing until its first handshake, which joins at a task boundary with one
       `toolset-change` event — in `internal/mcpclient/manager.go` (depends T017)
-- [ ] T020 [P] [US1] Persist the web-search `ProbeSnapshot` keyed by endpoint fingerprint with
+- [X] T020 [P] [US1] Persist the web-search `ProbeSnapshot` keyed by endpoint fingerprint with
       last-good merge (definitive results overwrite; transient failures preserve previous;
       first-run failure defaults `unsupported`), emitting `probe-change` events on definitive
       change — replace the in-process cache in `internal/command/application.go` (~538-560)
@@ -147,66 +147,66 @@ prefix-of relationship between consecutive requests) + V5 (live: improved arm
 
 ### Stable prompt fields (research D2, D11; defects G3/G6)
 
-- [ ] T021 [P] [US1] Remove the `date:` line from the system prompt template and
+- [X] T021 [P] [US1] Remove the `date:` line from the system prompt template and
       `PromptContext` (`internal/orchestrator/prompt.go` ~63-64,
       `internal/command/application.go` ~514-517) and add the current date to the per-task
       brief in `internal/orchestrator/classify.go` (`BudgetFor` brief, ~line 136) (contract W2)
-- [ ] T022 [P] [US1] On `/model`, refresh the prompt-context model fields and record a
+- [X] T022 [P] [US1] On `/model`, refresh the prompt-context model fields and record a
       `model-switch` invalidation event at the task boundary, in
       `internal/command/application.go` (~196-206) and `internal/orchestrator/engine.go`
       (contract W12; depends T010)
 
 ### Rewrite scheduling (research D4; defect G4)
 
-- [ ] T023 [US1] Switch context-pressure inputs to the latest provider-reported
+- [X] T023 [US1] Switch context-pressure inputs to the latest provider-reported
       `prompt_tokens` (estimator only as bootstrap before the first response, flagged so tests
       can assert the switchover) in `internal/orchestrator/history.go` (~line 80) and
       `internal/orchestrator/engine.go` (depends T007)
-- [ ] T024 [US1] Consolidate fold+trim into ONE boundary-scheduled maintenance pass with a
+- [X] T024 [US1] Consolidate fold+trim into ONE boundary-scheduled maintenance pass with a
       0.60 usable-context floor (replacing fold-at-0.55-per-task at `engine.go` ~284 and
       per-turn TrimAged-above-0.65 at ~359-361), emitting exactly one `fold`/`trim` event with
       combined scope per pass, preserving tool-call/result pairing — in
       `internal/orchestrator/engine.go` and `internal/orchestrator/history.go` (~104-166)
       (contract W4; depends T010, T023)
-- [ ] T025 [US1] Add the anti-thrash latch: two consecutive pressure passes pause automatic
+- [X] T025 [US1] Add the anti-thrash latch: two consecutive pressure passes pause automatic
       rewrites until pressure recedes below the floor or compaction resolves; latch state
       visible in diagnostics — in `internal/orchestrator/history.go` (depends T024)
-- [ ] T026 [P] [US1] Record `window-drop` events when request assembly excludes previously
+- [X] T026 [P] [US1] Record `window-drop` events when request assembly excludes previously
       transmitted units, in `internal/orchestrator/history.go` (`assembleRequest` ~213-235)
       (depends T010)
-- [ ] T027 [P] [US1] Record `compact` (auto) and `user-compact` (/compact) events with
+- [X] T027 [P] [US1] Record `compact` (auto) and `user-compact` (/compact) events with
       pressure and scope, in `internal/orchestrator/engine.go` (~747-750) (depends T010)
 
 ### Replay hygiene (research D9; contract W8–W11)
 
-- [ ] T028 [P] [US1] Verify assistant reasoning content is never replayed to the provider;
+- [X] T028 [P] [US1] Verify assistant reasoning content is never replayed to the provider;
       where DeepSeek thinking mode requires the `reasoning_content` key on assistant
       `tool_calls` turns, emit the minimal required form only there — audit and conform
       `internal/gateway/provider.go` and history serialization in
       `internal/orchestrator/history.go` (contract W10)
-- [ ] T029 [P] [US1] Verify subagent request streams satisfy the same contract (own stable
+- [X] T029 [P] [US1] Verify subagent request streams satisfy the same contract (own stable
       R1/R2, no main-session mutation, own usage records) and fix any deviation, in
       `internal/orchestrator/subagent.go` (~104-131) (contract W11; FR-014)
 
 ### Mandatory prefix-stability verification (Constitution III/X; quickstart V1/V2)
 
-- [ ] T030 [US1] Golden byte-stability tests: system prompt double-build identity; tools array
+- [X] T030 [US1] Golden byte-stability tests: system prompt double-build identity; tools array
       identity across double-build and across randomized registration orders (MCP block);
       full-body marshal determinism for identical logical state — in
       `internal/orchestrator/prompt_stability_test.go` (extend) and new
       `internal/gateway/marshal_determinism_test.go` (contract W7; D10)
-- [ ] T031 [US1] Restart-determinism test: build session → send mock turns → persist → reload
+- [X] T031 [US1] Restart-determinism test: build session → send mock turns → persist → reload
       in a fresh process context → assert the next request's R1+R2+R3 bytes are identical
       (covers date, probe, MCP-pinning fixes; SC-002) — new
       `internal/orchestrator/restart_determinism_test.go` (contract W9; depends T017, T020,
       T021)
-- [ ] T032 [US1] Mock-endpoint cache-guard suite: OpenAI-compatible mock whose "hit tokens" =
+- [X] T032 [US1] Mock-endpoint cache-guard suite: OpenAI-compatible mock whose "hit tokens" =
       byte-identical common prefix with the previous request; scenarios per quickstart V2
       (dialogue, tool loops, MCP-pinned surface, restart replay, steering, goal continuation,
       pressure maintenance); assertions: tail-average ≥ 90%, strict prefix-of relationship
       absent maintenance events, zero PrefixShape diffs without a matching ledger event — new
       `internal/orchestrator/cachehit_guard_test.go` (D7; depends T011, T024)
-- [ ] T033 [P] [US1] Retry/reconnect byte-identity test: retried request marshals identically
+- [X] T033 [P] [US1] Retry/reconnect byte-identity test: retried request marshals identically
       to the original attempt — in `internal/gateway/provider_retry_test.go` (contract W8)
 - [ ] T034 [US1] Capture the IMPROVED arm (3 runs, same scenarios/model/effort/fixture as
       T014) to `specs/001-prompt-cache-optimization/benchmarks/improved/`, then produce the
@@ -234,26 +234,26 @@ rendered as zero).
 surfacing. Only T037 depends on a US1 task (event recording sites, T024–T027); the rest can
 run in parallel with US1.
 
-- [ ] T035 [US2] Extend `/context` output: session totals (prompt/output), cache split
+- [X] T035 [US2] Extend `/context` output: session totals (prompt/output), cache split
       (read/uncached), session + steady-state hit rates, unavailable-request count when > 0,
       and the most recent invalidation events (cause, scope, when) — in
       `internal/tui/actions.go` (~44-47) (contracts/cache-metrics.md Display; depends T008,
       T011)
-- [ ] T036 [P] [US2] Add the compact per-request cache tag to the activity line (e.g.,
+- [X] T036 [P] [US2] Add the compact per-request cache tag to the activity line (e.g.,
       `cache 99% (12.3k read / 128 new)`) and billed-vs-cached figures to task summaries — in
       `internal/tui/view.go` (~117-118, ~576) (depends T007)
-- [ ] T037 [US2] Annotate the usage/notice line with prefix-change causes
+- [X] T037 [US2] Annotate the usage/notice line with prefix-change causes
       (`cache prefix changed: tools (mcp add supabase)`) sourced from the event ledger — in
       `internal/tui/view.go` and the engine's task-complete notices in
       `internal/orchestrator/engine.go` (~267-277) (depends T011, T024–T027 for real causes)
-- [ ] T038 [P] [US2] Display-honesty tests: null renders "unavailable" (never `0`), zero
+- [X] T038 [P] [US2] Display-honesty tests: null renders "unavailable" (never `0`), zero
       renders `0`, derived misses labeled, no fabricated figures on cache-less endpoints
       (FR-013) — in `internal/tui/actions_test.go` (depends T035)
-- [ ] T039 [US2] SC-004 cross-check test: drive the mock endpoint with injected usage payloads
+- [X] T039 [US2] SC-004 cross-check test: drive the mock endpoint with injected usage payloads
       (both provider shapes + absent + malformed) through the full engine loop and assert
       recorded/displayed figures equal the injected payloads exactly — in
       `internal/orchestrator/usage_integrity_test.go` (depends T011, T035)
-- [ ] T040 [US2] Resume-continuity test: run turns → restart → assert `/context` cumulative
+- [X] T040 [US2] Resume-continuity test: run turns → restart → assert `/context` cumulative
       figures equal the pre-restart sums from `usage.jsonl` — in
       `internal/orchestrator/usage_resume_test.go` (depends T008, T035)
 

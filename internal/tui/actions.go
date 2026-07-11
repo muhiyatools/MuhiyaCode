@@ -40,12 +40,7 @@ func (m *Model) runSlash(value string) tea.Cmd {
 			m.notify("No task is running.")
 		}
 	case "/context":
-		report := m.runtime.Engine.ContextReport()
-		message := fmt.Sprintf(
-			"History in context: %s / %s tokens (%.1f%%)\n\nSession billed: %s\nCached: %s",
-			formatTokens(report.HistoryTokens), formatTokens(report.ContextLimit), report.Percent,
-			formatTokens(report.Usage.TotalTokens), formatTokens(report.Usage.CachedTokens))
-		m.openInfo("Context usage", message)
+		m.openInfo("Context usage", formatContextReport(m.runtime.Engine.ContextReport()))
 	case "/compact":
 		if m.busy {
 			m.notify("Stop the running task before compacting.")
@@ -286,6 +281,12 @@ func (m *Model) chooseModel(role, id string) tea.Cmd {
 		m.notify("Unknown model: " + id)
 		return nil
 	}
+	if role != "subagent" {
+		role = "main"
+	}
+	if m.actions.SetModel != nil {
+		return actionCommand("settings", func() (any, error) { return nil, m.actions.SetModel(m.ctx, role, id) })
+	}
 	if role == "subagent" {
 		m.runtime.Settings.Provider.SubagentModelID = id
 	} else {
@@ -305,6 +306,50 @@ func (m *Model) resumeCommand(id string) tea.Cmd {
 		runtime, events, err := m.actions.Resume(m.ctx, id)
 		return runtimeActionValue{runtime: runtime, events: events}, err
 	})
+}
+
+func formatContextReport(report orchestrator.ContextReport) string {
+	aggregate := report.UsageAggregate
+	pressureSource := "provider-reported"
+	if report.PressureEstimated {
+		pressureSource = "estimated bootstrap"
+	}
+	lines := []string{
+		fmt.Sprintf("History in context: %s / %s tokens (%.1f%%)", formatTokens(report.HistoryTokens), formatTokens(report.ContextLimit), report.Percent),
+		fmt.Sprintf("Pressure input: %s tokens (%.1f%%, %s)", formatTokens(report.PressureTokens), report.PressurePercent, pressureSource),
+		"",
+		fmt.Sprintf("Session prompt / output: %s / %s", formatTokens(aggregate.SumPrompt), formatTokens(aggregate.SumCompletion)),
+	}
+	if aggregate.CacheAvailable > 0 {
+		lines = append(lines,
+			fmt.Sprintf("Cache read / uncached: %s / %s", formatTokens(aggregate.SumCacheRead), formatTokens(aggregate.SumCacheMiss)),
+			"Session hit rate: "+formatRate(aggregate.SessionHitRate),
+			"Steady-state hit rate: "+formatRate(aggregate.SteadyStateHitRate),
+		)
+	} else {
+		lines = append(lines, "Cache read / uncached: unavailable", "Session hit rate: unavailable", "Steady-state hit rate: unavailable")
+	}
+	if aggregate.UnavailableRequests > 0 {
+		lines = append(lines, fmt.Sprintf("Cache metrics unavailable: %d request(s)", aggregate.UnavailableRequests))
+	}
+	if report.MaintenanceLatched {
+		lines = append(lines, "Automatic maintenance: paused by anti-thrash latch")
+	}
+	if len(report.Invalidations) > 0 {
+		lines = append(lines, "", "Recent cache invalidations:")
+		start := max(0, len(report.Invalidations)-5)
+		for _, event := range report.Invalidations[start:] {
+			lines = append(lines, fmt.Sprintf("- %s: %s (%s)", event.Cause, event.Scope, event.At.Local().Format("15:04:05")))
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func formatRate(value *float64) string {
+	if value == nil {
+		return "unavailable"
+	}
+	return fmt.Sprintf("%.2f%%", *value*100)
 }
 
 func actionCommand(kind string, run func() (any, error)) tea.Cmd {

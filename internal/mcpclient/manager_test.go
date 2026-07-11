@@ -75,6 +75,53 @@ func TestManagerStdioDiscoveryExecutionAndRefresh(t *testing.T) {
 	}
 }
 
+func TestPinnedSurfaceAppearsAtBoundaryThenLoadsBeforeHandshake(t *testing.T) {
+	t.Setenv(state.HomeEnvironment, t.TempDir())
+	paths, err := state.EnsurePaths()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := state.UpsertMCPServer(state.MCPServer{
+		Name: "pinned", Enabled: true, TimeoutMS: 10_000, Transport: "stdio",
+		Command: os.Args[0], Env: map[string]string{mcpTestServerEnvironment: "1"},
+	}, paths); err != nil {
+		t.Fatal(err)
+	}
+	first := New(paths, nil, func(context.Context, string) (bool, error) { return true, nil }, nil)
+	if tools, err := first.PinnedTools(); err != nil || len(tools) != 0 {
+		t.Fatalf("first pinned tools=%d err=%v", len(tools), err)
+	}
+	first.Refresh(context.Background(), 10*time.Second)
+	change, changed, err := first.TakeBoundaryChange()
+	if err != nil || !changed || len(change.Tools) != 1 {
+		t.Fatalf("change=%+v changed=%v err=%v", change, changed, err)
+	}
+	if _, err := change.Tools[0].Execute(context.Background(), json.RawMessage(`{"name":"first"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	second := New(paths, nil, func(context.Context, string) (bool, error) { return true, nil }, nil)
+	defer second.Close()
+	pinned, err := second.PinnedTools()
+	if err != nil || len(pinned) != 1 || pinned[0].Definition().Function.Name != "mcp__pinned__greet" {
+		t.Fatalf("cached pinned tools=%v err=%v", pinned, err)
+	}
+	if _, err := pinned[0].Execute(context.Background(), json.RawMessage(`{"name":"early"}`)); err == nil {
+		t.Fatal("forwarder executed before live handshake")
+	}
+	second.Refresh(context.Background(), 10*time.Second)
+	output, err := pinned[0].Execute(context.Background(), json.RawMessage(`{"name":"second"}`))
+	if err != nil || !strings.Contains(output, "Hello second") {
+		t.Fatalf("output=%q err=%v", output, err)
+	}
+	if _, changed, err := second.TakeBoundaryChange(); err != nil || changed {
+		t.Fatalf("known cached server changed in-session: changed=%v err=%v", changed, err)
+	}
+}
+
 func TestManagerHTTPBearerAndBrokenServerIsolation(t *testing.T) {
 	t.Setenv(state.HomeEnvironment, t.TempDir())
 	server := newTestMCPServer()

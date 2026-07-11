@@ -37,6 +37,24 @@ type History struct {
 	persist           func(HistorySnapshot) error
 }
 
+type PressureInput struct {
+	Tokens    int  `json:"tokens"`
+	Estimated bool `json:"estimated"`
+}
+
+type MaintenanceResult struct {
+	Changed      bool
+	Folded       bool
+	FoldedTokens int
+	TrimmedTools int
+}
+
+type RequestBuild struct {
+	Messages      []contract.Message
+	WindowDropped bool
+	DroppedUnits  int
+}
+
 func NewHistory(snapshot HistorySnapshot, persist func(HistorySnapshot) error) *History {
 	if snapshot.Version != 1 {
 		snapshot = HistorySnapshot{Version: 1}
@@ -92,6 +110,13 @@ func (h *History) EstimatedTokens() int {
 	return h.estimatedLocked()
 }
 
+func (h *History) PressureInput(reported int, available bool) PressureInput {
+	if available {
+		return PressureInput{Tokens: reported}
+	}
+	return PressureInput{Tokens: h.EstimatedTokens(), Estimated: true}
+}
+
 func (h *History) RewriteVersion() int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -109,10 +134,19 @@ func EstimateMessageTokens(message contract.Message) int {
 }
 
 func (h *History) BuildRequest(system string, contextLimit, reserve int) []contract.Message {
+	return h.BuildRequestWithMetadata(system, contextLimit, reserve).Messages
+}
+
+func (h *History) BuildRequestWithMetadata(system string, contextLimit, reserve int) RequestBuild {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	request, start := assembleRequestWithStart(h.messages, h.compactSummary, system, contextLimit, reserve)
+	request, start, _ := assembleRequestWithStart(h.messages, h.compactSummary, system, contextLimit, reserve)
 	changed := !h.windowInitialized || start != h.lastWindowStart
+	dropped := h.windowInitialized && start > h.lastWindowStart
+	droppedUnits := 0
+	if dropped {
+		droppedUnits = start - h.lastWindowStart
+	}
 	if h.windowInitialized && start > h.lastWindowStart {
 		h.rewriteVersion++
 	}
@@ -121,7 +155,7 @@ func (h *History) BuildRequest(system string, contextLimit, reserve int) []contr
 	if changed {
 		h.saveLocked()
 	}
-	return request
+	return RequestBuild{Messages: request, WindowDropped: dropped, DroppedUnits: droppedUnits}
 }
 
 func (h *History) MarkSuperseded(callIDs []string) {
@@ -135,6 +169,16 @@ func (h *History) MarkSuperseded(callIDs []string) {
 func (h *History) TrimAged(keepFull, trimmedChars, minBatch int) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	trimmed := h.trimAgedLocked(keepFull, trimmedChars, minBatch)
+	if trimmed == 0 {
+		return false
+	}
+	h.rewriteVersion++
+	h.saveLocked()
+	return true
+}
+
+func (h *History) trimAgedLocked(keepFull, trimmedChars, minBatch int) int {
 	var indexes []int
 	for i, message := range h.messages {
 		if message.Role == contract.RoleTool {
@@ -156,7 +200,7 @@ func (h *History) TrimAged(keepFull, trimmedChars, minBatch int) bool {
 		}
 	}
 	if len(eligible) < minBatch {
-		return false
+		return 0
 	}
 	for _, index := range eligible {
 		content := h.messages[index].Content
@@ -165,16 +209,23 @@ func (h *History) TrimAged(keepFull, trimmedChars, minBatch int) bool {
 		tail := content[len(content)-tailSize:]
 		h.messages[index].Content = head + "\n" + TrimNote + "\n" + tail
 	}
-	h.rewriteVersion++
-	h.saveLocked()
-	return true
+	return len(eligible)
 }
 
 func (h *History) FoldCompletedTasks() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	limit := min(h.lastTaskStart, len(h.messages))
 	before := h.estimatedLocked()
+	if !h.foldCompletedLocked() {
+		return 0
+	}
+	h.rewriteVersion++
+	h.saveLocked()
+	return max(0, before-h.estimatedLocked())
+}
+
+func (h *History) foldCompletedLocked() bool {
+	limit := min(h.lastTaskStart, len(h.messages))
 	changed := false
 	for i := 0; i < limit; i++ {
 		m := &h.messages[i]
@@ -190,12 +241,24 @@ func (h *History) FoldCompletedTasks() int {
 			}
 		}
 	}
-	if !changed {
-		return 0
+	return changed
+}
+
+// Maintain performs folding and trimming under one lock, one persistence
+// write, and one rewrite-version increment so a pressure boundary creates one
+// attributable prefix reset rather than a series of smaller rewrites.
+func (h *History) Maintain(keepFull, trimmedChars, minBatch int) MaintenanceResult {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	before := h.estimatedLocked()
+	folded := h.foldCompletedLocked()
+	trimmed := h.trimAgedLocked(keepFull, trimmedChars, minBatch)
+	if !folded && trimmed == 0 {
+		return MaintenanceResult{}
 	}
 	h.rewriteVersion++
 	h.saveLocked()
-	return max(0, before-h.estimatedLocked())
+	return MaintenanceResult{Changed: true, Folded: folded, FoldedTokens: max(0, before-h.estimatedLocked()), TrimmedTools: trimmed}
 }
 
 func (h *History) IsToolResultIntact(callID string) bool {
@@ -247,11 +310,11 @@ func GroupUnits(messages []contract.Message) [][]contract.Message {
 }
 
 func assembleRequest(messages []contract.Message, summary, system string, contextLimit, reserve int) []contract.Message {
-	result, _ := assembleRequestWithStart(messages, summary, system, contextLimit, reserve)
+	result, _, _ := assembleRequestWithStart(messages, summary, system, contextLimit, reserve)
 	return result
 }
 
-func assembleRequestWithStart(messages []contract.Message, summary, system string, contextLimit, reserve int) ([]contract.Message, int) {
+func assembleRequestWithStart(messages []contract.Message, summary, system string, contextLimit, reserve int) ([]contract.Message, int, int) {
 	budget := max(8_000, contextLimit-reserve)
 	header := []contract.Message{{Role: contract.RoleSystem, Content: system}}
 	if summary != "" {
@@ -278,7 +341,7 @@ func assembleRequestWithStart(messages []contract.Message, summary, system strin
 	for _, unit := range units[start:] {
 		result = append(result, cloneMessages(unit)...)
 	}
-	return result, start
+	return result, start, len(units)
 }
 
 func foldCalls(calls []contract.ToolCall) []contract.ToolCall {

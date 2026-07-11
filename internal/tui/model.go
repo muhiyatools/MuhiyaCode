@@ -26,6 +26,7 @@ type Skill struct {
 
 type Actions struct {
 	SaveSettings  func(context.Context, *contract.Settings) error
+	SetModel      func(context.Context, string, string) error
 	SetPermission func(context.Context, contract.PermissionMode) error
 	Rewind        func(context.Context) (string, error)
 	NewSession    func(context.Context) (Runtime, []contract.Event, error)

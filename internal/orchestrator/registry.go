@@ -62,14 +62,65 @@ func (r *Registry) RemovePrefix(prefix string) {
 	r.mu.Unlock()
 }
 
+func (r *Registry) ReplacePrefix(prefix string, tools ...contract.Tool) {
+	r.mu.Lock()
+	next := r.order[:0]
+	for _, name := range r.order {
+		if strings.HasPrefix(name, prefix) {
+			delete(r.tools, name)
+			continue
+		}
+		next = append(next, name)
+	}
+	r.order = next
+	sort.Slice(tools, func(i, j int) bool { return tools[i].Definition().Function.Name < tools[j].Definition().Function.Name })
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		name := tool.Definition().Function.Name
+		if name == "" || !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		r.tools[name] = tool
+		r.order = append(r.order, name)
+	}
+	r.mu.Unlock()
+}
+
 func (r *Registry) Definitions(allowed map[string]bool) []contract.ToolDefinition {
+	base := r.BaseDefinitions(allowed)
+	return append(base, r.MCPDefinitions(allowed)...)
+}
+
+func (r *Registry) BaseDefinitions(allowed map[string]bool) []contract.ToolDefinition {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	result := make([]contract.ToolDefinition, 0, len(r.order))
 	for _, name := range r.order {
+		if strings.HasPrefix(name, "mcp__") {
+			continue
+		}
 		if allowed != nil && !allowed[name] {
 			continue
 		}
+		result = append(result, r.tools[name].Definition())
+	}
+	return result
+}
+
+func (r *Registry) MCPDefinitions(allowed map[string]bool) []contract.ToolDefinition {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	var names []string
+	for name := range r.tools {
+		if strings.HasPrefix(name, "mcp__") && (allowed == nil || allowed[name]) {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	result := make([]contract.ToolDefinition, 0, len(names))
+	for _, name := range names {
 		result = append(result, r.tools[name].Definition())
 	}
 	return result

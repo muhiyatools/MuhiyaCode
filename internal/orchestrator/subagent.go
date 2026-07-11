@@ -125,15 +125,27 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 	}
 	messages := []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: input.Task}}
 	definitions := e.registry.Definitions(spec.Allowed)
+	var previousShape *PrefixShape
 	maxTurns := max(2, int(math.Ceil(float64(spec.MaxTurns)*Profile(e.effort()).AgentTurnScale)))
 	for turn := 1; turn <= maxTurns; turn++ {
 		result.Turns = turn
+		shape, shapeErr := NewPrefixShape(system, definitions, 0, modelID)
+		if shapeErr != nil {
+			result.Status = "failed"
+			result.Report = "compute subagent prefix shape: " + shapeErr.Error()
+			break
+		}
+		var reasons []string
+		if previousShape != nil {
+			reasons = CompareShape(*previousShape, shape)
+		}
 		response, err := e.provider.Chat(ctx, contract.ChatRequest{Messages: messages, Tools: definitions, ModelID: modelID, Reasoning: Profile(e.effort()).AgentReasoning})
-		if usageErr := e.recordAuxUsage(ctx, modelID, response.Usage); usageErr != nil {
+		if usageErr := e.recordIsolatedUsage(ctx, modelID, response.Usage, previousShape == nil, reasons); usageErr != nil {
 			result.Status = "failed"
 			result.Report = "persist subagent usage: " + usageErr.Error()
 			break
 		}
+		previousShape = &shape
 		if err != nil {
 			result.Status = statusFromContext(ctx, "failed")
 			result.Report = err.Error()
@@ -169,7 +181,7 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			e.emitAgent(contract.AgentEvent{Kind: "tool_end", RunID: runID, CallID: call.ID, Tool: call.ToolName(), Output: output})
 			if isMutation(call.ToolName()) {
 				if e.inspection != nil {
-					e.history.MarkSuperseded(e.inspection.InvalidateFor(call))
+					e.inspection.InvalidateFor(call)
 				}
 				if e.knowledge != nil {
 					e.knowledge.MarkWorkspaceChanged()

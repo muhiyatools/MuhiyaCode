@@ -5,6 +5,7 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
@@ -133,7 +134,7 @@ func BudgetFor(a Assessment, effort EffortProfile) Budget {
 	if a.Class == ClassChat {
 		done = ""
 	}
-	b.Brief = fmt.Sprintf("[task-brief: class=%s; tools~%d; turns<=%d; agents<=%d; reasoning=%s; verify=%s;%s%s finish all plan steps]", b.Class, b.ToolCalls, b.MaxTurns, b.MaxAgentRuns, b.Reasoning, b.Verification, guard, done)
+	b.Brief = fmt.Sprintf("[task-brief: date=%s; class=%s; tools~%d; turns<=%d; agents<=%d; reasoning=%s; verify=%s;%s%s finish all plan steps]", time.Now().Format("2006-01-02"), b.Class, b.ToolCalls, b.MaxTurns, b.MaxAgentRuns, b.Reasoning, b.Verification, guard, done)
 	return b
 }
 

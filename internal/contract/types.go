@@ -100,10 +100,11 @@ const (
 )
 
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	Role             Role       `json:"role"`
+	Content          string     `json:"content"`
+	ToolCallID       string     `json:"tool_call_id,omitempty"`
+	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+	ReasoningContent *string    `json:"reasoning_content,omitempty"`
 }
 
 type ToolCall struct {
@@ -304,21 +305,22 @@ type ContextInfo struct {
 }
 
 type TaskStats struct {
-	DurationMS         int64       `json:"durationMs"`
-	Effort             EffortLevel `json:"effort"`
-	TaskClass          string      `json:"taskClass"`
-	Usage              Usage       `json:"usage"`
-	AgentUsage         Usage       `json:"agentUsage"`
-	PeakContextPercent float64     `json:"peakContextPercent"`
-	ToolCalls          int         `json:"toolCalls"`
-	AgentRuns          int         `json:"agentRuns"`
-	AgentRunsReused    int         `json:"agentRunsReused"`
-	FilesChanged       []string    `json:"filesChanged"`
-	Turns              int         `json:"turns"`
-	ChecksRun          int         `json:"checksRun"`
-	FoldedTokens       int         `json:"foldedTokens"`
-	DisciplineScore    int         `json:"disciplineScore"`
-	DoneCriteria       string      `json:"doneCriteria,omitempty"`
+	DurationMS         int64               `json:"durationMs"`
+	Effort             EffortLevel         `json:"effort"`
+	TaskClass          string              `json:"taskClass"`
+	Usage              Usage               `json:"usage"`
+	AgentUsage         Usage               `json:"agentUsage"`
+	PeakContextPercent float64             `json:"peakContextPercent"`
+	ToolCalls          int                 `json:"toolCalls"`
+	AgentRuns          int                 `json:"agentRuns"`
+	AgentRunsReused    int                 `json:"agentRunsReused"`
+	FilesChanged       []string            `json:"filesChanged"`
+	Turns              int                 `json:"turns"`
+	ChecksRun          int                 `json:"checksRun"`
+	FoldedTokens       int                 `json:"foldedTokens"`
+	DisciplineScore    int                 `json:"disciplineScore"`
+	DoneCriteria       string              `json:"doneCriteria,omitempty"`
+	Invalidations      []InvalidationEvent `json:"invalidations,omitempty"`
 }
 
 type Callbacks struct {

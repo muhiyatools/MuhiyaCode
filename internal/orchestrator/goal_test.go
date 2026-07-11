@@ -11,7 +11,7 @@ import (
 func newGoalEngine(t *testing.T, provider contract.Provider) *Engine {
 	t.Helper()
 	settings := engineSettings()
-	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "s", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{Date: "2026-07-11"}})
+	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "s", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestPlanModeBlocksMutations(t *testing.T) {
 	}}
 	settings := engineSettings()
 	writer := &recordingTool{name: "write_file"}
-	engine, _ := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "s", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(writer), Prompt: PromptContext{Date: "2026-07-11"}})
+	engine, _ := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "s", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(writer), Prompt: PromptContext{}})
 	engine.SetPlanMode(true)
 	if _, _, err := engine.Run(context.Background(), "add a file"); err != nil {
 		t.Fatal(err)

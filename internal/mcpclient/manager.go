@@ -35,15 +35,22 @@ type Manager struct {
 	confirm    ConfirmFunc
 	onTool     func(contract.Tool)
 
-	mu          sync.RWMutex
-	refreshMu   sync.Mutex
-	secretsMu   sync.Mutex
-	refreshStop context.CancelFunc
-	closed      bool
-	connections []*connection
-	tools       map[string]*mcpTool
-	statuses    map[string]Status
-	usedNames   map[string]bool
+	mu             sync.RWMutex
+	refreshMu      sync.Mutex
+	secretsMu      sync.Mutex
+	refreshStop    context.CancelFunc
+	closed         bool
+	connections    []*connection
+	tools          map[string]*mcpTool
+	statuses       map[string]Status
+	usedNames      map[string]bool
+	surfaceStore   *state.ToolSurfaceStore
+	pinned         map[string]contract.ToolDefinition
+	applied        map[string]contract.ToolDefinition
+	knownAtStart   map[string]bool
+	pendingSurface bool
+	pendingForce   bool
+	pendingScopes  []string
 }
 
 type connection struct {
@@ -60,11 +67,134 @@ type mcpTool struct {
 	definition  contract.ToolDefinition
 }
 
+type forwardingTool struct {
+	manager    *Manager
+	definition contract.ToolDefinition
+}
+
+type BoundaryChange struct {
+	Tools []contract.Tool
+	Scope string
+}
+
 func New(paths state.Paths, client *http.Client, confirm ConfirmFunc, onTool func(contract.Tool)) *Manager {
 	if client == nil {
 		client = &http.Client{Timeout: 2 * time.Minute}
 	}
-	return &Manager{paths: paths, httpClient: client, confirm: confirm, onTool: onTool, tools: make(map[string]*mcpTool), statuses: make(map[string]Status), usedNames: make(map[string]bool)}
+	store, _ := state.NewToolSurfaceStore(paths)
+	return &Manager{
+		paths: paths, httpClient: client, confirm: confirm, onTool: onTool,
+		tools: make(map[string]*mcpTool), statuses: make(map[string]Status), usedNames: make(map[string]bool),
+		surfaceStore: store, pinned: make(map[string]contract.ToolDefinition), applied: make(map[string]contract.ToolDefinition), knownAtStart: make(map[string]bool),
+	}
+}
+
+// PinnedTools loads the deterministic cached surface before the session's
+// first request. Live handshakes do not mutate this surface for known servers.
+func (m *Manager) PinnedTools() ([]contract.Tool, error) {
+	definitions, known, err := m.cachedDefinitions()
+	if err != nil {
+		return nil, err
+	}
+	m.mu.Lock()
+	m.pinned = definitions
+	m.applied = cloneDefinitionsByName(definitions)
+	m.knownAtStart = known
+	tools := m.forwardingToolsLocked()
+	m.mu.Unlock()
+	return tools, nil
+}
+
+// RequestSurfaceRefresh asks the next task boundary to adopt the effective
+// cached surface after an explicit mutating /mcp action.
+func (m *Manager) RequestSurfaceRefresh(scope string) {
+	m.mu.Lock()
+	m.pendingSurface = true
+	m.pendingForce = true
+	if strings.TrimSpace(scope) != "" {
+		m.pendingScopes = append(m.pendingScopes, scope)
+	}
+	m.mu.Unlock()
+}
+
+func (m *Manager) TakeBoundaryChange() (BoundaryChange, bool, error) {
+	m.mu.RLock()
+	pending, force := m.pendingSurface, m.pendingForce
+	m.mu.RUnlock()
+	if !pending {
+		return BoundaryChange{}, false, nil
+	}
+	var desired map[string]contract.ToolDefinition
+	if force {
+		loaded, _, err := m.cachedDefinitions()
+		if err != nil {
+			return BoundaryChange{}, false, err
+		}
+		desired = loaded
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.pendingSurface {
+		return BoundaryChange{}, false, nil
+	}
+	if desired != nil {
+		m.pinned = desired
+	}
+	changed := !definitionsEqual(m.applied, m.pinned)
+	scope := strings.Join(uniqueStrings(m.pendingScopes), "; ")
+	m.pendingSurface, m.pendingForce, m.pendingScopes = false, false, nil
+	if !changed {
+		return BoundaryChange{}, false, nil
+	}
+	m.applied = cloneDefinitionsByName(m.pinned)
+	if scope == "" {
+		scope = "MCP tool surface changed"
+	}
+	return BoundaryChange{Tools: m.forwardingToolsLocked(), Scope: scope}, true, nil
+}
+
+func (m *Manager) cachedDefinitions() (map[string]contract.ToolDefinition, map[string]bool, error) {
+	config, err := state.LoadMCPConfig(m.paths)
+	if err != nil {
+		return nil, nil, err
+	}
+	secrets, err := state.LoadMCPSecrets(m.paths)
+	if err != nil {
+		return nil, nil, err
+	}
+	definitions := make(map[string]contract.ToolDefinition)
+	known := make(map[string]bool)
+	if m.surfaceStore == nil {
+		return definitions, known, nil
+	}
+	for _, server := range config.Servers {
+		if !server.Enabled {
+			continue
+		}
+		fingerprint := state.MCPServerFingerprint(server, secrets.Env[server.Name])
+		snapshot, ok := m.surfaceStore.Get(fingerprint)
+		known[fingerprint] = ok
+		if !ok {
+			continue
+		}
+		for _, definition := range snapshot.Tools {
+			definitions[definition.Function.Name] = canonicalDefinition(definition)
+		}
+	}
+	return definitions, known, nil
+}
+
+func (m *Manager) forwardingToolsLocked() []contract.Tool {
+	names := make([]string, 0, len(m.pinned))
+	for name := range m.pinned {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	tools := make([]contract.Tool, 0, len(names))
+	for _, name := range names {
+		tools = append(tools, &forwardingTool{manager: m, definition: canonicalDefinition(m.pinned[name])})
+	}
+	return tools
 }
 
 func (m *Manager) Refresh(ctx context.Context, deadline time.Duration) {
@@ -151,11 +281,6 @@ func (m *Manager) refresh(ctx context.Context) {
 				m.tools[tool.exposedName] = tool
 			}
 			m.mu.Unlock()
-			for _, tool := range connection.tools {
-				if m.onTool != nil {
-					m.onTool(tool)
-				}
-			}
 			m.setStatus(server.Name, "connected", fmt.Sprintf("Connected with %d tool(s).", len(connection.tools)), len(connection.tools))
 		}()
 	}
@@ -202,11 +327,34 @@ func (m *Manager) connect(parent context.Context, server state.MCPServer, secret
 		return nil, fmt.Errorf("list MCP tools for %s: %w", server.Name, err)
 	}
 	connection := &connection{server: server, session: session}
+	sort.Slice(listed.Tools, func(i, j int) bool { return listed.Tools[i].Name < listed.Tools[j].Name })
+	used := make(map[string]bool)
 	for _, remote := range listed.Tools {
-		name := m.uniqueName("mcp__" + safeName(server.Name) + "__" + safeName(remote.Name))
-		tool := &mcpTool{manager: m, connection: connection, exposedName: name, remoteName: remote.Name, definition: contract.ToolDefinition{Type: "function", Function: contract.FunctionDefinition{Name: name, Description: "[MCP:" + server.Name + "] " + firstNonempty(remote.Description, remote.Name), Parameters: normalizeSchema(remote.InputSchema)}}}
+		name := deterministicToolName("mcp__"+safeName(server.Name)+"__"+safeName(remote.Name), used)
+		tool := &mcpTool{manager: m, connection: connection, exposedName: name, remoteName: remote.Name, definition: canonicalDefinition(contract.ToolDefinition{Type: "function", Function: contract.FunctionDefinition{Name: name, Description: "[MCP:" + server.Name + "] " + firstNonempty(remote.Description, remote.Name), Parameters: normalizeSchema(remote.InputSchema)}})}
 		connection.tools = append(connection.tools, tool)
 	}
+	fingerprint := state.MCPServerFingerprint(server, secrets.Env[server.Name])
+	definitions := make([]contract.ToolDefinition, 0, len(connection.tools))
+	for _, tool := range connection.tools {
+		definitions = append(definitions, tool.definition)
+	}
+	if m.surfaceStore != nil {
+		if err := m.surfaceStore.Put(state.ToolSurfaceSnapshot{Fingerprint: fingerprint, Server: server.Name, Tools: definitions, CapturedAt: time.Now().UTC()}); err != nil {
+			_ = session.Close()
+			return nil, fmt.Errorf("persist MCP tool surface for %s: %w", server.Name, err)
+		}
+	}
+	m.mu.Lock()
+	if !m.knownAtStart[fingerprint] {
+		for _, definition := range definitions {
+			m.pinned[definition.Function.Name] = canonicalDefinition(definition)
+		}
+		m.knownAtStart[fingerprint] = true
+		m.pendingSurface = true
+		m.pendingScopes = append(m.pendingScopes, "first handshake added MCP server "+server.Name)
+	}
+	m.mu.Unlock()
 	return connection, nil
 }
 
@@ -271,6 +419,19 @@ func (m *Manager) Close() error {
 }
 
 func (t *mcpTool) Definition() contract.ToolDefinition { return t.definition }
+
+func (t *forwardingTool) Definition() contract.ToolDefinition { return t.definition }
+
+func (t *forwardingTool) Execute(ctx context.Context, arguments json.RawMessage) (string, error) {
+	name := t.definition.Function.Name
+	t.manager.mu.RLock()
+	live := t.manager.tools[name]
+	t.manager.mu.RUnlock()
+	if live == nil {
+		return "", fmt.Errorf("MCP tool %s is not connected yet", name)
+	}
+	return live.Execute(ctx, arguments)
+}
 
 func (t *mcpTool) Execute(ctx context.Context, arguments json.RawMessage) (string, error) {
 	if t.manager.confirm != nil {
@@ -354,6 +515,73 @@ func normalizeSchema(value any) map[string]any {
 		return schema
 	}
 	return map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": true}
+}
+
+func canonicalDefinition(definition contract.ToolDefinition) contract.ToolDefinition {
+	payload, _ := json.Marshal(definition)
+	var result contract.ToolDefinition
+	_ = json.Unmarshal(payload, &result)
+	if result.Type == "" {
+		result.Type = "function"
+	}
+	result.Function.Parameters = normalizeSchema(result.Function.Parameters)
+	return result
+}
+
+func deterministicToolName(base string, used map[string]bool) string {
+	if len(base) > 64 {
+		base = base[:64]
+	}
+	if !used[base] {
+		used[base] = true
+		return base
+	}
+	for index := 2; ; index++ {
+		suffix := fmt.Sprintf("_%d", index)
+		name := base[:min(len(base), 64-len(suffix))] + suffix
+		if !used[name] {
+			used[name] = true
+			return name
+		}
+	}
+}
+
+func cloneDefinitionsByName(values map[string]contract.ToolDefinition) map[string]contract.ToolDefinition {
+	result := make(map[string]contract.ToolDefinition, len(values))
+	for name, definition := range values {
+		result[name] = canonicalDefinition(definition)
+	}
+	return result
+}
+
+func definitionsEqual(left, right map[string]contract.ToolDefinition) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for name, definition := range left {
+		other, ok := right[name]
+		if !ok {
+			return false
+		}
+		a, _ := json.Marshal(definition)
+		b, _ := json.Marshal(other)
+		if string(a) != string(b) {
+			return false
+		}
+	}
+	return true
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]bool, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 type bearerTransport struct {
