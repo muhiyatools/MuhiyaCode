@@ -94,7 +94,7 @@ plan.md W1).
       records, both hit rates, latency, derived cost + price source, `unattributed_misses`),
       plus a raw provider-payload log as ground truth, in `benchmarks/cachebench/main.go`
       (D8; depends T004–T011)
-- [ ] T014 Capture the BASELINE arm: 3 runs of all scenarios on the current (pre-behavior-
+- [X] T014 Capture the BASELINE arm: 3 runs of all scenarios on the current (pre-behavior-
       change) build against the pinned concrete model, stored under
       `specs/001-prompt-cache-optimization/benchmarks/baseline/` (quickstart V4; FR-010).
       ⚠️ Gate: Phase 3 merges are forbidden until this lands. Requires a live gateway API key —
