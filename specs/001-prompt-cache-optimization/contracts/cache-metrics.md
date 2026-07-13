@@ -29,10 +29,13 @@ Rules:
 
 - Per-request `hit_rate = cache_read / (cache_read + cache_miss)`; null if either term null;
   denominators of 0 yield null (not NaN, not 100%).
-- Session `session_hit_rate = Σ cache_read / (Σ cache_read + Σ cache_miss)` over records with
-  both terms non-null.
-- `steady_state_hit_rate`: same, excluding `attribution=cold-start` records. **This is the
-  SC-001 acceptance figure.**
+- Session `session_hit_rate = Σ cache_read / (Σ cache_read + Σ cache_miss)` over main-stream
+  records with both terms non-null and `attribution != n/a`.
+- `steady_state_hit_rate`: same, excluding `attribution=cold-start`. This raw rate remains the
+  workload/cost KPI.
+- `prefix_stability_rate = Σcache_read / Σ(prompt_tokens - new_tail_tokens)` over main-stream
+  requests after the cold start, where `new_tail_tokens = max(0, prompt_n - prompt_n-1)` until
+  a byte-accurate provider tail count is available. **This is the SC-001 acceptance figure.**
 - Cost derivations always name their price-table source and are labeled *derived*; they never
   masquerade as provider-reported amounts.
 
@@ -50,8 +53,9 @@ Rules:
 
 ## Display
 
-- `/context` MUST show: session totals (prompt, output), cache split (read / uncached), both
-  hit rates (session, steady-state), unavailable-request count when > 0, and the last
+- `/context` MUST show: session totals (prompt, output), cache split (read / uncached), session,
+  raw steady-state, and prefix-stability rates, per-stream request counts, unavailable-request
+  count when > 0, and the last
   prefix-change annotation with its cause.
 - The activity line MUST show a compact per-request cache tag when available (e.g.,
   `cache 99% (12.3k read / 128 new)`); it shows nothing fabricated when metrics are
@@ -69,11 +73,12 @@ Rules:
 - The miss-attribution pipeline consumes `prefix_changed` + `change_reasons` from the
   PrefixShape comparison and the InvalidationEvent ledger
   ([invalidation-events.md](invalidation-events.md)); it MUST label every miss `agent`,
-  `provider`, `cold-start`, or `n/a` (SC-007: zero unexplained misses in benchmarks).
+  `agent-suspect`, `provider`, `cold-start`, or `n/a`. `provider` is permitted only inside the
+  expected-new-tail tolerance (SC-007: zero unexplained misses in benchmarks).
 
 ## Benchmark output (cachebench)
 
 Machine-readable JSON per run: scenario, build (`baseline`|`improved`), run index, per-request
-records (verbatim UsageRecord fields), aggregates (both hit rates), wall-clock, derived cost +
+records (verbatim UsageRecord fields), aggregates (raw and prefix-stability rates), wall-clock, derived cost +
 price-table source, `unattributed_misses`. Human summary printed after each run. Results are
 committed under `specs/001-prompt-cache-optimization/benchmarks/` (SC-005 evidence).

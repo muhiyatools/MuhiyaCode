@@ -14,10 +14,10 @@ Every chat-completions request body is conceptually partitioned:
 | Region | Content | Stability class |
 |---|---|---|
 | R1 | System message (agent instructions, environment, model addendum) | **Session-stable** |
-| R2 | `tools` array (workspace tools → engine built-ins → pinned MCP block) | **Session-stable** |
+| R2 | `tools` array plus `tool_choice` (workspace tools → engine built-ins → pinned MCP block) | **Session-stable** |
 | R3 | Settled history (all messages already transmitted in a prior request) | **Append-frozen** |
 | R4 | Active tail (newest user message incl. task brief/goal/plan blocks; current-turn assistant/tool messages) | Dynamic |
-| R5 | Body params (`model`, `temperature`, `top_p`, `max_tokens`, `stream`, `reasoning_effort`) + HTTP headers (`X-Muhiya-Effort`, auth) | Dynamic, non-prefix |
+| R5 | Non-rendering body params (`temperature`, `top_p`, `max_tokens`, `stream`, `reasoning_effort`) + HTTP headers (`X-Muhiya-Effort`, auth) | Dynamic, non-prefix |
 
 ## Invariants
 
@@ -53,8 +53,10 @@ budgets, current date, goal block, plan-mode block, steering, governor notices, 
 mode preferences — MUST attach to the newest user message or later. Nothing in R4 may modify
 R1–R3.
 
-**W6. R5 placement.** Reasoning effort, sampling params, and client identity ride body params
-or HTTP headers, never messages. Changing them MUST NOT alter R1–R3 bytes.
+**W6. Render-affecting parameters.** `tools` and `tool_choice` alter the provider-rendered
+prompt and are R2: both are session-constant absent a recorded `toolset-change` event.
+Reasoning effort, sampling params, and client identity ride body params or HTTP headers, never
+messages. Changing effort MUST NOT rewrite replayed R1–R3 bytes.
 
 **W7. Serialization determinism.** Identical logical request state MUST marshal to identical
 bytes: map-based envelopes rely on Go's sorted-key marshaling (locked by golden tests);
@@ -69,9 +71,9 @@ R2, and R3 byte-identically to the pre-restart serialization, given unchanged co
 and toolset. Divergence sources fixed by this feature (build-time date, probe flap, MCP
 arrival order) are regression-tested.
 
-**W10. Reasoning replay minimum.** Assistant reasoning content MUST NOT be replayed in R3,
-except the provider-required minimal `reasoning_content` key on thinking-mode assistant
-`tool_calls` turns.
+**W10. Reasoning replay minimum.** Assistant reasoning content MUST NOT be replayed in R3.
+The provider-required empty `reasoning_content` key on DeepSeek assistant `tool_calls` turns is
+derived solely from the settled message and model family, never from the current effort.
 
 **W11. Subagent conformance.** Subagent request streams satisfy W1–W10 within their own
 context (own R1/R2, own history). Subagent traffic MUST NOT mutate the main session's regions.

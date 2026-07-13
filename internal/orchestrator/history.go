@@ -13,6 +13,10 @@ const (
 	FoldNote              = "(folded - full output in session records)"
 	OutputTruncatedMarker = "chars truncated - narrow the query"
 	defaultFoldKeepChars  = 240
+	// minPruneBytes (T040, Reasonix prune.go) is the floor below which a tool
+	// result is left untouched — trimming a small result is not worth a prefix
+	// rewrite.
+	minPruneBytes = 1024
 )
 
 type HistorySnapshot struct {
@@ -35,6 +39,13 @@ type History struct {
 	windowInitialized bool
 	superseded        map[string]struct{}
 	persist           func(HistorySnapshot) error
+	// archive (T041) receives the originals of tool results about to be shortened
+	// by reclamation, BEFORE the mutation, so they stay recoverable. Optional.
+	archive func([]contract.PrunedRecord) error
+	// tokPerChar (T038) is the tokens/char ratio calibrated from real provider
+	// usage. 0 means uncalibrated → the estimator falls back to the fixed 0.25
+	// heuristic. Guarded by mu.
+	tokPerChar float64
 }
 
 type PressureInput struct {
@@ -70,6 +81,15 @@ func NewHistory(snapshot HistorySnapshot, persist func(HistorySnapshot) error) *
 		superseded:        make(map[string]struct{}),
 		persist:           persist,
 	}
+}
+
+// SetPruneArchive (T041) wires the archival hook invoked with the originals of
+// tool results about to be shortened by reclamation. Called once at engine
+// construction; nil disables archival (tests, unit engines).
+func (h *History) SetPruneArchive(fn func([]contract.PrunedRecord) error) {
+	h.mu.Lock()
+	h.archive = fn
+	h.mu.Unlock()
 }
 
 func (h *History) Snapshot() HistorySnapshot {
@@ -179,8 +199,15 @@ func (h *History) TrimAged(keepFull, trimmedChars, minBatch int) bool {
 }
 
 func (h *History) trimAgedLocked(keepFull, trimmedChars, minBatch int) int {
+	return trimAgedMessages(h.messages, h.superseded, keepFull, trimmedChars, minBatch)
+}
+
+// trimAgedMessages trims aged/superseded tool results to head+tail in place.
+// Pure over (messages, superseded set) so EstimateMaintainYield can dry-run it
+// on a clone without touching live history.
+func trimAgedMessages(messages []contract.Message, superseded map[string]struct{}, keepFull, trimmedChars, minBatch int) int {
 	var indexes []int
-	for i, message := range h.messages {
+	for i, message := range messages {
 		if message.Role == contract.RoleTool {
 			indexes = append(indexes, i)
 		}
@@ -192,24 +219,113 @@ func (h *History) trimAgedLocked(keepFull, trimmedChars, minBatch int) int {
 	}
 	var eligible []int
 	for _, index := range indexes {
-		message := h.messages[index]
+		message := messages[index]
 		_, isAged := aged[index]
-		_, isSuperseded := h.superseded[message.ToolCallID]
-		if (isAged || isSuperseded) && len(message.Content) > trimmedChars && !strings.Contains(message.Content, TrimNote) && !strings.Contains(message.Content, FoldNote) {
-			eligible = append(eligible, index)
+		_, isSuperseded := superseded[message.ToolCallID]
+		if !(isAged || isSuperseded) {
+			continue
 		}
+		// T040: a 1024-byte floor (do not trim small results) and error-pin
+		// (results that carry a failure reach compaction verbatim, since the
+		// error text is exactly what the model needs to change approach).
+		if len(message.Content) < minPruneBytes || len(message.Content) <= trimmedChars {
+			continue
+		}
+		if strings.Contains(message.Content, TrimNote) || strings.Contains(message.Content, FoldNote) || isErrorResult(message.Content) {
+			continue
+		}
+		eligible = append(eligible, index)
 	}
 	if len(eligible) < minBatch {
 		return 0
 	}
 	for _, index := range eligible {
-		content := h.messages[index].Content
-		head := content[:min(len(content), trimmedChars/2)]
-		tailSize := min(len(content)-len(head), trimmedChars/4)
+		content := messages[index].Content
+		// T040: content-aware geometry by the producing tool's kind. The tool
+		// name is resolved from the assistant tool_calls by ID (tool-result
+		// messages don't carry it), so this changes no wire bytes.
+		name := toolNameForResult(messages, messages[index].ToolCallID)
+		headBudget, tailBudget := snipHeadTail(name, trimmedChars)
+		head := content[:min(len(content), headBudget)]
+		tailSize := min(len(content)-len(head), tailBudget)
 		tail := content[len(content)-tailSize:]
-		h.messages[index].Content = head + "\n" + TrimNote + "\n" + tail
+		messages[index].Content = head + "\n" + TrimNote + "\n" + tail
 	}
 	return len(eligible)
+}
+
+// snipHeadTail (T040) returns the head/tail char budget for trimming a tool
+// result, content-aware by the producing tool's kind. Read-only results are
+// front-loaded (long head, short tail) because their signal is at the top;
+// side-effecting results split evenly because a failure can sit at either end.
+// Budgets are scaled to MuhiyaCode's per-effort trim budget rather than
+// Reasonix's absolute char counts, so overall reclamation aggressiveness is
+// unchanged — only the head/tail SHAPE adapts per kind.
+func snipHeadTail(toolName string, budget int) (head, tail int) {
+	if readonlyTools[toolName] {
+		return budget * 3 / 4, budget / 4
+	}
+	return budget / 2, budget / 2
+}
+
+// toolNameForResult finds the tool that produced a RoleTool result by matching
+// its ToolCallID against the assistant tool_calls earlier in the log. Returns
+// "" when unknown, which snipHeadTail treats as side-effecting (the
+// conservative, balanced default).
+func toolNameForResult(messages []contract.Message, toolCallID string) string {
+	for _, m := range messages {
+		if m.Role != contract.RoleAssistant {
+			continue
+		}
+		for _, call := range m.ToolCalls {
+			if call.ID == toolCallID {
+				return call.ToolName()
+			}
+		}
+	}
+	return ""
+}
+
+// isErrorResult reports whether a tool result carries a failure the model needs
+// verbatim (so it is pinned from trimming). Covers the main-loop "Tool X
+// failed:" shape and the Reasonix error:/blocked: prefixes.
+func isErrorResult(content string) bool {
+	lower := strings.ToLower(strings.TrimSpace(content))
+	if strings.HasPrefix(lower, "error:") || strings.HasPrefix(lower, "blocked:") {
+		return true
+	}
+	return strings.HasPrefix(lower, "tool ") && strings.Contains(lower, " failed:")
+}
+
+// EstimateMaintainYield (T007 / REV A1) returns how many estimated tokens a
+// Maintain(keepFull, trimmedChars, minBatch) call WOULD reclaim right now,
+// WITHOUT mutating history. The engine calls this before deciding to run
+// Maintain: below the minimum-yield floor it skips entirely, so no settled
+// bytes change and no invalidation event is owed. It runs the exact same fold
+// and trim algorithms (shared pure functions) on a deep clone, so the estimate
+// can never disagree with what Maintain actually does.
+func (h *History) EstimateMaintainYield(keepFull, trimmedChars, minBatch int) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	clone := cloneMessages(h.messages)
+	before := estimateMessagesTokens(clone)
+	folded := foldCompletedMessages(clone, min(h.lastTaskStart, len(clone)))
+	trimmed := trimAgedMessages(clone, h.superseded, keepFull, trimmedChars, minBatch)
+	if !folded && trimmed == 0 {
+		return 0
+	}
+	return max(0, before-estimateMessagesTokens(clone))
+}
+
+// estimateMessagesTokens mirrors estimatedLocked's per-message accounting for a
+// detached slice (no compactSummary term — the estimator only measures the
+// message body that fold/trim can shrink).
+func estimateMessagesTokens(messages []contract.Message) int {
+	total := 0
+	for _, message := range messages {
+		total += EstimateMessageTokens(message)
+	}
+	return total
 }
 
 func (h *History) FoldCompletedTasks() int {
@@ -225,10 +341,20 @@ func (h *History) FoldCompletedTasks() int {
 }
 
 func (h *History) foldCompletedLocked() bool {
-	limit := min(h.lastTaskStart, len(h.messages))
+	return foldCompletedMessages(h.messages, min(h.lastTaskStart, len(h.messages)))
+}
+
+// foldCompletedMessages folds completed-task tool output and assistant tool-call
+// arguments in place within messages[:limit]. It is pure over the slice so the
+// live maintenance path and the read-only yield estimator (EstimateMaintainYield)
+// share ONE algorithm — the estimate can never diverge from what Maintain does.
+func foldCompletedMessages(messages []contract.Message, limit int) bool {
+	if limit > len(messages) {
+		limit = len(messages)
+	}
 	changed := false
 	for i := 0; i < limit; i++ {
-		m := &h.messages[i]
+		m := &messages[i]
 		if m.Role == contract.RoleTool && len(m.Content) > defaultFoldKeepChars && !strings.Contains(m.Content, FoldNote) {
 			headline := strings.SplitN(m.Content, "\n", 2)[0]
 			m.Content = truncate(headline, 120) + " " + FoldNote
@@ -251,14 +377,58 @@ func (h *History) Maintain(keepFull, trimmedChars, minBatch int) MaintenanceResu
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	before := h.estimatedLocked()
+	// T041: snapshot the messages BEFORE mutating so we can archive the originals
+	// of any tool result the fold/trim shortens. Only clone when archival is
+	// actually wired — the clone is pure overhead otherwise.
+	var originals []contract.Message
+	if h.archive != nil {
+		originals = cloneMessages(h.messages)
+	}
 	folded := h.foldCompletedLocked()
 	trimmed := h.trimAgedLocked(keepFull, trimmedChars, minBatch)
 	if !folded && trimmed == 0 {
 		return MaintenanceResult{}
 	}
+	if originals != nil {
+		h.archiveChangedLocked(originals)
+	}
 	h.rewriteVersion++
 	h.saveLocked()
 	return MaintenanceResult{Changed: true, Folded: folded, FoldedTokens: max(0, before-h.estimatedLocked()), TrimmedTools: trimmed}
+}
+
+// archiveChangedLocked (T041) appends the originals of any RoleTool result whose
+// content the just-completed fold/trim shortened. Diff-based, so it needs no
+// cooperation from the pure fold/trim functions. Best-effort: an archive write
+// failure must never fail reclamation, so the error is swallowed.
+func (h *History) archiveChangedLocked(originals []contract.Message) {
+	if h.archive == nil {
+		return
+	}
+	var records []contract.PrunedRecord
+	for i := range h.messages {
+		if i >= len(originals) {
+			break
+		}
+		if h.messages[i].Role != contract.RoleTool || h.messages[i].Content == originals[i].Content {
+			continue
+		}
+		reason := "trim"
+		if strings.Contains(h.messages[i].Content, FoldNote) {
+			reason = "fold"
+		}
+		records = append(records, contract.PrunedRecord{
+			ToolCallID:      originals[i].ToolCallID,
+			ToolName:        toolNameForResult(originals, originals[i].ToolCallID),
+			Reason:          reason,
+			OriginalBytes:   len(originals[i].Content),
+			ReducedToBytes:  len(h.messages[i].Content),
+			OriginalContent: originals[i].Content,
+		})
+	}
+	if len(records) > 0 {
+		_ = h.archive(records)
+	}
 }
 
 func (h *History) IsToolResultIntact(callID string) bool {
@@ -285,7 +455,14 @@ func (h *History) CompactTo(summary string, keepRecentUnits int) {
 	}
 	removed := len(h.messages) - len(kept)
 	h.messages = cloneMessages(kept)
-	h.compactSummary = summary
+	// T042: digests ACCUMULATE — a new digest is appended to prior digests
+	// (which stay byte-identical) rather than replacing them, so repeated
+	// compaction is not lossy re-summarization that drops earlier facts.
+	if strings.TrimSpace(h.compactSummary) == "" {
+		h.compactSummary = summary
+	} else {
+		h.compactSummary = h.compactSummary + "\n\n" + summary
+	}
 	h.lastTaskStart = max(0, h.lastTaskStart-removed)
 	h.rewriteVersion++
 	h.lastWindowStart = 0
@@ -390,12 +567,63 @@ func cloneMessages(value []contract.Message) []contract.Message {
 func (h *History) estimatedLocked() int {
 	total := 0
 	if h.compactSummary != "" {
-		total += EstimateTokens(h.compactSummary)
+		total += h.estimateTextLocked(h.compactSummary)
 	}
 	for _, message := range h.messages {
-		total += EstimateMessageTokens(message)
+		total += h.estimateMessageLocked(message)
 	}
 	return total
+}
+
+// estimateMessageLocked (T038) estimates one message's tokens using the
+// calibrated tokens/char ratio when available, else the 0.25 fallback. Framing
+// is +4 per message and +8 per tool call (Reasonix constants); reasoning content
+// is excluded because it is never re-sent to the provider.
+func (h *History) estimateMessageLocked(m contract.Message) int {
+	if h.tokPerChar <= 0 {
+		return EstimateMessageTokens(m)
+	}
+	chars := len(m.Content)
+	for _, call := range m.ToolCalls {
+		chars += len(call.ToolName()) + len(call.ArgumentsJSON())
+	}
+	return int(float64(chars)*h.tokPerChar) + 4 + 8*len(m.ToolCalls)
+}
+
+func (h *History) estimateTextLocked(text string) int {
+	if h.tokPerChar <= 0 {
+		return EstimateTokens(text)
+	}
+	return int(float64(len(text))*h.tokPerChar) + 4
+}
+
+// Calibrate (T038) updates the tokens/char ratio from a real provider usage:
+// promptTokens / (systemChars + all message chars), clamped to (0.05, 2). An
+// out-of-range ratio, zero prompt tokens, or zero chars leaves the previous
+// ratio (or the 0.25 fallback) in place, so a bad sample never poisons the
+// estimator. systemChars is passed in because the system prompt is not stored in
+// the message log but IS counted in promptTokens.
+func (h *History) Calibrate(promptTokens, systemChars int) {
+	if promptTokens <= 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	chars := systemChars + len(h.compactSummary)
+	for _, m := range h.messages {
+		chars += len(m.Content)
+		for _, call := range m.ToolCalls {
+			chars += len(call.ToolName()) + len(call.ArgumentsJSON())
+		}
+	}
+	if chars <= 0 {
+		return
+	}
+	ratio := float64(promptTokens) / float64(chars)
+	if ratio < 0.05 || ratio > 2 {
+		return
+	}
+	h.tokPerChar = ratio
 }
 
 func (h *History) snapshotLocked() HistorySnapshot {

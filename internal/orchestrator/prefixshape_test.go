@@ -20,11 +20,16 @@ func TestPrefixShapeDeterministicAndRegionAware(t *testing.T) {
 	if reasons := CompareShape(first, second); len(reasons) != 0 {
 		t.Fatalf("identical shape changed: %v", reasons)
 	}
-	second.RewriteVersion++
 	second.ModelID = "other"
 	reasons := CompareShape(first, second)
-	if len(reasons) != 2 || reasons[0] != PrefixReasonHistory || reasons[1] != PrefixReasonModel {
+	if len(reasons) != 1 || reasons[0] != PrefixReasonModel {
 		t.Fatalf("unexpected reasons: %v", reasons)
+	}
+	// RewriteVersion is diagnostic only; actual history bytes are the detector.
+	second = first
+	second.RewriteVersion++
+	if reasons := CompareShape(first, second); len(reasons) != 0 {
+		t.Fatalf("rewrite label changed shape: %v", reasons)
 	}
 }
 
@@ -41,7 +46,10 @@ func TestPrefixShapeHashesWireRepresentationsAndToolOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	toolBytes, err := json.Marshal(tools)
+	toolBytes, err := json.Marshal(struct {
+		Tools      []contract.ToolDefinition `json:"tools"`
+		ToolChoice string                    `json:"tool_choice"`
+	}{tools, "auto"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,6 +64,37 @@ func TestPrefixShapeHashesWireRepresentationsAndToolOrder(t *testing.T) {
 	reasons := CompareShape(shape, reordered)
 	if len(reasons) != 1 || reasons[0] != PrefixReasonTools {
 		t.Fatalf("tool wire-order change reasons = %v", reasons)
+	}
+}
+
+func TestWirePrefixShapeDetectsSettledByteAndToolChoiceChanges(t *testing.T) {
+	request := contract.ChatRequest{
+		ModelID: "model", ToolChoice: "auto",
+		Messages: []contract.Message{{Role: contract.RoleSystem, Content: "system"}, {Role: contract.RoleUser, Content: "settled"}},
+		Tools:    []contract.ToolDefinition{{Function: contract.FunctionDefinition{Name: "tool"}}},
+	}
+	previous, err := NewWirePrefixShape(request, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutated := request
+	mutated.Messages = append([]contract.Message(nil), request.Messages...)
+	mutated.Messages[1].Content = "settleD"
+	current, err := NewWirePrefixShape(mutated, len(request.Messages), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reasons := CompareShape(previous, current); len(reasons) != 1 || reasons[0] != PrefixReasonHistory {
+		t.Fatalf("settled mutation reasons=%v", reasons)
+	}
+	mutated = request
+	mutated.ToolChoice = "none"
+	current, err = NewWirePrefixShape(mutated, len(request.Messages), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reasons := CompareShape(previous, current); len(reasons) != 1 || reasons[0] != PrefixReasonTools {
+		t.Fatalf("tool-choice reasons=%v", reasons)
 	}
 }
 

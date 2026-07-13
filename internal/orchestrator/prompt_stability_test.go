@@ -20,6 +20,25 @@ func TestPromptStabilityDynamicDateLivesOnlyInTaskBrief(t *testing.T) {
 	}
 }
 
+// TestSystemPromptByteIdenticalAcrossConstructions (T037 / REV A4.1) guards the
+// cache-discipline section: the system prompt must be byte-identical across two
+// constructions with identical config and carry no dynamic values, so the added
+// section costs one upgrade-time cache break and then rides the cache forever.
+func TestSystemPromptByteIdenticalAcrossConstructions(t *testing.T) {
+	ctx := PromptContext{Workspace: "/w", OS: "linux", Shell: "bash", Model: "m", HasWeb: true, HasSubagents: true, SubagentModel: "sub"}
+	a := SystemPrompt(ctx)
+	b := SystemPrompt(ctx)
+	if a != b {
+		t.Fatal("system prompt is not byte-identical across two constructions with identical config")
+	}
+	if !strings.Contains(a, "CACHE DISCIPLINE") {
+		t.Fatal("cache-discipline section (T037/A4.1) is missing from the system prompt")
+	}
+	if strings.Contains(a, time.Now().Format("2006-01-02")) {
+		t.Fatal("system prompt leaked a wall-clock date (dynamic value in the cached prefix)")
+	}
+}
+
 func TestPromptStabilityMCPToolBlockAcrossRegistrationOrders(t *testing.T) {
 	build := func(reverse bool) []byte {
 		registry := NewRegistry(&recordingTool{name: "workspace_tool"})

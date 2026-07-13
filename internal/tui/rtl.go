@@ -4,8 +4,6 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
-
-	"golang.org/x/text/unicode/bidi"
 )
 
 var rtlText = regexp.MustCompile(`[\x{0590}-\x{08FF}\x{FB1D}-\x{FDFF}\x{FE70}-\x{FEFF}]`)
@@ -25,39 +23,103 @@ var arabic = map[rune]arabicForms{
 
 func IsRTL(value string) bool { return rtlText.MatchString(value) }
 
+// TerminalBiDiControl returns the BDSM (Bi-Directional Support Mode) control
+// sequence MuhiyaCode emits at startup for the given RTL mode (feature 006 T033,
+// research R7). In auto/visual the app owns BiDi, so it emits explicit mode
+// (CSI 8 l) to stop a BiDi-capable terminal from double-reversing already-visual
+// output; in native the terminal owns BiDi (implicit, CSI 8 h). off emits nothing.
+// The sequence is ignored by BiDi-agnostic terminals, so it is safe everywhere.
+func TerminalBiDiControl(mode string) string {
+	switch mode {
+	case "off":
+		return ""
+	case "native":
+		return "\x1b[8h"
+	default: // auto / visual
+		return "\x1b[8l"
+	}
+}
+
+// CopyRoundTrip renders logical to its visual form and recovers logical from it,
+// reporting whether the round-trip preserved the text (feature 006; used by the
+// `doctor` diagnostics to confirm clipboard fidelity).
+func CopyRoundTrip(logical, mode string) (recovered string, ok bool) {
+	recovered = recoverLogical(renderForDisplay(logical, mode, "auto").Visual)
+	return recovered, recovered == logical
+}
+
+// RenderRTL is the back-compat wrapper over the centralized display pass; it
+// returns only the visual string (no alignment), matching its historic callers.
+// New code uses renderForDisplay directly to also get alignment.
 func RenderRTL(value, mode string) string {
-	if mode == "off" || mode == "native" || !IsRTL(value) {
-		return value
+	return renderForDisplay(value, mode, "left").Visual
+}
+
+// renderForDisplay is the single, centralized RTL display pass (feature 006 T008,
+// contracts/rtl-render.md). It turns one LOGICAL line into a DisplayLine: the
+// visual string for the screen plus the resolved alignment. It is a pure function
+// — no timestamps, no locale calls — so identical inputs give byte-identical
+// output. LTR-only and mode=off are byte-identical no-ops; mode=native emits
+// logical text (the terminal reorders); visual/auto shape + reorder per run with
+// grapheme-aware reversal so Arabic reads right-to-left while LTR runs stay intact.
+func renderForDisplay(logical, mode, align string) DisplayLine {
+	if mode == "off" || !IsRTL(logical) {
+		return DisplayLine{Visual: logical, Logical: logical, Align: "left"}
 	}
-	// auto intentionally uses the visual fallback: this is the most reliable
-	// default across Windows Terminal and legacy console/font combinations.
-	shaped := shapeArabic(value)
-	var paragraph bidi.Paragraph
-	if _, err := paragraph.SetString(shaped, bidi.DefaultDirection(bidi.RightToLeft)); err != nil {
-		return shaped
+	a := resolveAlign(logical, align)
+	if mode == "native" {
+		// The terminal's own BiDi engine reorders/shapes; the app emits logical text.
+		return DisplayLine{Visual: logical, Logical: logical, Align: a}
 	}
-	order, err := paragraph.Order()
-	if err != nil {
-		return shaped
-	}
-	var result strings.Builder
-	for index := 0; index < order.NumRuns(); index++ {
-		run := order.Run(index)
-		text := run.String()
-		if run.Direction() == bidi.RightToLeft {
-			text = bidi.ReverseString(text)
+	// visual / auto (the reliable default across Windows Terminal and legacy
+	// consoles): split into directional runs, order them for the screen (RTL base ⇒
+	// runs run right-to-left), and shape+reverse only RTL runs — grapheme-aware, so
+	// a base letter keeps its harakat (unlike bidi.ReverseString, Go #50633) — while
+	// LTR runs (paths, code, f(x), numbers, English) stay intact.
+	segs := segmentRuns(logical)
+	rtlBase := dominantRTL(logical)
+	var b strings.Builder
+	emit := func(seg dirRun) {
+		if seg.rtl {
+			b.WriteString(reverseGraphemes(shapeArabic(seg.text)))
+		} else {
+			b.WriteString(seg.text)
 		}
-		result.WriteString(text)
 	}
-	return result.String()
+	if rtlBase {
+		for i := len(segs) - 1; i >= 0; i-- {
+			emit(segs[i])
+		}
+	} else {
+		for _, seg := range segs {
+			emit(seg)
+		}
+	}
+	return DisplayLine{Visual: b.String(), Logical: logical, Align: a}
 }
 
 func shapeArabic(value string) string {
 	runes := []rune(value)
-	result := append([]rune(nil), runes...)
-	for index, char := range runes {
+	out := make([]rune, 0, len(runes))
+	for index := 0; index < len(runes); index++ {
+		char := runes[index]
+		// LAM + ALEF is a mandatory ligature: two logical runes render as one glyph.
+		// It takes the final form when the LAM connects to a preceding letter, else
+		// the isolated form.
+		if char == 'ل' && index+1 < len(runes) { // LAM
+			if lig, ok := lamAlefLigature(runes[index+1]); ok {
+				if prev, hasPrev := arabic[previousArabic(runes, index)]; hasPrev && prev.initial != 0 {
+					out = append(out, lig.final)
+				} else {
+					out = append(out, lig.isolated)
+				}
+				index++ // consume the ALEF
+				continue
+			}
+		}
 		forms, ok := arabic[char]
 		if !ok {
+			out = append(out, char)
 			continue
 		}
 		previous := previousArabic(runes, index)
@@ -68,16 +130,36 @@ func shapeArabic(value string) string {
 		connectNext := hasNext && forms.initial != 0
 		switch {
 		case connectPrevious && connectNext && forms.medial != 0:
-			result[index] = forms.medial
+			out = append(out, forms.medial)
 		case connectPrevious:
-			result[index] = forms.final
+			out = append(out, forms.final)
 		case connectNext:
-			result[index] = forms.initial
+			out = append(out, forms.initial)
 		default:
-			result[index] = forms.isolated
+			out = append(out, forms.isolated)
 		}
 	}
-	return string(result)
+	return string(out)
+}
+
+// lamAlef holds the isolated and final presentation forms of a LAM+ALEF ligature.
+type lamAlef struct{ isolated, final rune }
+
+// lamAlefLigature returns the ligature forms when alef is an ALEF variant that
+// combines with a preceding LAM (ok=false otherwise). Covers plain ALEF and the
+// madda/hamza-above/hamza-below variants (U+FEF5–U+FEFC).
+func lamAlefLigature(alef rune) (lamAlef, bool) {
+	switch alef {
+	case 'ا': // ALEF
+		return lamAlef{'ﻻ', 'ﻼ'}, true
+	case 'آ': // ALEF WITH MADDA ABOVE
+		return lamAlef{'ﻵ', 'ﻶ'}, true
+	case 'أ': // ALEF WITH HAMZA ABOVE
+		return lamAlef{'ﻷ', 'ﻸ'}, true
+	case 'إ': // ALEF WITH HAMZA BELOW
+		return lamAlef{'ﻹ', 'ﻺ'}, true
+	}
+	return lamAlef{}, false
 }
 
 func previousArabic(runes []rune, index int) rune {

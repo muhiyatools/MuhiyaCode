@@ -25,10 +25,14 @@ func ShouldConsiderOnboarding(prompt string) bool {
 	return vague
 }
 
-func GenerateOnboardingQuestions(parent context.Context, provider contract.Provider, modelID, prompt string) ([]contract.Question, contract.Usage) {
+func GenerateOnboardingQuestions(parent context.Context, provider contract.Provider, modelID, prompt, sessionID string) ([]contract.Question, contract.Usage) {
 	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
 	defer cancel()
-	response, err := provider.Chat(ctx, contract.ChatRequest{ModelID: modelID, Reasoning: contract.ReasoningLow, MaxTokens: 500, Messages: []contract.Message{
+	// C3/T011: an intentionally COLD, one-shot isolated stream. It uses the sub
+	// stream pin and a fresh system+user pair that is never appended to, so it is
+	// deliberately outside the main-loop prefix-shape guard — a single throwaway
+	// request whose cache miss is expected and bounded to once per onboarding.
+	response, err := provider.Chat(ctx, contract.ChatRequest{SessionID: sessionID, ModelID: modelID, Reasoning: contract.ReasoningLow, MaxTokens: 500, Messages: []contract.Message{
 		{Role: contract.RoleSystem, Content: "Return JSON only: {\"questions\":[{\"question\":\"...\",\"choices\":[{\"label\":\"...\",\"description\":\"...\",\"recommended\":true}]}]}. Ask at most two high-value implementation questions only when answers materially change the work. Each question needs 2-4 exclusive choices and exactly one recommended choice."},
 		{Role: contract.RoleUser, Content: prompt},
 	}})

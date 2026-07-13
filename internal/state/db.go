@@ -194,6 +194,122 @@ func (s *DB) Events(ctx context.Context, sessionID string, limit int) ([]contrac
 	return result, rows.Err()
 }
 
+const defaultPageByteBudget = 8 << 20 // 8 MiB (terminal-performance contract §2)
+
+// TranscriptPage returns a keyset-paginated slice of a session's durable events
+// in ascending ID order (feature 005 US1, terminal-performance contract §2). It
+// leaves the existing Events callers untouched. Offset pagination is never used;
+// paging is by exclusive stable-ID cursor. One oversized entry may occupy a page
+// by itself. hasOlder/hasNewer report whether another keyset page exists.
+func (s *DB) TranscriptPage(ctx context.Context, req contract.TranscriptPageRequest) (contract.TranscriptPage, error) {
+	limit := req.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+	budget := req.ByteBudget
+	if budget <= 0 {
+		budget = defaultPageByteBudget
+	}
+	page := contract.TranscriptPage{SessionID: req.SessionID, Generation: req.Generation}
+	var query string
+	var args []any
+	switch req.Direction {
+	case contract.PageBefore:
+		query = `SELECT id, session_id, role, type, content, created_at FROM (SELECT id, session_id, role, type, content, created_at FROM events WHERE session_id=? AND id<? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`
+		args = []any{req.SessionID, req.Cursor, limit + 1}
+	case contract.PageAfter:
+		query = `SELECT id, session_id, role, type, content, created_at FROM events WHERE session_id=? AND id>? ORDER BY id ASC LIMIT ?`
+		args = []any{req.SessionID, req.Cursor, limit + 1}
+	default: // initial-tail
+		query = `SELECT id, session_id, role, type, content, created_at FROM (SELECT id, session_id, role, type, content, created_at FROM events WHERE session_id=? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`
+		args = []any{req.SessionID, limit + 1}
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return page, err
+	}
+	defer rows.Close()
+	var fetched []contract.TranscriptEvent
+	for rows.Next() {
+		var event contract.TranscriptEvent
+		var created string
+		if err := rows.Scan(&event.ID, &event.SessionID, &event.Role, &event.Kind, &event.Content, &created); err != nil {
+			return page, err
+		}
+		event.CreatedAt, _ = parseTime(created)
+		fetched = append(fetched, event)
+	}
+	if err := rows.Err(); err != nil {
+		return page, err
+	}
+
+	// The extra (limit+1) row signals more entries exist beyond the window edge.
+	more := len(fetched) > limit
+	entries := fetched
+	if more {
+		if req.Direction == contract.PageAfter {
+			entries = fetched[:limit] // drop the newest extra (last, ascending)
+		} else {
+			entries = fetched[len(fetched)-limit:] // drop the oldest extra (first)
+		}
+	}
+	switch req.Direction {
+	case contract.PageAfter:
+		page.HasNewer, page.HasOlder = more, true
+	case contract.PageBefore:
+		page.HasOlder, page.HasNewer = more, true
+	default:
+		page.HasOlder, page.HasNewer = more, false
+	}
+
+	entries, trimmed := trimToByteBudget(entries, budget, req.Direction)
+	if trimmed {
+		if req.Direction == contract.PageAfter {
+			page.HasNewer = true
+		} else {
+			page.HasOlder = true
+		}
+	}
+
+	page.Entries = entries
+	for _, event := range entries {
+		page.RawBytes += len(event.Content)
+	}
+	if len(entries) > 0 {
+		page.OldestID = entries[0].ID
+		page.NewestID = entries[len(entries)-1].ID
+	}
+	return page, nil
+}
+
+// trimToByteBudget keeps entries within the raw-byte budget by dropping from the
+// edge farthest from the viewport (oldest for tail/before, newest for after),
+// always keeping at least one entry so a single oversized entry still loads.
+func trimToByteBudget(entries []contract.TranscriptEvent, budget int, direction contract.PageDirection) ([]contract.TranscriptEvent, bool) {
+	total := 0
+	for _, event := range entries {
+		total += len(event.Content)
+	}
+	if total <= budget || len(entries) <= 1 {
+		return entries, false
+	}
+	trimmed := false
+	if direction == contract.PageAfter {
+		for total > budget && len(entries) > 1 {
+			total -= len(entries[len(entries)-1].Content)
+			entries = entries[:len(entries)-1]
+			trimmed = true
+		}
+	} else {
+		for total > budget && len(entries) > 1 {
+			total -= len(entries[0].Content)
+			entries = entries[1:]
+			trimmed = true
+		}
+	}
+	return entries, trimmed
+}
+
 func (s *DB) AddCheckpoint(ctx context.Context, id, sessionID, description string) error {
 	_, err := s.db.ExecContext(ctx, `INSERT INTO checkpoints(id, session_id, description, created_at) VALUES(?,?,?,?)`, id, sessionID, description, nowText())
 	return err

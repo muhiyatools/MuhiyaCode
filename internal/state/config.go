@@ -19,7 +19,7 @@ func DefaultSettings() contract.Settings {
 	settings.Provider.BaseURL = "https://api.muhiya.com/v1"
 	settings.Provider.Models = []contract.Model{}
 	settings.PermissionMode = contract.PermissionNormal
-	settings.Effort = contract.EffortLow
+	settings.Effort = contract.EffortHigh
 	settings.Theme = "muhiya-dark"
 	settings.Shell.Preferred = "auto"
 	settings.Shell.TimeoutMS = 120_000
@@ -159,16 +159,44 @@ func AutoAssignModels(settings *contract.Settings) {
 	ranked := append([]contract.Model(nil), settings.Provider.Models...)
 	sort.SliceStable(ranked, func(i, j int) bool { return modelScore(ranked[i]) > modelScore(ranked[j]) })
 	if !modelExists(settings.Provider.Models, settings.Provider.ActiveModelID) {
-		settings.Provider.ActiveModelID = ranked[0].ID
+		// Prefer a Pro/Reasoner-class model for the main agent; fall back to the
+		// highest-scoring model when no name matches (deterministic ranked order).
+		if pro, ok := firstModelMatching(ranked, "pro", "reasoner", "max", "large"); ok {
+			settings.Provider.ActiveModelID = pro.ID
+		} else {
+			settings.Provider.ActiveModelID = ranked[0].ID
+		}
 	}
 	if !modelExists(settings.Provider.Models, settings.Provider.SubagentModelID) {
-		for i := len(ranked) - 1; i >= 0; i-- {
-			if ranked[i].ID != settings.Provider.ActiveModelID || len(ranked) == 1 {
-				settings.Provider.SubagentModelID = ranked[i].ID
-				break
+		// Prefer a Flash/lite-class model for the subagent; fall back to the
+		// lowest-scoring model that is not already the main model.
+		if flash, ok := firstModelMatching(ranked, "flash", "mini", "lite", "fast", "small"); ok && (flash.ID != settings.Provider.ActiveModelID || len(ranked) == 1) {
+			settings.Provider.SubagentModelID = flash.ID
+		} else {
+			for i := len(ranked) - 1; i >= 0; i-- {
+				if ranked[i].ID != settings.Provider.ActiveModelID || len(ranked) == 1 {
+					settings.Provider.SubagentModelID = ranked[i].ID
+					break
+				}
 			}
 		}
 	}
+}
+
+// firstModelMatching returns the first model in ranked order whose id or name
+// contains any of the given lowercase substrings. It lets AutoAssignModels honor
+// an explicit family preference (Pro for main, Flash for subagent) while keeping
+// the score-based ranking as the tiebreaker and fallback.
+func firstModelMatching(models []contract.Model, substrings ...string) (contract.Model, bool) {
+	for _, model := range models {
+		name := strings.ToLower(model.ID + " " + model.Name)
+		for _, sub := range substrings {
+			if strings.Contains(name, sub) {
+				return model, true
+			}
+		}
+	}
+	return contract.Model{}, false
 }
 
 func UpsertModel(settings *contract.Settings, model contract.Model, activate bool) contract.Model {

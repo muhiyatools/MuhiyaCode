@@ -49,6 +49,23 @@ terminate on cancellation; no package-global worker goroutines are allowed.
    receives a convergence warning, then lands with tools disabled and a factual
    final report.
 9. The TUI remains usable at narrow widths, without color, and in non-TTY line
-   mode. Meaning is never conveyed by color alone.
-10. Releases are static Go binaries for Windows, Linux, and macOS on amd64 and
+   mode. Meaning is never conveyed by color alone. Colors resolve from a semantic
+   token palette (dark/light, `NO_COLOR`-aware); the terminal's own background is
+   respected rather than force-filled, and all non-ASCII glyphs route through a
+   single table with an ASCII fallback. Below a 60×20 floor the UI shows one
+   clean "terminal too small" message instead of a collapsed layout.
+10. Per-task cost is measured, never estimated: credits shown in the task summary
+    and `/context` come only from the gateway's per-request `muhiya_log` cost
+    field (USD, ×100 = credits), summed over the task's own usage records; any
+    turn without a reported cost makes that task's credits unavailable rather
+    than guessed. The `/usage` command reads account usage from a key-
+    authenticated gateway endpoint (no admin credentials client-side).
+11. Releases are static Go binaries for Windows, Linux, and macOS on amd64 and
     arm64, with one linker-injected version and checksumed archives.
+12. The TUI is mouse-native: an immutable per-frame InteractionMap resolves every
+    click/hover to the same action as its keyboard equivalent (command rows,
+    modal/MCP choices, tool/subagent chips, the composer), and dragging over
+    transcript text selects it with Ctrl+C copying via OSC 52. All of this is
+    presentation-only — it never reaches the request-assembly path or the prefix
+    cache. On very long sessions the in-memory transcript window is bounded (with a
+    visible trim marker); the durable session transcript is never truncated.

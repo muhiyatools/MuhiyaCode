@@ -140,9 +140,64 @@ func (r *Registry) Execute(ctx context.Context, name string, arguments json.RawM
 	tool := r.tools[name]
 	r.mu.RUnlock()
 	if tool == nil {
+		// H8: a tool whose name matches the mcp__ prefix is most likely a
+		// dead MCP definition (server disconnected mid-task). Surface a
+		// clear message instead of the generic "unknown tool" so the model
+		// does not waste turns retrying it.
+		if strings.HasPrefix(name, "mcp__") {
+			return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
+		}
+		// 004 US3 (T034): point a hallucinated tool name at the closest real one so
+		// the model corrects in one step instead of guessing again.
+		if suggestion := r.nearestToolName(name, allowed); suggestion != "" {
+			return "", fmt.Errorf("unknown tool %s. Closest available: %s.", name, suggestion)
+		}
 		return "", fmt.Errorf("unknown tool %s", name)
 	}
 	return tool.Execute(ctx, arguments)
+}
+
+// nearestToolName returns the registered (and, if a filter is set, allowed) tool
+// name closest to the given name within an edit distance of 3, or "" when none
+// is close enough. Iteration follows insertion order and ties break toward the
+// smaller edit distance then the earlier-registered name, so the suggestion is
+// deterministic.
+func (r *Registry) nearestToolName(name string, allowed map[string]bool) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	best, bestDist := "", 4
+	for _, candidate := range r.order {
+		if allowed != nil && !allowed[candidate] {
+			continue
+		}
+		if d := levenshtein(name, candidate); d < bestDist {
+			best, bestDist = candidate, d
+		}
+	}
+	return best
+}
+
+// levenshtein is the classic edit distance between two short tool names, used
+// only to suggest a correction for an unknown-tool error.
+func levenshtein(a, b string) int {
+	ar, br := []rune(a), []rune(b)
+	prev := make([]int, len(br)+1)
+	curr := make([]int, len(br)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ar); i++ {
+		curr[0] = i
+		for j := 1; j <= len(br); j++ {
+			cost := 1
+			if ar[i-1] == br[j-1] {
+				cost = 0
+			}
+			curr[j] = min(min(prev[j]+1, curr[j-1]+1), prev[j-1]+cost)
+		}
+		prev, curr = curr, prev
+	}
+	return prev[len(br)]
 }
 
 func CapToolOutput(output string, cap int) string {

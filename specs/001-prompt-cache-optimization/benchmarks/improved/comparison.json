@@ -18,15 +18,19 @@
         0.9637914380866783,
         0.9647002330743815
       ],
-      "baseline_mean": 0.9656990455530505,
-      "improved_mean": 0.9656015570674098,
-      "improved_variance_percentage_points": 0.4521561954491493,
+      "baseline_prefix_stability_rates": [],
+      "improved_prefix_stability_rates": [],
+      "baseline_mean": null,
+      "improved_mean": null,
+      "baseline_raw_mean": 0.9656990455530505,
+      "improved_raw_mean": 0.9656015570674098,
+      "improved_variance_percentage_points": null,
       "baseline_total_cost": null,
       "improved_total_cost": null,
       "cost_delta": null,
       "unattributed_misses": 0,
       "meets_steady_state_target": false,
-      "meets_variance_target": true
+      "meets_sc_005": false
     }
   }
 }

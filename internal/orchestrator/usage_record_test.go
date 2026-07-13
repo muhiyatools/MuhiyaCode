@@ -75,7 +75,7 @@ func TestEnginePersistsUsageSequenceAttributionAndResumeAggregate(t *testing.T) 
 	}
 }
 
-func TestEngineAttributesToolShapeChangeToAgent(t *testing.T) {
+func TestEngineRejectsToolShapeChangeWithoutLedgerEvent(t *testing.T) {
 	read, miss := 80, 20
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
 		{Content: "first", Usage: reportedUsage(100, 1, &read, &miss)},
@@ -99,14 +99,37 @@ func TestEngineAttributesToolShapeChangeToAgent(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry.Add(&recordingTool{name: "late_tool"})
-	if _, _, err := engine.Run(context.Background(), "again"); err != nil {
-		t.Fatal(err)
+	if _, _, err := engine.Run(context.Background(), "again"); err == nil {
+		t.Fatal("expected unrecorded tool shape change to fail")
 	}
-	if len(records) != 2 || records[1].Attribution != contract.CacheAttributionAgent || !records[1].PrefixChanged {
+	if len(records) != 1 {
 		t.Fatalf("records=%+v", records)
 	}
-	if len(records[1].ChangeReasons) != 1 || records[1].ChangeReasons[0] != PrefixReasonTools {
-		t.Fatalf("change reasons=%v", records[1].ChangeReasons)
+	if len(engine.InvalidationEvents()) != 0 {
+		t.Fatalf("unexpected invalidation events=%+v", engine.InvalidationEvents())
+	}
+}
+
+func TestEngineMarksUnexplainedPromptShrinkAgentSuspect(t *testing.T) {
+	read1, miss1, read2, miss2 := 0, 1000, 256, 644
+	provider := &scriptedProvider{responses: []contract.ChatResponse{
+		{Content: "first", Usage: reportedUsage(1000, 1, &read1, &miss1)},
+		{Content: "second", Usage: reportedUsage(900, 1, &read2, &miss2)},
+	}}
+	settings := engineSettings()
+	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(), Prompt: PromptContext{Model: "Test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engine.Run(context.Background(), "first"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engine.Run(context.Background(), "second"); err != nil {
+		t.Fatal(err)
+	}
+	records := engine.UsageRecords()
+	if records[1].Attribution != contract.CacheAttributionAgentSuspect {
+		t.Fatalf("shrink attribution=%q record=%+v", records[1].Attribution, records[1])
 	}
 }
 
@@ -141,6 +164,72 @@ func TestModelSwitchRefreshesPromptAndRecordsBoundary(t *testing.T) {
 	events := engine.InvalidationEvents()
 	if len(events) != 1 || events[0].Cause != contract.InvalidationModelSwitch || events[0].RequestSeq != 2 {
 		t.Fatalf("events=%+v", events)
+	}
+}
+
+// TestTaskUsageDeltaCoversAllStreamsAndLiveEmissionMatches: the per-task usage
+// (and therefore the summary's cache %) must aggregate EVERY request the task
+// made — main turns AND subagent runs — and the live Usage callback must land
+// on exactly the same task-cumulative numbers, not the last request's.
+func TestTaskUsageDeltaCoversAllStreamsAndLiveEmissionMatches(t *testing.T) {
+	mainRead1, mainMiss1 := 0, 100
+	subRead, subMiss := 40, 60
+	mainRead2, mainMiss2 := 200, 8
+	provider := &scriptedProvider{responses: []contract.ChatResponse{
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("s", "run_subagent", `{"agent":"explore","task":"survey the config loader"}`)}, Usage: reportedUsage(100, 5, &mainRead1, &mainMiss1)},
+		{Content: "Findings: the loader is in config.go; validated.", Usage: reportedUsage(90, 4, &subRead, &subMiss)}, // subagent stream
+		{Content: "All done.", Usage: reportedUsage(208, 6, &mainRead2, &mainMiss2)},
+	}}
+	settings := engineSettings()
+	settings.Effort = contract.EffortHigh // grants a subagent budget
+	var emitted []contract.Usage
+	engine, err := NewEngine(EngineConfig{
+		Settings: &settings, Session: contract.Session{ID: "lifecycle", WorkspacePath: t.TempDir()},
+		Provider: provider, Registry: NewRegistry(&recordingTool{name: "run_subagent"}, &recordingTool{name: "read_file"}),
+		Prompt:    PromptContext{Model: "Test"},
+		Callbacks: contract.Callbacks{Usage: func(u contract.Usage) { emitted = append(emitted, u) }},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Large-class prompt so the task grants an agent budget.
+	_, stats, err := engine.Run(context.Background(), "Implement a new config loader module with validation across the package and verify it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRead := mainRead1 + subRead + mainRead2 // 240
+	wantMiss := mainMiss1 + subMiss + mainMiss2 // 168
+	if stats.Usage.CacheReadTokens == nil || stats.Usage.CacheMissTokens == nil {
+		t.Fatalf("task usage lost cache operands: %+v", stats.Usage)
+	}
+	if *stats.Usage.CacheReadTokens != wantRead || *stats.Usage.CacheMissTokens != wantMiss {
+		t.Fatalf("task cache delta = %d/%d, want %d/%d (all three requests)", *stats.Usage.CacheReadTokens, *stats.Usage.CacheMissTokens, wantRead, wantMiss)
+	}
+	rate := contract.HitRate(stats.Usage.CacheReadTokens, stats.Usage.CacheMissTokens)
+	wantRate := float64(wantRead) / float64(wantRead+wantMiss)
+	if rate == nil || *rate != wantRate {
+		t.Fatalf("summary hit rate = %v, want %v", rate, wantRate)
+	}
+	if len(emitted) == 0 {
+		t.Fatal("no live usage emissions")
+	}
+	last := emitted[len(emitted)-1]
+	if last.CacheReadTokens == nil || last.CacheMissTokens == nil || *last.CacheReadTokens != wantRead || *last.CacheMissTokens != wantMiss {
+		t.Fatalf("live emission diverged from the task summary: %+v", last)
+	}
+	if last.TotalTokens != stats.Usage.TotalTokens {
+		t.Fatalf("live tokens %d != summary tokens %d", last.TotalTokens, stats.Usage.TotalTokens)
+	}
+	// The live line must be task-cumulative mid-task too: the emission after the
+	// subagent's request already includes the first main turn AND the subagent.
+	sawSubCumulative := false
+	for _, u := range emitted {
+		if u.CacheReadTokens != nil && u.CacheMissTokens != nil && *u.CacheReadTokens == mainRead1+subRead && *u.CacheMissTokens == mainMiss1+subMiss {
+			sawSubCumulative = true
+		}
+	}
+	if !sawSubCumulative {
+		t.Fatalf("no emission carried the cumulative main+subagent usage: %+v", emitted)
 	}
 }
 

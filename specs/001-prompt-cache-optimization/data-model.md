@@ -17,15 +17,17 @@ One record per provider request, written append-only to `sessions/<id>/usage.jso
 | `seq` | int | Monotonic request counter within the session |
 | `at` | RFC3339 timestamp | Local clock at response completion (never enters any prompt) |
 | `model` | string | The `model` field actually sent |
+| `stream` | enum | `main`, `aux`, or `subagent`; cache-rate KPIs consume `main` only |
 | `prompt_tokens` | int, nullable | Provider `usage.prompt_tokens` verbatim |
 | `completion_tokens` | int, nullable | Provider `usage.completion_tokens` verbatim |
 | `cache_read_tokens` | int, nullable | DeepSeek `prompt_cache_hit_tokens`, else nested `prompt_tokens_details.cached_tokens`; null when neither present |
 | `cache_miss_tokens` | int, nullable | DeepSeek `prompt_cache_miss_tokens`; else derived `prompt_tokens − cache_read_tokens` when both terms exist |
+| `new_tail_tokens` | int, nullable | `max(0, prompt_n - prompt_n-1)` for consecutive main requests; excluded from stable-prefix denominator |
 | `miss_derived` | bool | true when `cache_miss_tokens` was derived, not reported |
 | `hit_rate` | float, nullable | `cache_read / (cache_read + cache_miss)`; null unless both terms non-null |
 | `prefix_changed` | bool | From PrefixShape comparison (entity 3) |
 | `change_reasons` | []string | Empty when `prefix_changed=false`; else invalidation causes (entity 4 taxonomy) |
-| `attribution` | enum | `agent` (shape changed), `provider` (shape unchanged, miss > new-tail estimate), `cold-start` (seq==1 or first after resume), `n/a` (metrics unavailable) |
+| `attribution` | enum | `agent` (shape changed), `agent-suspect` (shrink/read regression or miss above the new-tail bound), `provider` (shape stable and miss within bound), `cold-start`, `n/a` |
 
 **Validation**: provider-reported fields are stored verbatim — no clamping, no backfill.
 `hit_rate` is never computed from estimates (Constitution VI). A record is written even when
@@ -41,8 +43,9 @@ construction).
 | `requests` | count of records |
 | `sum_prompt`, `sum_completion` | sums over non-null fields |
 | `sum_cache_read`, `sum_cache_miss` | sums over non-null fields |
-| `session_hit_rate` | `Σread / (Σread + Σmiss)` over records where both non-null |
-| `steady_state_hit_rate` | same sum excluding records with `attribution ∈ {cold-start}` — the SC-001 figure |
+| `session_hit_rate` | `Σread / (Σread + Σmiss)` over main records where both non-null and attribution is not `n/a` |
+| `steady_state_hit_rate` | same sum excluding `cold-start`; raw workload/cost KPI |
+| `prefix_stability_rate` | `Σread / Σ(prompt-new_tail)` after cold start; the SC-001 figure |
 | `unavailable_requests` | count where cache fields null — display honesty guard |
 
 ## 3. PrefixShape
@@ -54,12 +57,15 @@ before each request send.
 |---|---|---|
 | `system_hash` | 64-bit+ hash | Over the exact system-message bytes as serialized |
 | `tools_hash` | hash | Over the canonical serialized tools array (post-sort, post-canonicalize) |
-| `rewrite_version` | int | `History` counter, bumped by every fold/trim/compact/window-drop |
+| `history_hash` | hash | Over every transmitted history-message byte after provider replay normalization |
+| `settled_hash` | hash | Over the current request slice corresponding to the preceding transmission |
+| `rewrite_version` | int | Diagnostic `History` counter; not itself the change detector |
 | `model_id` | string | Request `model` field |
 
-**Comparison** (`CompareShape(prev, cur) → []reason`): each differing field maps to a reason:
-`system` → prompt-rebuild family, `tools` → toolset-change family, `rewrite_version` →
-history-rewrite family, `model_id` → model-switch. Empty result = stable prefix.
+**Comparison** (`CompareShape(prev, cur) → []reason`): system bytes, serialized tools plus
+`tool_choice`, the previous full history hash versus the current settled hash, and model ID
+are compared. The rewrite counter remains a label, not a proxy for bytes. Empty result = stable
+prefix.
 
 **State transitions**:
 
@@ -135,12 +141,12 @@ Inputs and outputs of the `cachebench` harness (D8); results stored under
 searches, follow-ups), `min_turns ≥ 20`, fixed `model`, fixed `effort`, workspace fixture.
 
 **BenchmarkRunResult**: `scenario`, `build` (`baseline` | `improved`), `run_index` (1..N, N≥3),
-per-request UsageRecords, `session_hit_rate`, `steady_state_hit_rate`, `wall_clock_ms`,
+per-request UsageRecords, `session_hit_rate`, `steady_state_hit_rate`, `prefix_stability_rate`, `wall_clock_ms`,
 `derived_cost` (from configured price table, labeled with its source), `unattributed_misses`
 (must be 0 for SC-007).
 
 **Comparison rule** (SC-005): baseline vs improved compared per scenario with identical
-`model/effort/workspace`; improvement claim requires improved `steady_state_hit_rate ≥ 0.99`
+`model/effort/workspace`; improvement claim requires improved `prefix_stability_rate ≥ 0.99`
 on eligible requests, baseline below it, variance across runs ≤ 1 percentage point.
 
 ## Relationships

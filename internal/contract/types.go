@@ -5,6 +5,7 @@ package contract
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -167,6 +168,20 @@ type Usage struct {
 	Diagnostic                string `json:"diagnostic,omitempty"`
 	PromptTokensAvailable     bool   `json:"-"`
 	CompletionTokensAvailable bool   `json:"-"`
+	// CostUSD is the gateway-reported cost for one request, parsed from the
+	// muhiya_log SSE chunk (USD). nil = not reported (generic gateway, older
+	// gateway, or a non-streaming path) — credits displays are then omitted
+	// rather than estimated. Deliberately NOT folded by Add/subtractUsage:
+	// credits are computed by scanning the task's UsageRecords (see
+	// TaskCreditsUSD), not from the token delta.
+	CostUSD *float64 `json:"costUsd,omitempty"`
+	// CostEstimated mirrors the gateway's usage_estimated flag: true when the
+	// upstream disconnected and tokens/cost came from the gateway's local
+	// heuristic. Surfaced as a "~" marker, never presented as measured.
+	CostEstimated bool `json:"costEstimated,omitempty"`
+	// CostLogID carries muhiya_log.log_id (the gateway request_logs.id) so the
+	// benchmark credits cross-check can match TUI credits against the ledger.
+	CostLogID string `json:"-"`
 }
 
 func (u Usage) Add(next Usage) Usage {
@@ -214,13 +229,18 @@ func joinDiagnostic(left, right string) string {
 }
 
 type ChatRequest struct {
-	Messages         []Message
-	Tools            []ToolDefinition
-	ModelID          string
-	Temperature      *float64
-	MaxTokens        int
-	ToolChoice       string
-	Reasoning        ReasoningTier
+	Messages    []Message
+	Tools       []ToolDefinition
+	ModelID     string
+	Temperature *float64
+	MaxTokens   int
+	ToolChoice  string
+	Reasoning   ReasoningTier
+	// SessionID is a routing pin derived once per session per stream and sent
+	// as the X-Muhiya-Session header. Long-lived providers key their cache by
+	// routing identity; without it, an upstream model flip silently invalidates
+	// the entire cached prefix. Must not be serialized into the JSON body.
+	SessionID        string
 	OnToken          func(string)
 	OnReasoningToken func(string)
 }
@@ -261,6 +281,61 @@ type Plan struct {
 	UpdatedAt time.Time  `json:"updatedAt"`
 }
 
+// PlanPhase (004 US2) is the whole-plan lifecycle state, distinct from the
+// per-step PlanStatus. It is the single source of truth for every plan
+// affordance the UI shows: an executable hint appears ONLY in PlanPhasePending
+// (and, as a resumable-partial variant, PlanPhaseInterrupted). Terminal phases
+// (finished/superseded/discarded) never advertise executability again, even
+// across session resume. See specs/004-deepseek-agent-polish/contracts/plan-lifecycle.md.
+type PlanPhase string
+
+const (
+	PlanPhaseNone        PlanPhase = ""            // no plan for the session
+	PlanPhaseDrafting    PlanPhase = "drafting"    // plan mode on; plan being written/refined
+	PlanPhaseReady       PlanPhase = "ready"       // plan-ready signaled; awaiting the proceed/save/keep decision
+	PlanPhasePending     PlanPhase = "pending"     // saved for later; the ONLY phase that invites execution
+	PlanPhaseExecuting   PlanPhase = "executing"   // a run is actively working the plan's steps
+	PlanPhaseFinished    PlanPhase = "finished"    // all steps completed; terminal
+	PlanPhaseInterrupted PlanPhase = "interrupted" // execution ended with incomplete steps; resumable
+	PlanPhaseSuperseded  PlanPhase = "superseded"  // replaced by a newer plan; terminal
+	PlanPhaseDiscarded   PlanPhase = "discarded"   // explicitly cleared by the user; terminal
+)
+
+// IsTerminal reports whether the phase is an end state a plan never leaves
+// except by starting a fresh lifecycle (a new plan re-enters drafting).
+func (p PlanPhase) IsTerminal() bool {
+	return p == PlanPhaseFinished || p == PlanPhaseSuperseded || p == PlanPhaseDiscarded
+}
+
+// GoalSnapshot (G4) is the persisted shape of a goal stored in the per-session
+// goal.json sidecar next to the session files. Only goals with Status "active"
+// are restored on resume; completed/blocked goals are not persisted (the G2
+// tombstone is in-memory only, so a finished objective does not resurrect).
+// AutoTurns is restored for fidelity but resets at the next task boundary
+// (ResetGoalTaskCounter, G5), so a resumed goal gets a fresh per-task budget.
+type GoalSnapshot struct {
+	Text      string `json:"text"`
+	Status    string `json:"status"`
+	AutoTurns int    `json:"autoTurns"`
+	Blocked   string `json:"blocked,omitempty"`
+}
+
+// PlanStateSnapshot (P2) persists the plan-mode and pending-plan flags in the
+// per-session plan_state.json sidecar so they survive a restart. planMode
+// restores read-only planning; pendingPlan makes a bare "proceed" execute the
+// saved plan (P2 step 4). The plan CONTENT already persists via plan.md/tasks.md
+// (WritePlan); this sidecar carries only the two flags the flow needs.
+type PlanStateSnapshot struct {
+	PlanMode    bool `json:"planMode"`
+	PendingPlan bool `json:"pendingPlan"`
+	// Phase (004 US2) is the whole-plan lifecycle state. Additive and
+	// omitempty: a legacy sidecar without it is derived from the two booleans
+	// on load (pendingPlan→pending, planMode→drafting, else none). PlanMode and
+	// PendingPlan stay authoritative for their existing consumers and remain
+	// consistent with Phase.
+	Phase PlanPhase `json:"phase,omitempty"`
+}
+
 type QuestionChoice struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
@@ -277,6 +352,11 @@ type Answer struct {
 	Choice   QuestionChoice
 	Index    int
 }
+
+// ErrPlanModeExited (P2) is returned by the orchestrator's exit_plan_mode
+// dispatch to signal that the current task should finalize while leaving
+// plan-mode state to the TUI/handler that picks up after the task ends.
+var ErrPlanModeExited = errors.New("plan ready: awaiting user choice")
 
 type AgentEvent struct {
 	Kind      string
@@ -304,12 +384,28 @@ type ContextInfo struct {
 	Percent           float64
 }
 
+// PrunedRecord (T041) archives a tool result BEFORE reclamation shortens it, so
+// the original is recoverable for debugging. Appended to the session's
+// pruned.jsonl before any fold/trim mutates history.
+type PrunedRecord struct {
+	ToolCallID      string `json:"toolCallId"`
+	ToolName        string `json:"toolName"`
+	Reason          string `json:"reason"` // "fold" | "trim"
+	OriginalBytes   int    `json:"originalBytes"`
+	ReducedToBytes  int    `json:"reducedToBytes"`
+	OriginalContent string `json:"originalContent"`
+}
+
 type TaskStats struct {
-	DurationMS         int64               `json:"durationMs"`
-	Effort             EffortLevel         `json:"effort"`
-	TaskClass          string              `json:"taskClass"`
-	Usage              Usage               `json:"usage"`
-	AgentUsage         Usage               `json:"agentUsage"`
+	DurationMS int64       `json:"durationMs"`
+	Effort     EffortLevel `json:"effort"`
+	TaskClass  string      `json:"taskClass"`
+	Usage      Usage       `json:"usage"`
+	AgentUsage Usage       `json:"agentUsage"`
+	// SessionHitRate (T043) is the cumulative session cache-hit rate from the
+	// usage aggregate (provider-fields-only denominator), surfaced in the
+	// persistent usage footer alongside the per-task cache tag.
+	SessionHitRate     *float64            `json:"sessionHitRate,omitempty"`
 	PeakContextPercent float64             `json:"peakContextPercent"`
 	ToolCalls          int                 `json:"toolCalls"`
 	AgentRuns          int                 `json:"agentRuns"`
@@ -321,10 +417,44 @@ type TaskStats struct {
 	DisciplineScore    int                 `json:"disciplineScore"`
 	DoneCriteria       string              `json:"doneCriteria,omitempty"`
 	Invalidations      []InvalidationEvent `json:"invalidations,omitempty"`
+	// PlanReady (P2) is set when a plan-mode task ended via exit_plan_mode or a
+	// free-text plan finish. The TUI opens the Proceed now / Proceed later / Keep
+	// planning modal when it sees this on the task-complete stats.
+	PlanReady bool `json:"planReady,omitempty"`
+	// TerminatedReason (H5) is set when a task was force-finalized by the token
+	// circuit breaker or the distinct-failure terminator. The TUI surfaces it as
+	// a warn notice so the user knows why the task stopped early.
+	TerminatedReason string `json:"terminatedReason,omitempty"`
+	// StopCause (003) marks a task that ended early from an interruption rather
+	// than a natural finish: user stop (Esc/cancel), a provider/stream error, or
+	// a connection loss. Empty means the task completed normally. It drives the
+	// dimmed "interrupted" marker on the task summary and is independent of the
+	// H5-only TerminatedReason (which keeps its own "Task terminated" notice).
+	StopCause string `json:"stopCause,omitempty"`
+	// CreditsUSD (003) is the task's cost, summed from the CostUSD of the usage
+	// records inside the task's record range under the member-set rules (empty-
+	// usage records excluded; any remaining nil ⇒ nil, i.e. credits unavailable).
+	// nil ⇒ the summary omits credits. Display converts via USDToCredits
+	// (2,500 credits per $25 of budget).
+	CreditsUSD *float64 `json:"creditsUsd,omitempty"`
+	// CreditsEstimated is true when any priced member of the task's record range
+	// was cost-estimated; the summary prefixes credits with "~".
+	CreditsEstimated bool `json:"creditsEstimated,omitempty"`
 }
 
+// StopCause values for TaskStats.StopCause (003, FR-013a).
+const (
+	StopCauseUserStop   = "user stop"
+	StopCauseError      = "error"
+	StopCauseDisconnect = "disconnect"
+)
+
 type Callbacks struct {
-	Status         func(string)
+	Status func(string)
+	// Notice carries a transient user-facing announcement (e.g. "compaction
+	// freed 40k tokens") that should outlive the next status update; the TUI
+	// shows it as a flash notice instead of the one-line status.
+	Notice         func(string)
 	Token          func(string)
 	ReasoningToken func(string)
 	ToolStart      func(name string, input json.RawMessage)
@@ -343,5 +473,11 @@ type Callbacks struct {
 func (c Callbacks) EmitStatus(value string) {
 	if c.Status != nil {
 		c.Status(value)
+	}
+}
+
+func (c Callbacks) EmitNotice(value string) {
+	if c.Notice != nil {
+		c.Notice(value)
 	}
 }

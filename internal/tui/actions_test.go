@@ -24,6 +24,27 @@ func TestDisplayHonestyUnavailableAndReportedZero(t *testing.T) {
 	}
 }
 
+// TestFormatUsageCreditsOnly locks in the credits-only /usage modal: plan
+// windows convert USD budgets at the plan rate (2,500 credits = $25) and render
+// total / used / remaining / percentage with a progress bar — never dollars.
+func TestFormatUsageCreditsOnly(t *testing.T) {
+	out := formatUsage(&UsageData{
+		PlanName:       "Pro",
+		Windows:        []UsageWindow{{Name: "monthly", BudgetUSD: 25, CurrentSpentUSD: 10, DurationSeconds: 2592000}},
+		ExtraTotal:     500,
+		ExtraRemaining: 400,
+		SpendTodayUSD:  1.25,
+	})
+	for _, expected := range []string{"Plan: Pro", "Total:     2500 credits", "Used:      1000 credits", "Remaining: 1500 credits", "40.0% used", "[", "█", "░", "Extra credits", "Remaining: 400 credits"} {
+		if !strings.Contains(out, expected) {
+			t.Fatalf("usage modal missing %q:\n%s", expected, out)
+		}
+	}
+	if strings.Contains(out, "$") {
+		t.Fatalf("usage modal displayed dollars:\n%s", out)
+	}
+}
+
 func TestContextReportShowsRatesAndInvalidations(t *testing.T) {
 	session, steady := .75, .9
 	report := formatContextReport(orchestrator.ContextReport{
@@ -31,7 +52,7 @@ func TestContextReportShowsRatesAndInvalidations(t *testing.T) {
 		UsageAggregate: contract.SessionUsageAggregate{SumPrompt: 100, SumCompletion: 10, SumCacheRead: 90, SumCacheMiss: 10, CacheAvailable: 1, SessionHitRate: &session, SteadyStateHitRate: &steady},
 		Invalidations:  []contract.InvalidationEvent{{At: time.Now(), Cause: contract.InvalidationToolsetChange, Scope: "mcp add demo"}},
 	})
-	for _, expected := range []string{"Cache read / uncached: 90 / 10", "Session hit rate: 75.00%", "Steady-state hit rate: 90.00%", "toolset-change: mcp add demo"} {
+	for _, expected := range []string{"Cache read / uncached: 90 / 10", "Session hit rate:      75.00%", "Steady-state hit rate: 90.00%", "toolset-change: mcp add demo"} {
 		if !strings.Contains(report, expected) {
 			t.Fatalf("report missing %q:\n%s", expected, report)
 		}

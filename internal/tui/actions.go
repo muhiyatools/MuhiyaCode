@@ -20,25 +20,13 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	args := strings.Fields(value)
 	command := strings.ToLower(args[0])
 	if m.busy {
-		allowed := command == "/reasoning" || command == "/effort" || command == "/goal" || command == "/context" || command == "/stop" || command == "/exit" || command == "/quit"
+		allowed := command == "/reasoning" || command == "/effort" || command == "/goal" || command == "/context"
 		if !allowed {
-			m.notify(command + " is unavailable while a task is running. Send plain text to steer the active task.")
+			m.notify(command + " is unavailable while a task is running. Press Esc to stop it, or send plain text to steer it.")
 			return nil
 		}
 	}
 	switch command {
-	case "/exit", "/quit":
-		if m.busy {
-			m.runtime.Engine.Cancel()
-		}
-		return tea.Quit
-	case "/stop":
-		if m.busy {
-			m.runtime.Engine.Cancel()
-			m.status = "Stopping…"
-		} else {
-			m.notify("No task is running.")
-		}
 	case "/context":
 		m.openInfo("Context usage", formatContextReport(m.runtime.Engine.ContextReport()))
 	case "/compact":
@@ -46,6 +34,8 @@ func (m *Model) runSlash(value string) tea.Cmd {
 			m.notify("Stop the running task before compacting.")
 			return nil
 		}
+		m.status = "Compacting conversation…"
+		m.notify("Compacting conversation — summarizing earlier turns…")
 		return actionCommand("compact", func() (any, error) { return m.runtime.Engine.Compact(m.ctx) })
 	case "/rewind":
 		if m.actions.Rewind == nil {
@@ -88,6 +78,17 @@ func (m *Model) runSlash(value string) tea.Cmd {
 			return nil
 		}
 		return actionCommand("logout", func() (any, error) { return nil, m.actions.Logout(m.ctx) })
+	case "/usage":
+		if m.actions.FetchUsage == nil {
+			m.notify("Usage data is unavailable in this build.")
+			return nil
+		}
+		if m.actions.IsLoggedIn != nil && !m.actions.IsLoggedIn() {
+			m.notify("Sign in with /login to view account usage.")
+			return nil
+		}
+		m.notify("Fetching usage…")
+		return actionCommand("usage", func() (any, error) { return m.actions.FetchUsage(m.ctx) })
 	case "/diff":
 		return m.submit("Inspect the current git diff and summarize the meaningful changes, risks, and verification status. Do not modify files.")
 	case "/new":
@@ -120,6 +121,8 @@ func (m *Model) runSlash(value string) tea.Cmd {
 			return nil
 		}
 		return m.openMCP()
+	case "/paste":
+		m.openPasteManager()
 	default:
 		m.notify("Unknown command: " + command)
 	}
@@ -146,6 +149,8 @@ func (m *Model) handleGoalCommand(rest string) tea.Cmd {
 	case "", "status":
 		if goal, ok := m.runtime.Engine.GoalSnapshot(); ok {
 			m.openInfo("Active goal", fmt.Sprintf("%s\n\nStatus: %s", goal.Text, goal.Status))
+		} else if last, ok := m.runtime.Engine.LastGoalResult(); ok {
+			m.openInfo("Last goal result", fmt.Sprintf("%s\n\nStatus: %s%s", last.Text, last.Status, suffix(last.Blocked)))
 		} else {
 			m.notify("No active goal. Use /goal <objective> to set one.")
 		}
@@ -153,21 +158,65 @@ func (m *Model) handleGoalCommand(rest string) tea.Cmd {
 		m.runtime.Engine.ClearGoal()
 		m.notify("Goal cleared.")
 	default:
-		m.runtime.Engine.SetGoal(rest)
-		m.notify("Goal set — the agent will keep working toward it until it is met.")
+		// B5/T023: busy-guard setting a goal mid-task. SetGoal flips plan mode
+		// off (G3), so allowing it while a task runs reintroduces the exact
+		// mid-turn mode change P5 guards /plan against. Status and clear stay
+		// allowed while busy (a query is read-only; clearing only removes tail
+		// content next task).
+		if m.busy {
+			m.notify("Cannot set a goal while a task is running.")
+			return nil
+		}
+		// G3 + G6: SetGoal returns a notice when it has to disable plan mode
+		// or when it replaces an active goal.
+		if notice := m.runtime.Engine.SetGoal(rest); notice != "" {
+			m.notify(notice)
+		} else {
+			m.notify("Goal set — the agent will keep working toward it until it is met.")
+		}
 	}
 	return nil
 }
 
+func suffix(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	return "\n\nReason: " + value
+}
+
 func (m *Model) handlePlanCommand(rest string) tea.Cmd {
 	if rest == "" {
+		if m.busy {
+			// P5: the bare /plan toggle is now busy-guarded. Half-applying a
+			// mode change mid-task turns some calls blocked and some allowed
+			// in the same turn and is the source of the inconsistent reads
+			// the audits flagged. Effort remains the only intentionally-live
+			// knob (engine.go:214).
+			m.notify("Cannot toggle plan mode while a task is running.")
+			return nil
+		}
 		on := !m.runtime.Engine.PlanMode()
-		m.runtime.Engine.SetPlanMode(on)
+		if notice := m.runtime.Engine.SetPlanMode(on); notice != "" {
+			m.notify(notice)
+		}
 		if on {
 			m.notify("Plan mode on — the agent researches and proposes a plan without editing. Run /plan again to resume editing.")
 		} else {
 			m.notify("Plan mode off — editing is allowed again.")
 		}
+		return nil
+	}
+	// 004 US2 (T12): /plan clear discards the current plan — a terminal state
+	// that withdraws every executable affordance.
+	if strings.EqualFold(strings.TrimSpace(rest), "clear") {
+		if m.busy {
+			m.notify("Finish the running task before clearing the plan.")
+			return nil
+		}
+		m.runtime.Engine.DiscardPlan()
+		m.notify("Plan discarded.")
 		return nil
 	}
 	if m.busy {
@@ -308,38 +357,155 @@ func (m *Model) resumeCommand(id string) tea.Cmd {
 	})
 }
 
+// formatUsage renders the /usage modal: the account plan's credit allowance as
+// a progress bar per budget window (total / used / remaining / percentage), plus
+// any extra credit balance. Everything is shown in credits — never dollars —
+// converted at the plan rate (2,500 credits = $25, contract.USDToCredits). The
+// modal is account-level only; session usage lives in /context.
+func formatUsage(data *UsageData) string {
+	lines := []string{}
+	if data.PlanName != "" {
+		lines = append(lines, "Plan: "+data.PlanName, "")
+	}
+	for i := range data.Windows {
+		w := data.Windows[i]
+		total := contract.USDToCredits(w.BudgetUSD)
+		used := contract.USDToCredits(w.CurrentSpentUSD)
+		reset := w.ResetTime
+		if t, err := time.Parse(time.RFC3339, w.ResetTime); err == nil {
+			reset = t.Local().Format("Jan 2 15:04")
+		}
+		lines = append(lines, strings.Title(w.Name))
+		lines = append(lines, creditMeterLines(used, total)...)
+		if reset != "" {
+			lines = append(lines, "  Resets "+reset)
+		}
+		lines = append(lines, "")
+	}
+	if data.ExtraTotal > 0 || data.ExtraRemaining > 0 {
+		lines = append(lines, "Extra credits")
+		lines = append(lines, creditMeterLines(data.ExtraTotal-data.ExtraRemaining, data.ExtraTotal)...)
+		lines = append(lines, "")
+	}
+	if len(lines) == 0 {
+		lines = append(lines, "No plan credit data was returned by the gateway.")
+	}
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// creditMeterLines renders one credit allowance as a progress bar plus the
+// total / used / remaining / percentage breakdown, all in credits.
+func creditMeterLines(used, total float64) []string {
+	if used < 0 {
+		used = 0
+	}
+	if used > total {
+		used = total
+	}
+	remaining := total - used
+	percent := 0.0
+	if total > 0 {
+		percent = used / total * 100
+	}
+	return []string{
+		fmt.Sprintf("  %s %5.1f%% used", renderBar(used, total, 24), percent),
+		fmt.Sprintf("  Total:     %s credits", formatCredits(total)),
+		fmt.Sprintf("  Used:      %s credits", formatCredits(used)),
+		fmt.Sprintf("  Remaining: %s credits", formatCredits(remaining)),
+	}
+}
+
+// renderBar draws a fixed-width block-character progress bar for used/total.
+func renderBar(used, total float64, width int) string {
+	fraction := 0.0
+	if total > 0 {
+		fraction = used / total
+	}
+	fraction = min(1, max(0, fraction))
+	filled := int(fraction*float64(width) + 0.5)
+	// A non-zero balance always shows at least one filled cell, and a bar only
+	// fills completely when the allowance is truly exhausted.
+	if used > 0 && filled == 0 {
+		filled = 1
+	}
+	if fraction < 1 && filled == width {
+		filled = width - 1
+	}
+	return "[" + strings.Repeat("█", filled) + strings.Repeat("░", width-filled) + "]"
+}
+
+// formatCredits renders a credit amount: whole credits without decimals,
+// fractional amounts with two.
+func formatCredits(value float64) string {
+	if value == float64(int64(value)) {
+		return fmt.Sprintf("%.0f", value)
+	}
+	return fmt.Sprintf("%.2f", value)
+}
+
+// formatContextReport renders the context modal as labeled, scannable groups
+// (003 T032/FR-017): Context window (with a fill bar), This session, Streams,
+// Cache health. Every datum available before the overhaul is preserved.
 func formatContextReport(report orchestrator.ContextReport) string {
 	aggregate := report.UsageAggregate
 	pressureSource := "provider-reported"
 	if report.PressureEstimated {
 		pressureSource = "estimated bootstrap"
 	}
+	free := max(0, report.ContextLimit-report.HistoryTokens)
 	lines := []string{
-		fmt.Sprintf("History in context: %s / %s tokens (%.1f%%)", formatTokens(report.HistoryTokens), formatTokens(report.ContextLimit), report.Percent),
-		fmt.Sprintf("Pressure input: %s tokens (%.1f%%, %s)", formatTokens(report.PressureTokens), report.PressurePercent, pressureSource),
+		"Context window",
+		fmt.Sprintf("  %s %5.1f%% full", renderBar(float64(report.HistoryTokens), float64(report.ContextLimit), 24), report.Percent),
+		fmt.Sprintf("  In use:   %s of %s tokens", formatTokens(report.HistoryTokens), formatTokens(report.ContextLimit)),
+		fmt.Sprintf("  Free:     %s tokens", formatTokens(free)),
+		fmt.Sprintf("  Pressure: %s tokens (%.1f%%, %s)", formatTokens(report.PressureTokens), report.PressurePercent, pressureSource),
 		"",
-		fmt.Sprintf("Session prompt / output: %s / %s", formatTokens(aggregate.SumPrompt), formatTokens(aggregate.SumCompletion)),
+		"This session",
+		fmt.Sprintf("  Prompt / output tokens: %s / %s", formatTokens(aggregate.SumPrompt), formatTokens(aggregate.SumCompletion)),
+	}
+	// Session credits (contract.USDToCredits) under the member-set honesty rule.
+	if report.SessionCreditsUSD != nil {
+		prefix := ""
+		if report.SessionCreditsEstimated {
+			prefix = "~"
+		}
+		lines = append(lines, fmt.Sprintf("  Credits used: %s%.2f", prefix, contract.USDToCredits(*report.SessionCreditsUSD)))
+	} else if report.SessionCreditsEligible > 0 {
+		lines = append(lines, fmt.Sprintf("  Credits used: unavailable (%d of %d requests priced)", report.SessionCreditsPriced, report.SessionCreditsEligible))
+	} else {
+		lines = append(lines, "  Credits used: unavailable")
 	}
 	if aggregate.CacheAvailable > 0 {
-		lines = append(lines,
-			fmt.Sprintf("Cache read / uncached: %s / %s", formatTokens(aggregate.SumCacheRead), formatTokens(aggregate.SumCacheMiss)),
-			"Session hit rate: "+formatRate(aggregate.SessionHitRate),
-			"Steady-state hit rate: "+formatRate(aggregate.SteadyStateHitRate),
-		)
+		lines = append(lines, fmt.Sprintf("  Cache read / uncached: %s / %s", formatTokens(aggregate.SumCacheRead), formatTokens(aggregate.SumCacheMiss)))
 	} else {
-		lines = append(lines, "Cache read / uncached: unavailable", "Session hit rate: unavailable", "Steady-state hit rate: unavailable")
+		lines = append(lines, "  Cache read / uncached: unavailable")
 	}
+	lines = append(lines,
+		"",
+		"Streams",
+		fmt.Sprintf("  Requests: main %d · aux %d · subagent %d", aggregate.MainRequests, aggregate.AuxRequests, aggregate.SubagentRequests),
+	)
 	if aggregate.UnavailableRequests > 0 {
-		lines = append(lines, fmt.Sprintf("Cache metrics unavailable: %d request(s)", aggregate.UnavailableRequests))
+		lines = append(lines, fmt.Sprintf("  Cache metrics unavailable: %d request(s)", aggregate.UnavailableRequests))
 	}
+	lines = append(lines,
+		"",
+		"Cache health",
+		"  Session hit rate:      "+formatRate(aggregate.SessionHitRate),
+		"  Steady-state hit rate: "+formatRate(aggregate.SteadyStateHitRate),
+		"  Prefix stability rate: "+formatRate(aggregate.PrefixStabilityRate),
+	)
 	if report.MaintenanceLatched {
-		lines = append(lines, "Automatic maintenance: paused by anti-thrash latch")
+		lines = append(lines, "  Automatic maintenance: paused by anti-thrash latch")
 	}
 	if len(report.Invalidations) > 0 {
-		lines = append(lines, "", "Recent cache invalidations:")
+		lines = append(lines, "  Recent cache invalidations:")
 		start := max(0, len(report.Invalidations)-5)
 		for _, event := range report.Invalidations[start:] {
-			lines = append(lines, fmt.Sprintf("- %s: %s (%s)", event.Cause, event.Scope, event.At.Local().Format("15:04:05")))
+			lines = append(lines, fmt.Sprintf("    - %s: %s (%s)", event.Cause, event.Scope, event.At.Local().Format("15:04:05")))
 		}
 	}
 	return strings.Join(lines, "\n")
@@ -361,15 +527,28 @@ func actionCommand(kind string, run func() (any, error)) tea.Cmd {
 
 func (m *Model) handleAction(action actionMsg) tea.Cmd {
 	if action.err != nil {
+		if action.kind == "compact" {
+			m.status = "Ready"
+		}
 		m.warn(action.kind + " failed: " + action.err.Error())
 		return nil
 	}
 	switch action.kind {
 	case "compact", "rewind":
+		if action.kind == "compact" {
+			m.status = "Ready"
+		}
 		if text, ok := action.value.(string); ok {
 			m.notify(text)
 		}
 	case "mcp-list":
+		// M2: a refresh tick can land here while the MCP modal is open.
+		// Stay in the same modal and update the choices in place so the
+		// user is not bounced into a fresh selection every 500ms.
+		if m.mcpModalAtRest {
+			m.refreshMCPChoices(action.value)
+			return nil
+		}
 		return m.showMCPList(action.value)
 	case "mcp-action":
 		return m.afterMCPAction(action.value)
@@ -380,6 +559,12 @@ func (m *Model) handleAction(action actionMsg) tea.Cmd {
 		m.notify("API key saved.")
 	case "logout":
 		m.notify("Signed out. The stored API key was cleared.")
+	case "usage":
+		if data, ok := action.value.(*UsageData); ok && data != nil {
+			m.openInfo("Account usage", formatUsage(data))
+		} else {
+			m.notify("No usage data was returned.")
+		}
 	case "permission":
 		m.notify("Permission mode: " + string(m.runtime.Settings.PermissionMode))
 	case "settings":
@@ -389,13 +574,38 @@ func (m *Model) handleAction(action actionMsg) tea.Cmd {
 		if ok && payload.runtime.Engine != nil {
 			m.runtime = payload.runtime
 			m.items, m.agents, m.agentByID, m.viewAgent = nil, nil, make(map[string]*agentView), ""
+			// L2: also drop the active-tool index and the streaming draft, which point
+			// into the discarded session's items; a stale entry would otherwise linger.
+			m.activeTools = make(map[string]*toolView)
+			m.draft.Reset()
+			m.followOutput = true // US2 T033: a switched-in session starts pinned to the latest
+			m.input.Reset()       // US5 T067: drop the previous session's draft
+			m.releasePastes()     // US5 T067: and its stashed paste blocks
+			m.resetPaging()       // US1 T020: bump the page generation; cancel stale page loads
 			m.loadEvents(payload.events)
 			m.plan, m.usage = payload.runtime.Engine.CurrentPlan(), payload.runtime.Engine.Usage()
 			// Show the restored session's real context usage immediately
 			// instead of a blank "context —" until the next model turn.
 			report := payload.runtime.Engine.ContextReport()
 			m.context = contract.ContextInfo{HistoryTokens: report.HistoryTokens, ContextLimit: report.ContextLimit, Percent: report.Percent}
+			// T1: a session switch clears the persistent usage footer so
+			// the previous session's totals never bleed across.
+			m.lastStats = nil
+			m.thoughtStart = time.Time{}
 			m.notify("Session opened: " + payload.runtime.Session.ID)
+			// G4: if the resumed session restored an active goal from its
+			// goal.json sidecar, surface the one-shot notice here too. We are
+			// already inside the payload.runtime.Engine != nil guard above.
+			if restored := payload.runtime.Engine.RestoredGoalNotice(); restored != "" {
+				m.notify(restored)
+			}
+			// P2: surface the restored plan-state notice (plan mode and/or a
+			// pending plan) on a mid-TUI session switch too.
+			if restored := payload.runtime.Engine.RestoredPlanNotice(); restored != "" {
+				m.notify(restored)
+			}
+			// US1 T020: establish the paging cursor for the switched-in session.
+			return m.loadInitialPageCmd()
 		}
 	case "sessions":
 		sessions, _ := action.value.([]contract.Session)
@@ -446,11 +656,28 @@ func (m *Model) enqueueModal(request modalRequest) {
 	m.modal = &modalState{title: title, message: request.message, choices: request.choices, selected: recommendedChoice(request.choices), reply: request.reply}
 }
 
+// replyModalOpen reports whether a bridge-driven modal (a permission Confirm or
+// ask_user prompt) with a pending reply channel is currently showing. An async
+// command result must never clobber such a modal: discarding its reply would leave
+// the engine goroutine parked in bridge.request() forever, wedging the running
+// task until the user cancels (M2).
+func (m *Model) replyModalOpen() bool {
+	return m.modal != nil && m.modal.reply != nil
+}
+
 func (m *Model) openChoice(title, message string, choices []contract.QuestionChoice, onSelect func(int) tea.Cmd) {
+	if m.replyModalOpen() {
+		m.notify(title + " — try again after answering the current prompt.")
+		return
+	}
 	m.modal = &modalState{title: title, message: message, choices: choices, selected: recommendedChoice(choices), onSelect: onSelect}
 }
 
 func (m *Model) openMulti(title, message string, choices []contract.QuestionChoice, checked map[int]bool, onMulti func(map[int]bool) tea.Cmd) {
+	if m.replyModalOpen() {
+		m.notify(title + " — try again after answering the current prompt.")
+		return
+	}
 	if checked == nil {
 		checked = make(map[int]bool)
 	}
@@ -458,11 +685,57 @@ func (m *Model) openMulti(title, message string, choices []contract.QuestionChoi
 }
 
 func (m *Model) openText(title, message string, secret bool, onText func(string) tea.Cmd) {
+	if m.replyModalOpen() {
+		m.notify(title + " — try again after answering the current prompt.")
+		return
+	}
 	m.modal = &modalState{title: title, message: message, input: true, secret: secret, onText: onText}
+}
+
+// openPlanReadyModal (P2) opens the Proceed now / Proceed later / Keep planning
+// modal after a plan-ready task. The engine left plan mode on in interactive
+// runs; each choice drives the engine's plan/pending state and either submits
+// (proceed now) or notifies (proceed later / keep planning).
+func (m *Model) openPlanReadyModal() {
+	choices := []contract.QuestionChoice{
+		{Label: "Proceed now", Description: "Turn plan mode off and execute the approved plan immediately", Recommended: true},
+		{Label: "Proceed later", Description: "Save the plan; say 'proceed' any time to execute it"},
+		{Label: "Keep planning", Description: "Stay in plan mode and keep refining the plan"},
+	}
+	m.openChoice("Plan is ready", "The plan is complete. How do you want to proceed?", choices, func(index int) tea.Cmd {
+		switch index {
+		case 0: // Proceed now
+			if m.runtime.Engine != nil {
+				m.runtime.Engine.SetPendingPlan(false)
+				m.runtime.Engine.SetPlanMode(false)
+				m.runtime.Engine.SetPlanPhase(contract.PlanPhaseExecuting) // 004 US2 (T3)
+			}
+			m.notify("Proceeding with the approved plan now.")
+			return m.submit("Proceed with the approved plan. Work through the plan steps in order, keeping update_plan current.")
+		case 1: // Proceed later
+			if m.runtime.Engine != nil {
+				m.runtime.Engine.SetPendingPlan(true)
+				m.runtime.Engine.SetPlanMode(false)
+				m.runtime.Engine.SetPlanPhase(contract.PlanPhasePending) // 004 US2 (T4)
+			}
+			m.notify("Plan saved. Say 'proceed' (or 'go ahead') any time to execute it.")
+			return nil
+		default: // Keep planning
+			if m.runtime.Engine != nil {
+				m.runtime.Engine.SetPlanPhase(contract.PlanPhaseDrafting) // 004 US2 (T5): plan mode stays on
+			}
+			m.notify("Plan mode stays on — keep refining the plan.")
+			return nil
+		}
+	})
 }
 
 // openInfo shows a read-only modal (no choices) that closes on Enter or Esc.
 func (m *Model) openInfo(title, message string) {
+	if m.replyModalOpen() {
+		m.notify(title + " — try again after answering the current prompt.")
+		return
+	}
 	m.modal = &modalState{title: title, message: message}
 }
 
@@ -536,6 +809,11 @@ func (m *Model) closeModal(index int) {
 		}
 	}
 	m.modal = nil
+	// M2: stop the live-refresh poll when ANY modal closes — the case we
+	// care about for MCP is the common one, and keeping a stale flag
+	// could re-kick the tick from a non-MCP dialog.
+	m.mcpModalAtRest = false
+	m.mcpRefreshIn = false
 	if len(m.modalQueue) > 0 {
 		next := m.modalQueue[0]
 		m.modalQueue = m.modalQueue[1:]
@@ -547,11 +825,30 @@ func (m *Model) commandMatches() []commandEntry {
 	query := strings.ToLower(strings.TrimSpace(m.input.Value()))
 	var result []commandEntry
 	for _, command := range commands {
+		if !m.commandVisible(command.name) {
+			continue
+		}
 		if query == "/" || strings.Contains(command.name, query) || strings.Contains(strings.ToLower(command.description), strings.TrimPrefix(query, "/")) {
 			result = append(result, command)
 		}
 	}
 	return result
+}
+
+// commandVisible applies the sign-in-aware palette filter (003 T031/FR-019):
+// /login shows only when signed out; /usage and /logout show only when signed in.
+func (m *Model) commandVisible(name string) bool {
+	loggedIn := m.actions.IsLoggedIn != nil && m.actions.IsLoggedIn()
+	switch name {
+	case "/login":
+		return !loggedIn
+	case "/logout", "/usage":
+		return loggedIn
+	case "/paste":
+		return len(m.activePastes()) > 0
+	default:
+		return true
+	}
 }
 
 func (m *Model) completeCommand() {

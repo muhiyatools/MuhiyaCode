@@ -37,6 +37,51 @@ func LoadSkillInstructions(skill Skill, maxBytes int64) (string, error) {
 	return strings.TrimSpace(string(data)), nil
 }
 
+// DiscoverWorkspaceSkills discovers only workspace-resident skills (under
+// <workspace>/.agents/skills and <workspace>/.codex/skills), for the stable-
+// prefix listing (003 D12). Restricting to workspace roots keeps the model's
+// read_file calls inside the permission-guard containment. Env/home roots are
+// intentionally excluded here — they remain reachable via the manual /skills
+// flow only. Ordering is deterministic (stable sort by lowercased name).
+func DiscoverWorkspaceSkills(workspace string, limit int) ([]Skill, error) {
+	if limit <= 0 {
+		limit = 40
+	}
+	seen := make(map[string]bool)
+	var result []Skill
+	for _, root := range []string{
+		filepath.Join(workspace, ".agents", "skills"),
+		filepath.Join(workspace, ".codex", "skills"),
+	} {
+		_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if entry.IsDir() {
+				if path != root && strings.Count(filepath.Clean(path), string(filepath.Separator))-strings.Count(filepath.Clean(root), string(filepath.Separator)) > 4 {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.EqualFold(entry.Name(), "SKILL.md") || len(result) >= limit {
+				return nil
+			}
+			skill, ok := readSkill(path)
+			if !ok || seen[strings.ToLower(skill.Name)] {
+				return nil
+			}
+			seen[strings.ToLower(skill.Name)] = true
+			result = append(result, skill)
+			return nil
+		})
+		if len(result) >= limit {
+			break
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool { return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name) })
+	return result, nil
+}
+
 func DiscoverSkills(workspace string, extraRoots []string, limit int) ([]Skill, error) {
 	if limit <= 0 {
 		limit = 40

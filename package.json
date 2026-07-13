@@ -1,1 +1,39 @@
-{}
+{
+  "name": "muhiyacode",
+  "version": "1.0.0",
+  "description": "MuhiyaCode — an interactive terminal coding agent.",
+  "bin": {
+    "muhiyacode": "bin/muhiyacode.js"
+  },
+  "files": [
+    "bin/muhiyacode.js",
+    "scripts/npm-postinstall.js"
+  ],
+  "scripts": {
+    "postinstall": "node scripts/npm-postinstall.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muhiya/muhiyacode.git"
+  },
+  "keywords": [
+    "cli",
+    "coding-agent",
+    "ai",
+    "terminal",
+    "tui"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  },
+  "os": [
+    "darwin",
+    "linux",
+    "win32"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ]
+}

@@ -43,17 +43,24 @@ var (
 	greetingRE     = regexp.MustCompile(`(?i)^(hi+|hey+|hello+|yo|sup|hola|salam|salaam|marhaba|ahlan|thanks?|thank you|thx|ty|ok(ay)?|cool|nice|great|good (morning|afternoon|evening|night)|how are you\??|test(ing)?)[\s!.?]*$`)
 	questionRE     = regexp.MustCompile(`(?i)^(what|who|when|where|why|how|is|are|was|were|does|do|did|should i|tell me|explain|define|compare|convert|calculate|translate|summari[sz]e)\b`)
 	continuationRE = regexp.MustCompile(`(?i)^(continue|go (on|ahead)|proceed|keep going|resume|carry on|next( step)?|do it|yes|finish( it)?|and then)[\s!.?]*$`)
-	codeRE         = regexp.MustCompile("(?m)```|=>|;\\s*$|\\b(function|class|import|const|def|struct|interface|func|package)\\b")
-	pathRE         = regexp.MustCompile(`(?i)(^|[\s"'` + "`" + `(])([\w.-]+[/\\])*[\w.-]+\.(ts|tsx|js|jsx|json|go|py|rb|rs|java|kt|cs|cpp|c|h|css|html|vue|svelte|md|yml|yaml|toml|sql|sh|ps1|env)\b|[\w.-]+[/\\][\w.-]+[/\\][\w/\\.-]+`)
-	repoRE         = regexp.MustCompile(`(?i)\b(repo|repository|codebase|project|app|file|files|folder|directory|module|component|function|class|method|test|tests|bug|error|build|compile|lint|typecheck|api|database|schema|diff|package|dependency|ui|page|screen|button|form)\b`)
-	changeRE       = regexp.MustCompile(`(?i)\b(add|fix|change|update|refactor|implement|create|build|make|remove|delete|rename|move|write|convert|improve|optimi[sz]e|integrate|configure|debug|migrate|upgrade|redesign|rewrite|extend|support|polish|enhance)\b`)
-	breadthRE      = regexp.MustCompile(`(?i)\b(entire|whole (codebase|project|app|repo)|all (files|pages|components|modules|tests|routes)|across the|every (file|page|component|module)|rewrite|redesign|overhaul|re-?architect|migration|migrate|audit|from scratch|end[- ]to[- ]end)\b`)
-	tinyRE         = regexp.MustCompile(`(?i)\b(typo|rename|bump|comment|one[- ]?line|quick|tiny|trivial|small tweak|label|placeholder|tooltip|colou?r|padding|margin|font|title|wording|version number)\b`)
-	featureRE      = regexp.MustCompile(`(?i)\b(management|dashboard|admin panel|page|screen|auth(entication)?|login flow|integration|system|workflow|onboarding|settings|profile|notifications?|crud|api for)\b`)
-	riskRE         = regexp.MustCompile(`(?i)\b(delete|drop|truncate|wipe|migration|migrate|auth|login|session|password|token|secret|credential|payment|billing|checkout|production|deploy|release|security|encrypt|permission)\b`)
-	agentRE        = regexp.MustCompile(`(?i)\b(sub-?agents?|delegate|parallel agents?)\b`)
-	qualityRE      = regexp.MustCompile(`(?i)\b(polish(ed)?|perfect(ly)?|flawless|bullet-?proof|production[- ]?(grade|ready)|100\s*%|make sure everything|fully working)\b`)
-	bulletRE       = regexp.MustCompile(`^\s*([-*]|[0-9]+[.)])\s`)
+	// planProceedRE (004 US2, T7) widens continuation detection for a saved plan
+	// beyond the bare tokens above: an affirmative execution verb at the START of
+	// the message, optionally followed by "the plan"/"it"/"now". Anchored at ^ so
+	// "the plan is wrong" and "don't proceed" do not match; the caller further
+	// guards it to fire only while a plan is pending/interrupted, and step-progress
+	// detection (T8) is the phrasing-independent backstop.
+	planProceedRE = regexp.MustCompile(`(?i)^(proceed|go ahead|continue|resume|carry on|execute|run|start|begin|do)\b.{0,30}\b(plan|it|now)\b[\s!.?]*$`)
+	codeRE        = regexp.MustCompile("(?m)```|=>|;\\s*$|\\b(function|class|import|const|def|struct|interface|func|package)\\b")
+	pathRE        = regexp.MustCompile(`(?i)(^|[\s"'` + "`" + `(])([\w.-]+[/\\])*[\w.-]+\.(ts|tsx|js|jsx|json|go|py|rb|rs|java|kt|cs|cpp|c|h|css|html|vue|svelte|md|yml|yaml|toml|sql|sh|ps1|env)\b|[\w.-]+[/\\][\w.-]+[/\\][\w/\\.-]+`)
+	repoRE        = regexp.MustCompile(`(?i)\b(repo|repository|codebase|project|app|file|files|folder|directory|module|component|function|class|method|test|tests|bug|error|build|compile|lint|typecheck|api|database|schema|diff|package|dependency|ui|page|screen|button|form)\b`)
+	changeRE      = regexp.MustCompile(`(?i)\b(add|fix|change|update|refactor|implement|create|build|make|remove|delete|rename|move|write|convert|improve|optimi[sz]e|integrate|configure|debug|migrate|upgrade|redesign|rewrite|extend|support|polish|enhance)\b`)
+	breadthRE     = regexp.MustCompile(`(?i)\b(entire|whole (codebase|project|app|repo)|all (files|pages|components|modules|tests|routes)|across the|every (file|page|component|module)|rewrite|redesign|overhaul|re-?architect|migration|migrate|audit|from scratch|end[- ]to[- ]end)\b`)
+	tinyRE        = regexp.MustCompile(`(?i)\b(typo|rename|bump|comment|one[- ]?line|quick|tiny|trivial|small tweak|label|placeholder|tooltip|colou?r|padding|margin|font|title|wording|version number)\b`)
+	featureRE     = regexp.MustCompile(`(?i)\b(management|dashboard|admin panel|page|screen|auth(entication)?|login flow|integration|system|workflow|onboarding|settings|profile|notifications?|crud|api for)\b`)
+	riskRE        = regexp.MustCompile(`(?i)\b(delete|drop|truncate|wipe|migration|migrate|auth|login|session|password|token|secret|credential|payment|billing|checkout|production|deploy|release|security|encrypt|permission)\b`)
+	agentRE       = regexp.MustCompile(`(?i)\b(sub-?agents?|delegate|parallel agents?)\b`)
+	qualityRE     = regexp.MustCompile(`(?i)\b(polish(ed)?|perfect(ly)?|flawless|bullet-?proof|production[- ]?(grade|ready)|100\s*%|make sure everything|fully working)\b`)
+	bulletRE      = regexp.MustCompile(`^\s*([-*]|[0-9]+[.)])\s`)
 )
 
 func Classify(raw string, previous TaskClass) Assessment {
@@ -126,6 +133,14 @@ func BudgetFor(a Assessment, effort EffortProfile) Budget {
 		Reasoning:    ReasoningForEffort(effort.Level),
 		Verification: verification,
 	}
+	b.Brief = buildBrief(b, a)
+	return b
+}
+
+// buildBrief renders the per-task tail brief from a computed budget. Kept as
+// its own function so WithAgentFloor can regenerate the brief after adjusting
+// the agent cap — the advertised budget must always match the enforced one.
+func buildBrief(b Budget, a Assessment) string {
 	guard := ""
 	if a.ScopeGuard {
 		guard = " scope=only the named target; quality words do not widen scope;"
@@ -134,7 +149,28 @@ func BudgetFor(a Assessment, effort EffortProfile) Budget {
 	if a.Class == ClassChat {
 		done = ""
 	}
-	b.Brief = fmt.Sprintf("[task-brief: date=%s; class=%s; tools~%d; turns<=%d; agents<=%d; reasoning=%s; verify=%s;%s%s finish all plan steps]", time.Now().Format("2006-01-02"), b.Class, b.ToolCalls, b.MaxTurns, b.MaxAgentRuns, b.Reasoning, b.Verification, guard, done)
+	// A zero budget is stated as an explicit prohibition, not a bare number:
+	// "agents<=0" reads like an estimate, and models kept calling run_subagent
+	// against it and burning turns on guaranteed failures. Kept terse — the
+	// brief rides every user-message tail under a ~50-token budget (SC-004,
+	// request-assembly.md §4), so the small-class brief must stay ≤181 chars.
+	agents := fmt.Sprintf("agents<=%d", b.MaxAgentRuns)
+	if b.MaxAgentRuns <= 0 {
+		agents = "agents=0 (no run_subagent)"
+	}
+	return fmt.Sprintf("[task-brief: date=%s; class=%s; tools~%d; turns<=%d; %s; reasoning=%s; verify=%s;%s%s finish all plan steps]", time.Now().Format("2006-01-02"), b.Class, b.ToolCalls, b.MaxTurns, agents, b.Reasoning, b.Verification, guard, done)
+}
+
+// WithAgentFloor returns the budget with MaxAgentRuns raised to at least
+// floor and the brief regenerated to match. Used by plan mode, whose plan
+// block advertises delegated investigation: the advertised capability and the
+// enforced cap must never contradict each other.
+func (b Budget) WithAgentFloor(floor int, a Assessment) Budget {
+	if b.MaxAgentRuns >= floor {
+		return b
+	}
+	b.MaxAgentRuns = floor
+	b.Brief = buildBrief(b, a)
 	return b
 }
 

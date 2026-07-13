@@ -33,6 +33,37 @@ func TestLegacySettingsAndSecrets(t *testing.T) {
 	}
 }
 
+// TestPrunedArchiveRoundTrip (T041) verifies a reclaimed tool result archived to
+// pruned.jsonl is recoverable verbatim.
+func TestPrunedArchiveRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	paths := testPaths(t)
+	db, err := Open(ctx, paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.Trust(ctx, `F:\work`); err != nil {
+		t.Fatal(err)
+	}
+	sessions := Sessions{DB: db, Secrets: contract.Secrets{ProviderAPIKey: "sk-abcdefghijklmnop"}}
+	session, err := sessions.New(ctx, `F:\work`, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := contract.PrunedRecord{ToolCallID: "c1", ToolName: "read_file", Reason: "trim", OriginalBytes: 3000, ReducedToBytes: 500, OriginalContent: "the full original tool output"}
+	if err := sessions.AppendPruned(session.ID, record); err != nil {
+		t.Fatal(err)
+	}
+	got, err := sessions.PrunedRecords(session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].OriginalContent != record.OriginalContent || got[0].ToolName != "read_file" || got[0].Reason != "trim" {
+		t.Fatalf("pruned archive round-trip failed: %+v", got)
+	}
+}
+
 func TestDatabaseCompatibilityAndSessions(t *testing.T) {
 	ctx := context.Background()
 	paths := testPaths(t)

@@ -126,6 +126,14 @@ func (p *scriptedProvider) Chat(_ context.Context, request contract.ChatRequest)
 	return response, nil
 }
 
+// StableRequestMessages makes the scripted provider satisfy the
+// wireRequestNormalizer interface, so the prefix-shape guard computes the
+// same bytes the harness will serialize. Without this, scripts would force
+// the C2 degraded-guard path and bypass the shape guard entirely.
+func (p *scriptedProvider) StableRequestMessages(request contract.ChatRequest) ([]contract.Message, error) {
+	return append([]contract.Message(nil), request.Messages...), nil
+}
+
 func (p *scriptedProvider) ListModels(context.Context) ([]contract.Model, error) { return nil, nil }
 
 type recordingTool struct {
@@ -140,6 +148,35 @@ func (t *recordingTool) Definition() contract.ToolDefinition {
 func (t *recordingTool) Execute(_ context.Context, raw json.RawMessage) (string, error) {
 	t.calls++
 	return "Wrote a.txt.", nil
+}
+
+// TestAllFailedTurnsInjectsLoopGuard (T027 / REV B7) verifies that two
+// consecutive turns in which every tool call fails inject one loop-guard notice,
+// even when the per-call storm breaker never trips because the model alternates
+// between distinct failing tools (distinct (tool,error) classes).
+func TestAllFailedTurnsInjectsLoopGuard(t *testing.T) {
+	provider := &scriptedProvider{responses: []contract.ChatResponse{
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("a", "write_file", `{"path":"x","content":"y"}`)}},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("b", "edit_file", `{"path":"x","content":"z"}`)}},
+		{Content: "done"},
+	}}
+	settings := engineSettings()
+	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "b7", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&failingTool{name: "write_file"}, &failingTool{name: "edit_file"}), Prompt: PromptContext{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := engine.Run(context.Background(), "do work"); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, m := range engine.history.All() {
+		if strings.Contains(m.Content, "failed for two turns running") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected the all-failed-turns loop-guard notice; history=%+v", engine.history.All())
+	}
 }
 
 func engineSettings() contract.Settings {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
@@ -48,6 +49,8 @@ type Application struct {
 	disableMCP bool
 	mcpWait    time.Duration
 
+	session contract.Session // resolved by openApplicationCore, hydrated by Hydrate
+
 	mu               sync.Mutex
 	runtime          tui.Runtime
 	recent           []contract.Event
@@ -66,7 +69,9 @@ type runtimeBundle struct {
 	registry   *orchestrator.Registry
 }
 
-func OpenApplication(options ApplicationOptions) (*Application, error) {
+// openApplicationCore opens config, DB, probe store, provider, and resolves the
+// session — the fast stage — without building the runtime. Hydrate() completes it.
+func openApplicationCore(options ApplicationOptions) (*Application, error) {
 	ctx := options.Context
 	if ctx == nil {
 		ctx = context.Background()
@@ -144,13 +149,35 @@ func OpenApplication(options ApplicationOptions) (*Application, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	bundle, err := app.buildRuntime(ctx, session)
+	app.session = session
+	return app, nil
+}
+
+// OpenApplication opens the app AND hydrates its runtime synchronously — the
+// original, unchanged contract used by one-shot, resume, and tests. Interactive
+// launch uses openApplicationCore + Hydrate to bring up the shell first (T021).
+func OpenApplication(options ApplicationOptions) (*Application, error) {
+	app, err := openApplicationCore(options)
 	if err != nil {
-		_ = db.Close()
 		return nil, err
 	}
-	app.activate(bundle)
+	if err := app.Hydrate(app.ctx); err != nil {
+		app.Close()
+		return nil, err
+	}
 	return app, nil
+}
+
+// Hydrate builds and activates the session runtime (engine, workspace tools, MCP,
+// registry). It is the expensive, network-touching stage; interactive launch runs
+// it asynchronously after the composer is already on screen (T021).
+func (a *Application) Hydrate(ctx context.Context) error {
+	bundle, err := a.buildRuntime(ctx, a.session)
+	if err != nil {
+		return err
+	}
+	a.activate(bundle)
+	return nil
 }
 
 func (a *Application) Runtime() tui.Runtime {
@@ -260,6 +287,13 @@ func (a *Application) Actions() tui.Actions {
 		Logout:     func(_ context.Context) error { return a.setAPIKey(context.Background(), "") },
 		MCP:        a.mcpActions(),
 		ListSkills: func(_ context.Context) ([]tui.Skill, error) { return a.listSkills() },
+		LoadSkill:  func(_ context.Context, path string) (string, error) { return a.loadSkillBody(path) },
+		FetchUsage: func(ctx context.Context) (*tui.UsageData, error) { return a.fetchUsage(ctx) },
+		IsLoggedIn: func() bool {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			return strings.TrimSpace(a.secrets.ProviderAPIKey) != ""
+		},
 		DiscoverModels: func(ctx context.Context) ([]contract.Model, error) {
 			discoveryCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
@@ -274,7 +308,20 @@ func (a *Application) Actions() tui.Actions {
 			a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
 			return a.settings.Provider.Models, nil
 		},
+		// TranscriptPage (005 US1 T020) serves keyset pages of the durable transcript
+		// for scroll-back. The session id is forced from the active session so a page
+		// request can never read another session's transcript.
+		TranscriptPage: func(ctx context.Context, req contract.TranscriptPageRequest) (contract.TranscriptPage, error) {
+			req.SessionID = a.currentSessionID()
+			return a.db.TranscriptPage(ctx, req)
+		},
 	}
+}
+
+func (a *Application) currentSessionID() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.runtime.Session.ID
 }
 
 func (a *Application) setModel(ctx context.Context, role, id string) error {
@@ -313,6 +360,10 @@ func (a *Application) setModel(ctx context.Context, role, id string) error {
 func (a *Application) mcpActions() tui.MCPActions {
 	return tui.MCPActions{
 		List: func(_ context.Context) ([]tui.MCPServerInfo, error) { return a.mcpServerInfos() },
+		// Refresh (D2/T033) kicks a background manager refresh when the modal
+		// opens so lazy-connect servers begin connecting; the modal's M2 tick then
+		// observes them settle. Short-budget (non-blocking) like the startup path.
+		Refresh: func(ctx context.Context) { a.refreshMCP(ctx, "mcp modal open") },
 		Add: func(ctx context.Context, spec tui.MCPAddSpec) error {
 			name := state.SanitizeMCPName(spec.Name)
 			if name == "" {
@@ -368,7 +419,14 @@ func (a *Application) mcpActions() tui.MCPActions {
 			}}); err != nil {
 				return err
 			}
-			a.refreshMCP(ctx, "mcp authorize "+name)
+			// M1: blocking refresh so the modal snapshot the test code
+			// reads right after shows `connected`, not `connecting`.
+			// D3/T034: bound the blocking wait to 30s so a wedged server cannot
+			// stall the Authorize action indefinitely.
+			waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			manager.RefreshBlocking(waitCtx)
+			cancel()
+			a.emitMCPProblems(manager)
 			return nil
 		},
 		Test: func(ctx context.Context, _ string) ([]tui.MCPServerInfo, error) {
@@ -376,7 +434,13 @@ func (a *Application) mcpActions() tui.MCPActions {
 			manager := a.activeMCP
 			a.mu.Unlock()
 			if manager != nil {
-				manager.Refresh(ctx, a.mcpWait)
+				// M1: blocking refresh so the modal reflects the final
+				// state immediately rather than capturing mid-connect.
+				// D3/T034: bound the wait to 30s so a wedged server cannot stall
+				// the Test action indefinitely.
+				waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+				manager.RefreshBlocking(waitCtx)
+				cancel()
 				a.emitMCPProblems(manager)
 			}
 			return a.mcpServerInfos()
@@ -484,6 +548,16 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	history := orchestrator.NewHistory(historySnapshot, func(value orchestrator.HistorySnapshot) error {
 		return a.sessions.WriteJSON(session.ID, "history.json", value)
 	})
+	// T041: archive originals of reclaimed tool results to the session's
+	// pruned.jsonl before reclamation shortens them, so they stay recoverable.
+	history.SetPruneArchive(func(records []contract.PrunedRecord) error {
+		for _, record := range records {
+			if err := a.sessions.AppendPruned(session.ID, record); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	inspection := orchestrator.NewInspection(inspectionSnapshot, func(value orchestrator.InspectionSnapshot) error {
 		return a.sessions.WriteJSON(session.ID, "inspection.json", value)
 	}, session.WorkspacePath)
@@ -520,20 +594,25 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	if err != nil {
 		return runtimeBundle{}, err
 	}
-	webSupported, probeChanged, probeScope, err := a.webSearchAvailable(ctx)
-	if err != nil {
-		return runtimeBundle{}, err
-	}
-	if probeChanged {
-		nextSeq := 1
-		for _, record := range usageRecords {
-			nextSeq = max(nextSeq, record.Seq+1)
+	// T022 (US1): do not block interactive launch on a network probe. Reuse the
+	// persisted probe snapshot for the exact provider config (fingerprint); only
+	// when there is no snapshot for this config — a first run, or a deliberate
+	// config change that already minted a new fingerprint — do a one-time
+	// synchronous probe and persist it. The tool surface is therefore fixed once at
+	// session start (a deliberate boundary), which keeps the prefix byte-stable
+	// within the session and removes the mid-config probe-change invalidation.
+	webSupported := false
+	if strings.TrimSpace(a.settings.Provider.BaseURL) != "" && strings.TrimSpace(a.secrets.ProviderAPIKey) != "" {
+		fingerprint := state.ProbeFingerprint(a.settings.Provider.BaseURL, a.secrets.ProviderAPIKey)
+		if snap, ok := a.probeStore.Get(fingerprint); ok {
+			webSupported = snap.WebSearch == state.ProbeSupported
+		} else {
+			supported, _, _, probeErr := a.webSearchAvailable(ctx)
+			if probeErr != nil {
+				return runtimeBundle{}, probeErr
+			}
+			webSupported = supported
 		}
-		event := contract.InvalidationEvent{At: time.Now().UTC(), Cause: contract.InvalidationProbeChange, Trigger: contract.InvalidationConfigChange, Scope: probeScope, RequestSeq: nextSeq}
-		if err := a.sessions.AppendInvalidation(session.ID, event); err != nil {
-			return runtimeBundle{}, err
-		}
-		invalidationEvents = append(invalidationEvents, event)
 	}
 	registry := orchestrator.NewRegistry(service.Tools()...)
 	if webSupported {
@@ -558,8 +637,14 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		for _, tool := range pinned {
 			registry.Add(tool)
 		}
-		manager.Refresh(a.ctx, a.mcpWait)
-		a.emitMCPProblems(manager)
+		// M5: when every configured MCP server already has a pinned
+		// surface on disk, skip the eager round and trust the lazy path.
+		// First-session users still get the warm-up connect so we can
+		// learn the schemas.
+		if !manager.AllConfiguredServersHaveSurface() {
+			manager.Refresh(a.ctx, a.mcpWait)
+			a.emitMCPProblems(manager)
+		}
 	}
 
 	active, _ := state.ActiveModel(*a.settings)
@@ -567,6 +652,69 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	profile := gateway.ResolveModelProfile(active.ID + " " + active.Name)
 	shell, _ := workspace.ChooseShell(a.settings.Shell.Preferred)
 	planText, _ := a.sessions.ReadPlan(session.ID)
+	// G4: restore an active goal from the per-session goal.json sidecar.
+	// Only an active goal resurrects; completed/blocked goals are dropped so a
+	// finished objective never re-activates. The engine surfaces a one-shot
+	// notice (RestoredGoalNotice) for the TUI to display.
+	var initialGoal *contract.GoalSnapshot
+	if snapshot, ok, _ := a.sessions.ReadGoal(session.ID); ok && snapshot.Status == string(orchestrator.GoalActive) && strings.TrimSpace(snapshot.Text) != "" {
+		copySnapshot := snapshot
+		initialGoal = &copySnapshot
+	}
+	// P2: restore plan-mode and pending-plan flags from the plan_state.json
+	// sidecar so a mid-plan restart or a saved-but-not-yet-executed plan
+	// survives. Plan content was already loaded above (planText → InitialPlan);
+	// this carries only the two flags. The engine surfaces a one-shot notice
+	// (RestoredPlanNotice) for the TUI to display.
+	var initialPlanState *contract.PlanStateSnapshot
+	// 004 US2: thread the sidecar in whenever it carries any state — including a
+	// terminal or interrupted phase where both booleans are false — so the engine
+	// can apply the load-time truthfulness corrections and surface the correct
+	// resume notice (an interrupted plan resumes partial; a finished one is silent).
+	if state, ok, _ := a.sessions.ReadPlanState(session.ID); ok && (state.PlanMode || state.PendingPlan || state.Phase != contract.PlanPhaseNone) {
+		copyState := state
+		initialPlanState = &copyState
+	}
+	// 005 US3: compose (new session) or restore (resume) the project-context boot
+	// snapshot BEFORE NewEngine, which sends no provider request — so the boot
+	// block rides the first user submit in one send. On resume the persisted
+	// RenderedBootContext is reused verbatim; it is never recompiled from live
+	// workspace state, or the cached prefix (SystemHash) would diverge mid-session.
+	workspaceKey, _ := workspace.WorkspaceKey(session.WorkspacePath)
+	secretValues := append([]string{a.secrets.ProviderAPIKey}, mcpSecretValues(a.paths)...)
+	skills := workspaceSkillListings(session.WorkspacePath)
+	// 006: create the MUHIYA.md template when the workspace has none, so the user
+	// has a clear file to edit. Non-fatal on a read-only workspace.
+	_ = workspace.EnsureProjectInstructionsTemplate(session.WorkspacePath)
+	var projectContext contract.ProjectContextSnapshot
+	restored, ok, readErr := a.sessions.ReadProjectContext(session.ID, workspaceKey)
+	if ok {
+		projectContext = restored
+	} else {
+		instructions := workspace.LoadProjectInstructions(session.WorkspacePath, secretValues...)
+		memory := workspace.LoadProjectMemory(session.WorkspacePath, secretValues...)
+		block := orchestrator.RenderProjectContextBlock(instructions.ContentHash, instructions.CanonicalContent, memory.ContentHash, memory.CanonicalContent)
+		skillsSnapshot := make([]string, 0, len(skills))
+		for _, skill := range skills {
+			skillsSnapshot = append(skillsSnapshot, skill.Name+"\t"+skill.Path+"\t"+skill.Description)
+		}
+		projectContext = contract.ProjectContextSnapshot{
+			Version: contract.ProjectContextVersion, WorkspaceKey: workspaceKey, RenderedBootContext: block,
+			InstructionsHash: instructions.ContentHash, InstructionsState: string(instructions.State),
+			MemoryHash: memory.ContentHash, MemoryState: string(memory.State), SkillsSnapshot: skillsSnapshot,
+			AppliedInstructionHash: instructions.ContentHash, AppliedMemoryHash: memory.ContentHash,
+		}
+		// Persist ONLY when the sidecar is genuinely absent/corrupt/foreign
+		// (readErr == nil; the corrupt/foreign cases already backed up the file).
+		// A transient read failure (e.g. an AV scan briefly holding the handle on
+		// Windows) must NOT overwrite a possibly-valid sidecar: run from this
+		// in-memory bootstrap this session and leave the on-disk bytes intact so a
+		// later session can still restore the exact cached prefix.
+		if readErr == nil {
+			_ = a.sessions.WriteProjectContext(session.ID, projectContext)
+		}
+	}
+	initialProjectContext := projectContext
 	engine, err := orchestrator.NewEngine(orchestrator.EngineConfig{
 		Settings:   a.settings,
 		Secrets:    a.secrets,
@@ -591,12 +739,42 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 				return a.sessions.AppendInvalidation(session.ID, event)
 			},
 			WritePlan: func(_ context.Context, content string) error { return a.sessions.WritePlan(session.ID, content) },
+			WriteGoal: func(_ context.Context, snapshot contract.GoalSnapshot) error {
+				return a.sessions.WriteGoal(session.ID, snapshot)
+			},
+			ClearGoal: func(_ context.Context) error { return a.sessions.ClearGoal(session.ID) },
+			WritePlanState: func(_ context.Context, snapshot contract.PlanStateSnapshot) error {
+				return a.sessions.WritePlanState(session.ID, snapshot)
+			},
+			ClearPlanState: func(_ context.Context) error { return a.sessions.ClearPlanState(session.ID) },
+			WriteProjectContext: func(_ context.Context, snapshot contract.ProjectContextSnapshot) error {
+				return a.sessions.WriteProjectContext(session.ID, snapshot)
+			},
 		},
 		Prompt: orchestrator.PromptContext{
 			Workspace: session.WorkspacePath, Shell: shell,
 			Model: active.Name, ModelAddendum: profile.PromptAddendum, SubagentModel: subagent.Name,
+			Skills:              skills,
+			ProjectMemory:       true,
+			ProjectContextBlock: projectContext.RenderedBootContext,
+		},
+		InitialProjectContext: &initialProjectContext,
+		ProjectContextProbe: func(pctx context.Context) (contract.ProjectContextProbe, error) {
+			// 006: re-read both project files at the submit boundary. A change to
+			// either (the agent's own file-tool edit, or a manual user edit) surfaces
+			// once as an update block; unchanged files inject nothing.
+			instructions := workspace.LoadProjectInstructions(session.WorkspacePath, secretValues...)
+			memory := workspace.LoadProjectMemory(session.WorkspacePath, secretValues...)
+			return contract.ProjectContextProbe{
+				InstructionsHash:    instructions.ContentHash,
+				InstructionsContent: instructions.CanonicalContent,
+				MemoryHash:          memory.ContentHash,
+				MemoryContent:       memory.CanonicalContent,
+			}, nil
 		},
 		InitialPlan:          parsePlan(planText),
+		InitialGoal:          initialGoal,
+		InitialPlanState:     initialPlanState,
 		InitialUsageRecords:  usageRecords,
 		InitialInvalidations: invalidationEvents,
 		BoundaryTools: func() (orchestrator.BoundaryToolChange, bool, error) {
@@ -607,7 +785,7 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			return orchestrator.BoundaryToolChange{Tools: change.Tools, Scope: change.Scope}, changed, err
 		},
 		Rescue: gateway.RescueToolCalls,
-		Redact: func(value string) string { return state.Redact(value, a.secrets) },
+		Redact: func(value string) string { return state.Redact(value, a.secrets, secretValues[1:]...) },
 	})
 	if err != nil {
 		if manager != nil {
@@ -655,9 +833,15 @@ func (a *Application) webSearchAvailable(ctx context.Context) (bool, bool, strin
 }
 
 func (a *Application) setAPIKey(ctx context.Context, key string) error {
+	// M3: the render loop reads a.secrets through IsLoggedIn under a.mu, so the
+	// write must take the same lock (the I/O below stays outside it to avoid
+	// blocking the UI during disk/network work).
+	a.mu.Lock()
 	a.secrets.ProviderAPIKey = strings.TrimSpace(key)
 	a.sessions.Secrets = a.secrets
-	if err := state.SaveSecrets(a.secrets, a.paths); err != nil {
+	secretsSnapshot := a.secrets
+	a.mu.Unlock()
+	if err := state.SaveSecrets(secretsSnapshot, a.paths); err != nil {
 		return err
 	}
 	a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
@@ -679,6 +863,40 @@ func (a *Application) setAPIKey(ctx context.Context, key string) error {
 	return nil
 }
 
+// workspaceSkillListings discovers workspace-resident skills once and renders
+// them as deterministic prompt listings (003 T034/T035): workspace-relative
+// forward-slash paths, single-line descriptions truncated to 200 chars. Same
+// config + files ⇒ identical slice ⇒ byte-identical prompt section.
+func workspaceSkillListings(root string) []orchestrator.SkillListing {
+	discovered, err := workspace.DiscoverWorkspaceSkills(root, 40)
+	if err != nil {
+		return nil
+	}
+	listings := make([]orchestrator.SkillListing, 0, len(discovered))
+	for _, skill := range discovered {
+		rel := skill.Path
+		if r, relErr := filepath.Rel(root, skill.Path); relErr == nil {
+			rel = r
+		}
+		rel = filepath.ToSlash(rel)
+		listings = append(listings, orchestrator.SkillListing{Name: skill.Name, Path: rel, Description: singleLineDescription(skill.Description)})
+	}
+	return listings
+}
+
+func singleLineDescription(value string) string {
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > 200 {
+		return string(runes[:199]) + "…"
+	}
+	return value
+}
+
+// listSkills powers the manual /skills modal. It is lazy (003 T036): it does NOT
+// load any instruction bodies here, so opening the modal never triggers a burst
+// of file reads. The Path travels with each skill; the body is loaded on demand
+// for the selected skills only, at submit time (LoadSkill).
 func (a *Application) listSkills() ([]tui.Skill, error) {
 	a.mu.Lock()
 	root := a.runtime.Session.WorkspacePath
@@ -689,13 +907,41 @@ func (a *Application) listSkills() ([]tui.Skill, error) {
 	}
 	result := make([]tui.Skill, 0, len(discovered))
 	for _, skill := range discovered {
-		instructions, loadErr := workspace.LoadSkillInstructions(skill, 32*1024)
-		if loadErr != nil {
-			continue
-		}
-		result = append(result, tui.Skill{Name: skill.Name, Description: skill.Description, Instructions: instructions})
+		result = append(result, tui.Skill{Name: skill.Name, Description: skill.Description, Path: skill.Path})
 	}
 	return result, nil
+}
+
+// loadSkillBody loads one skill's instructions on demand (32 KiB cap), used at
+// submit for user-selected skills only.
+func (a *Application) loadSkillBody(path string) (string, error) {
+	return workspace.LoadSkillInstructions(workspace.Skill{Path: path}, 32*1024)
+}
+
+// fetchUsage retrieves account usage from the gateway with the stored key and
+// maps it into the TUI's UsageData (003 US5). Errors carry a friendly message.
+func (a *Application) fetchUsage(ctx context.Context) (*tui.UsageData, error) {
+	a.mu.Lock()
+	settings := *a.settings
+	key := a.secrets.ProviderAPIKey
+	a.mu.Unlock()
+	resp, err := gateway.FetchUsage(ctx, settings, key)
+	if err != nil {
+		return nil, err
+	}
+	data := &tui.UsageData{
+		PlanName:       resp.Plan.Name,
+		ExtraTotal:     resp.Credits.ExtraTotal,
+		ExtraRemaining: resp.Credits.ExtraRemaining,
+		SpendTodayUSD:  resp.Spend.TodayUSD,
+	}
+	for _, w := range resp.Plan.Windows {
+		data.Windows = append(data.Windows, tui.UsageWindow{
+			Name: w.Name, BudgetUSD: w.BudgetUSD, CurrentSpentUSD: w.CurrentSpentUSD,
+			ResetTime: w.ResetTime, DurationSeconds: w.DurationSeconds,
+		})
+	}
+	return data, nil
 }
 
 func (a *Application) refreshMCP(ctx context.Context, scope string) {

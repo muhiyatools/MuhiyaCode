@@ -3,8 +3,10 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"time"
 
@@ -56,6 +58,12 @@ func (e *Engine) runSubagentTool(ctx context.Context, raw json.RawMessage) (stri
 		return "", fmt.Errorf("invalid run_subagent arguments: %w", err)
 	}
 	input.Agent, input.Task, input.Title = strings.TrimSpace(input.Agent), strings.TrimSpace(input.Task), strings.TrimSpace(input.Title)
+	// P3: in plan mode, the "general" subagent gets the full mutating registry.
+	// Block it at the gate so the UI's read-only invariant cannot be bypassed
+	// by spawning a general subagent from inside a plan-mode task.
+	if e.PlanMode() && input.Agent == "general" {
+		return "", errors.New("blocked: plan mode is read-only; only explore/plan/review subagents are available. Use them to investigate, then finish your plan.")
+	}
 	spec, ok := e.subagentSpecs()[input.Agent]
 	if !ok || input.Task == "" {
 		return "", fmt.Errorf("agent must be explore, plan, review, or general and task is required")
@@ -73,10 +81,26 @@ func (e *Engine) runSubagentTool(ctx context.Context, raw json.RawMessage) (stri
 		}
 	}
 	e.taskMu.Lock()
-	cap := e.taskAgentCap
-	if cap <= 0 || e.taskAgentRuns >= cap {
+	limit := e.taskAgentCap
+	if limit <= 0 || e.taskAgentRuns >= limit {
+		e.taskAgentDenied++
+		denied, used := e.taskAgentDenied, e.taskAgentRuns
 		e.taskMu.Unlock()
-		return "", fmt.Errorf("subagent budget exhausted (%d run(s)); complete the work directly", cap)
+		// The denial must teach the model to stop delegating: state the reason,
+		// state the only useful next action, and escalate on repeat calls so a
+		// retry loop converges instead of burning turns on a closed door.
+		reason := fmt.Sprintf("subagent budget exhausted (%d of %d run(s) used)", used, limit)
+		if limit <= 0 {
+			reason = "no subagent budget for this task (agents=0)"
+		}
+		// 004 US3 (T035): when the task has NO subagent budget at all (agents=0),
+		// the door is closed from the very first call — say so immediately instead
+		// of inviting a second attempt. A mid-task exhaustion (limit>0) still gives
+		// the softer message first and escalates only on a repeat.
+		if denied > 1 || limit <= 0 {
+			return "", fmt.Errorf("%s. run_subagent is closed for the rest of this task and every further call will fail — do NOT call it again. Continue the remaining work directly with your own read/edit tools now", reason)
+		}
+		return "", fmt.Errorf("%s; complete the remaining work directly with your own tools instead of delegating", reason)
 	}
 	e.taskAgentRuns++
 	e.runCounter++
@@ -98,7 +122,16 @@ func (e *Engine) runSubagentTool(ctx context.Context, raw json.RawMessage) (stri
 	if result.Status != "done" {
 		status = " [status: " + result.Status + "]"
 	}
-	return fmt.Sprintf("Subagent %q report%s (%d turns, %d tool calls):\n%s", result.Agent, status, result.Turns, result.ToolCalls, result.Report), nil
+	// Report the remaining budget with every run so the model can track it and
+	// switch to direct work BEFORE hitting the exhaustion error.
+	e.taskMu.Lock()
+	remaining := max(0, e.taskAgentCap-e.taskAgentRuns)
+	e.taskMu.Unlock()
+	budgetNote := fmt.Sprintf("%d subagent run(s) remaining", remaining)
+	if remaining == 0 {
+		budgetNote = "subagent budget now exhausted — do the remaining work directly"
+	}
+	return fmt.Sprintf("Subagent %q report%s (%d turns, %d tool calls; %s):\n%s", result.Agent, status, result.Turns, result.ToolCalls, budgetNote, result.Report), nil
 }
 
 func (e *Engine) executeSubagent(ctx context.Context, runID string, input subagentInput, spec subagentSpec) subagentResult {
@@ -119,12 +152,56 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 	if e.knowledge != nil {
 		shared = e.knowledge.Briefing(1500)
 	}
-	system := "You are the " + spec.Name + " subagent inside MuhiyaCode. " + spec.System + "\nWorkspace: " + e.session.WorkspacePath
+	system := "You are the " + spec.Name + " subagent inside MuhiyaCode. " + spec.System + "\nWorkspace: " + e.session.WorkspacePath + "\n" + capabilityStatement(spec)
 	if shared != "" {
 		system += "\n\nShared session memory:\n" + shared
 	}
 	messages := []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: input.Task}}
 	definitions := e.registry.Definitions(spec.Allowed)
+	// B6/T025: subagents dispatch through the SAME shared gate as the main loop
+	// (validation, failed-cache, repeat limiter, storm breaker, plan-mode gate),
+	// but with their OWN per-run counters so their gate state never pollutes the
+	// parent's. The duplicate-read guard is main-scope only (the inspection
+	// ledger is main-task state), so dedupe/trackStats are off. Loop-guard
+	// escalations land in this subagent's OWN transcript, never parent history.
+	// Dispatch stays restricted to spec.Allowed via registry.Execute (never the
+	// synthetic-tool switch), so a subagent can't reach run_subagent/exit_plan_mode.
+	sub := dispatchScope{
+		counters: newCallCounters(),
+		onStart: func(call contract.ToolCall) {
+			e.emitAgent(contract.AgentEvent{Kind: "tool_start", RunID: runID, CallID: call.ID, Tool: call.ToolName(), Arguments: call.ArgumentsJSON()})
+		},
+		onEnd: func(call contract.ToolCall, output string) {
+			e.emitAgent(contract.AgentEvent{Kind: "tool_end", RunID: runID, CallID: call.ID, Tool: call.ToolName(), Output: output})
+		},
+		escalate: func(notice string) {
+			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: notice})
+		},
+		dispatch: func(c context.Context, call contract.ToolCall) (string, error) {
+			return e.registry.Execute(c, call.ToolName(), json.RawMessage(call.ArgumentsJSON()), spec.Allowed)
+		},
+		postDispatch: func(call contract.ToolCall, output string, failed bool, dispatchErr error) {
+			name := call.ToolName()
+			if isMutation(name) {
+				// H7: a read-only shell probe must not bust caches in the subagent path.
+				if name == "run_shell" {
+					var args struct {
+						Command string `json:"command"`
+					}
+					_ = json.Unmarshal([]byte(call.ArgumentsJSON()), &args)
+					if IsReadOnlyShell(args.Command) {
+						return
+					}
+				}
+				if e.inspection != nil {
+					e.inspection.InvalidateFor(call)
+				}
+				if e.knowledge != nil {
+					e.knowledge.MarkWorkspaceChanged()
+				}
+			}
+		},
+	}
 	var previousShape *PrefixShape
 	maxTurns := max(2, int(math.Ceil(float64(spec.MaxTurns)*Profile(e.effort()).AgentTurnScale)))
 	for turn := 1; turn <= maxTurns; turn++ {
@@ -139,12 +216,25 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		if previousShape != nil {
 			reasons = CompareShape(*previousShape, shape)
 		}
-		response, err := e.provider.Chat(ctx, contract.ChatRequest{Messages: messages, Tools: definitions, ModelID: modelID, Reasoning: Profile(e.effort()).AgentReasoning})
+		// C3: within a subagent run, system + tools are fixed at run start.
+		// Any non-empty reasons after the first turn is a real prefix bust, so
+		// mirror the main-loop guard by failing the subagent run. The reported
+		// Reason yields a parseable error in the parent's transcript.
+		if len(reasons) > 0 {
+			result.Status = "failed"
+			result.Report = "subagent stable prefix changed without invalidation event: " + strings.Join(reasons, ",")
+			break
+		}
+		response, err := e.provider.Chat(ctx, contract.ChatRequest{SessionID: e.session.ID + ":sub", Messages: messages, Tools: definitions, ModelID: modelID, Reasoning: Profile(e.effort()).AgentReasoning})
 		if usageErr := e.recordIsolatedUsage(ctx, modelID, response.Usage, previousShape == nil, reasons); usageErr != nil {
 			result.Status = "failed"
 			result.Report = "persist subagent usage: " + usageErr.Error()
 			break
 		}
+		// Keep the parent's live task-usage display in step with subagent
+		// spending — the task summary already includes it, so the live line
+		// must too.
+		e.emitTaskUsage()
 		previousShape = &shape
 		if err != nil {
 			result.Status = statusFromContext(ctx, "failed")
@@ -171,22 +261,12 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		}
 		for _, call := range calls {
 			result.ToolCalls++
-			e.emitAgent(contract.AgentEvent{Kind: "tool_start", RunID: runID, CallID: call.ID, Tool: call.ToolName(), Arguments: call.ArgumentsJSON()})
-			output, err := e.registry.Execute(ctx, call.ToolName(), json.RawMessage(call.ArgumentsJSON()), spec.Allowed)
-			if err != nil {
-				output = fmt.Sprintf("Tool %s failed: %v", call.ToolName(), err)
-			}
-			output = CapToolOutput(output, Profile(e.effort()).ToolOutputCap)
-			messages = append(messages, contract.Message{Role: contract.RoleTool, ToolCallID: call.ID, Content: output})
-			e.emitAgent(contract.AgentEvent{Kind: "tool_end", RunID: runID, CallID: call.ID, Tool: call.ToolName(), Output: output})
-			if isMutation(call.ToolName()) {
-				if e.inspection != nil {
-					e.inspection.InvalidateFor(call)
-				}
-				if e.knowledge != nil {
-					e.knowledge.MarkWorkspaceChanged()
-				}
-			}
+			// B6/T025: one shared gate. Plan-mode blocking (P3 defense in depth),
+			// H1 validation, the failed-cache, the repeat limiter, the storm
+			// breaker, and H7 read-only-shell invalidation all live in gatedExecute
+			// / the sub scope now, so this loop only dispatches and pairs the result.
+			outcome := e.gatedExecute(ctx, call, definitions, Profile(e.effort()), sub)
+			messages = append(messages, contract.Message{Role: contract.RoleTool, ToolCallID: call.ID, Content: outcome.Output})
 		}
 		if turn == maxTurns {
 			result.Status = "failed"
@@ -218,4 +298,22 @@ func statusFromContext(ctx context.Context, fallback string) string {
 
 func isMutation(name string) bool {
 	return name == "edit_file" || name == "multi_edit" || name == "write_file" || name == "apply_patch" || name == "run_shell" || strings.HasPrefix(name, "mcp__")
+}
+
+// capabilityStatement (004 US3, T038) is the explicit boundary a delegated
+// subagent is told before it acts: its exact toolset (sorted, deterministic),
+// that nothing else is available to it, and — per the DeepSeek worker-mode
+// findings (research B7/D10) — that it should surface ambiguity and
+// architectural choices back to the caller instead of deciding them. It is
+// per-mission message content, never part of the cached prefix.
+func capabilityStatement(spec subagentSpec) string {
+	names := make([]string, 0, len(spec.Allowed))
+	for name, ok := range spec.Allowed {
+		if ok {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return "Tools available to you: " + strings.Join(names, ", ") +
+		". Anything not listed is unavailable to you — do not attempt it. Return your findings or diffs; when you hit ambiguity or an architectural choice, report it back to the caller rather than deciding it yourself."
 }

@@ -94,24 +94,63 @@ muhiyacode config set https://gateway.example/v1 API_KEY optional-model-id
 | Key | Action |
 |---|---|
 | Enter | Send; while running, queue a steering message |
-| Esc | Leave agent view, stop the task, or clear input |
+| Esc | Clear a text selection, leave agent view, stop the task, or clear input |
 | Tab | Complete a slash command or cycle agent views |
 | Alt+1..9 | Jump to a subagent view |
 | Ctrl+P | Open command search |
 | Ctrl+S | Open session search |
-| Ctrl+O | Expand or collapse tool details |
+| Ctrl+C | Copy the current selection (if any), else stop the task / clear input / exit |
 | Shift+Tab | Toggle normal/auto-accept permission mode |
 | Page Up/Down / ↑ ↓ | Scroll the transcript |
 
-Tab switches between the main session and running subagent views at any time, including mid-task. The transcript holds only your messages and the agent's replies and tool activity. System results (settings changes, MCP status, task summaries, errors) appear on a transient notice line above the input, and the active permission mode is shown directly below it. While a task runs, one unified activity line above the input shows the status, elapsed time, tokens, live thinking, and plan progress. Mouse capture is disabled, so selecting, copying, and pasting text works natively in every terminal; scroll with the keyboard.
+| Mouse | Action |
+|---|---|
+| Wheel over transcript | Scroll (scrolling up mid-stream stops auto-follow; scroll back to resume) |
+| Wheel over command menu / modal | Move the highlighted row |
+| Click a command-autocomplete row | Run that command |
+| Click a modal / MCP menu choice | Select and confirm it (same as arrow + Enter) |
+| Click a tool row | Expand or collapse just that tool |
+| Click a subagent chip | Open that subagent's view |
+| Drag over transcript text | Select; Ctrl+C copies via OSC 52 |
+| Click the composer | Focus the input |
+| Hover a command, modal, tool, or subagent row | Highlight it — a hovered tool/subagent underlines to show it's clickable |
 
-Slash commands: `/reasoning`, `/goal`, `/plan`, `/resume`, `/new`, `/context`, `/compact`, `/model`, `/login`, `/logout`, `/permissions`, `/skills`, `/mcp`, `/diff`, `/rewind`, `/stop`, and `/exit`. Selecting a command from the autocomplete list and pressing Enter runs it. `/model` can refresh the catalog directly from the gateway (context window, max output, and provider metadata included) without restarting. `/mcp` opens an interactive manager to view, add, enable/disable, authorize, test, and remove servers; the `muhiyacode mcp` subcommands remain available for scripting.
+Tab switches between the main session and running subagent views at any time, including mid-task. The transcript holds only your messages and the agent's replies and tool activity. System results (settings changes, MCP status, errors) appear on a transient notice line above the input, and the active permission mode is shown directly below it. While a task runs, one unified activity line above the input shows the status, elapsed time, tokens, live thinking, and plan progress; the thinking indicator disappears entirely once the task completes. After each task, a calm one-line summary is appended to the transcript showing exactly three metrics — credits consumed, total tokens, and cache-hit rate — computed across that task's turns. Tool activity is one line each by default (name, file path, and a minimal outcome such as `+A −B` for edits — for Write/Edit/Patch the file path always shows before the counts); click a tool row to expand it.
+
+The interface is mouse-native: command autocomplete, the MCP manager, confirmation dialogs, and tool/subagent chips are all clickable, and dragging over transcript text selects it (Ctrl+C copies through OSC 52). Every mouse action has a keyboard equivalent, so nothing requires a pointer. Because the app captures the mouse for this, in-terminal drag now drives the in-app selection; your terminal's native selection remains available via its usual modifier (Shift-drag in most terminals). On very long sessions the visible scrollback is bounded for responsiveness — a one-line marker shows where older messages were trimmed, and the complete transcript is always preserved in the session log.
+
+Slash commands: `/reasoning`, `/goal`, `/plan`, `/resume`, `/new`, `/context`, `/compact`, `/model`, `/login`, `/logout`, `/usage`, `/permissions`, `/skills`, `/mcp`, `/paste`, `/diff`, and `/rewind`. `/login` is shown only when signed out; `/usage` and `/logout` only when signed in. Press Esc to stop a running task; close the terminal (or Ctrl+C / Ctrl+D) to exit. `/usage` fetches your account usage (plan budget windows, extra credits, and spend today and this billing period) from the gateway using your stored API key. Selecting a command from the autocomplete list and pressing Enter runs it. `/model` can refresh the catalog directly from the gateway (context window, max output, and provider metadata included) without restarting. `/mcp` opens an interactive manager to view, add, enable/disable, authorize, test, and remove servers; the `muhiyacode mcp` subcommands remain available for scripting.
+
+### Arabic and right-to-left text
+
+MuhiyaCode treats Arabic as a first-class language across the whole terminal. Arabic renders with correct contextual letter joining (including the LAM+ALEF ligature), right-to-left order, and right alignment everywhere — streamed replies, your own messages, tool rows, tables, thinking, modals, and the **composer** (typed Arabic joins and reads right-to-left live). Mixed lines keep English identifiers, inline `code`, numbers, file paths, URLs, and calls like `f(x)` intact and left-to-right in their correct positions.
+
+Everything the model receives, everything stored in history, and everything you copy is clean **logical** Unicode (NFC-normalized) — never the on-screen visual form — so prompts, context, and clipboard round-trip perfectly. This is presentation-only: the deterministic prompt prefix stays byte-identical, so Arabic never affects the prefix cache.
+
+Rendering is controlled by two settings (defaults are `auto`):
+
+```sh
+muhiyacode config set rtlMode  auto|visual|native|off   # how RTL is rendered
+muhiyacode config set rtlAlign auto|right|left          # block alignment
+muhiyacode doctor rtl                                   # preview shaping + copy round-trip on your terminal
+```
+
+`auto`/`visual` shape and reorder in-app (reliable on Windows Terminal and legacy consoles) and emit a BiDi-suppression sequence so a BiDi-capable terminal never double-reverses; `native` leaves reordering to a terminal that does its own BiDi; `off` disables RTL handling. Pure-LTR content is untouched.
 
 ### Reasoning effort, goals, and plan mode
 
 `/reasoning` sets how hard the model thinks — `low` (default), `medium`, `high`, or `max`. The level is sent to the gateway unchanged as `X-Muhiya-Effort`; the gateway maps it onto each provider's thinking ladder (for DeepSeek: `low`/`medium` → `high`, `high`/`max` → `max`). Because it is a request parameter, not a message, changing it never disturbs the prefix cache.
 
 `/goal <objective>` sets a durable objective the agent works toward across turns: after each turn it emits a `[goal:continue|complete|blocked]` marker and the engine auto-continues (bounded) until the goal is met. `/goal clear` ends it, `/goal` shows status. `/plan [task]` toggles read-only plan mode: the agent researches and proposes a concrete plan while every mutating tool is blocked; run `/plan` again to resume editing. Both the goal and the plan-mode instruction ride on the user message, so they never bust the cache.
+
+### Project context and memory
+
+MuhiyaCode carries durable project context across sessions in two root-local Markdown files, loaded once into a byte-stable boot block that rides the first message and never touches the prompt cache:
+
+- **`MUHIYA.md`** — your project instructions, like `CLAUDE.md`. You edit it by hand; MuhiyaCode writes a clear commented template into a workspace that has none (and never overwrites an existing one). It is root-only, UTF-8, ≤32 KiB, and screened for secrets. While it holds only the template comment it is ignored, so it costs nothing until you fill it in.
+- **`MEMORY.md`** — the agent's durable memory. The model reads it from context and keeps it current with its ordinary file tools (`write_file` / `edit_file`), recording only durable, non-secret project truth and pruning entries that go stale. There is no separate memory command, answer-trailer, or database — memory management is part of the agent's normal execution flow, which keeps the prompt lean (the Reasonix / Claude Code model).
+
+Both files are workspace-local — another project never sees them. A mid-session edit to either (yours or the agent's) is surfaced once as a one-shot update block on the next turn and folds into the next session's cached prefix at no per-turn cost. None of this changes tools, model routing, or the deterministic prompt prefix.
 
 ### Prefix caching
 
@@ -157,6 +196,8 @@ See [security.md](docs/security.md) for the complete threat model.
 ## Agent and token design
 
 The single full system prompt has a regression ceiling below roughly 1,900 estimated tokens. Stable instructions stay byte-identical for provider prefix caching, while task classification and budgets are appended to the user turn. Completed tasks fold tool payloads, stale reads are superseded, large context compacts into a durable structured summary, and identical/covered reads are blocked only while their source results remain intact.
+
+Workspace skills (`.agents/skills/*/SKILL.md`, `.codex/skills/*/SKILL.md`) are advertised to the model as a compact, deterministic listing in the stable system prompt — one line of name, path, and purpose per skill, discovered once per session and sorted by name so it never disturbs the prefix cache. The agent reads a skill's full instructions on demand with `read_file` only when a task matches its purpose; nothing else is added to the prompt. The `/skills` command still lets you attach a skill's full text to the next prompt manually (including skills from outside the workspace), loading only the selected skills.
 
 See [agent-design.md](docs/agent-design.md) and [architecture.md](docs/architecture.md).
 

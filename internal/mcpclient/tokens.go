@@ -22,7 +22,7 @@ func (m *Manager) oauthAccessToken(ctx context.Context, name string, secret map[
 		return token.AccessToken, nil
 	}
 	if token.RefreshToken == "" {
-		return "", fmt.Errorf("MCP OAuth token for %s expired; run `muhiyacode mcp auth %s`", name, name)
+		return "", fmt.Errorf("%w: token for %s expired; run `muhiyacode mcp auth %s`", ErrAuthExpired, name, name)
 	}
 	clientID, clientSecret, authStyle := oauthClient(secret)
 	tokenEndpoint := stringField(secret, "tokenEndpoint", "token_endpoint")

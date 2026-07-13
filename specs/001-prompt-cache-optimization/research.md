@@ -123,11 +123,13 @@ D1-D12 were implemented without a design-level deviation. The live harness inher
 configured `low` effort in both arms; the earlier baseline prose label of `max` was incorrect,
 while the machine-readable run records and comparison consistently record `low`.
 
-The three-run improved arm measured 96.5602% mean steady-state cache reads versus 96.5699%
-baseline. Its 0.452 percentage-point range meets SC-005 and all runs recorded zero unattributed
-misses, but SC-001's 99% threshold was not met. PrefixShape and invalidation ledgers recorded no
-client-side change for those misses, so they are provider-attributed rather than an unexplained
-implementation defect. The limitation is registered in `docs/prompt-caching.md`.
+The original three-run improved arm measured 96.5602% raw steady-state cache reads versus
+96.5699% baseline. Review later proved that result was not a valid SC-001 verdict: landing
+requests changed `tool_choice` for one request, PrefixShape did not hash that parameter or
+settled wire bytes, and unexplained misses defaulted to `provider`. The raw metric also included
+the unavoidable new tail and had a roughly 97.6% ceiling on this fixture. The corrected gate
+uses prefix stability, treats excessive stable-shape misses as `agent-suspect`, and requires a
+fresh post-fix live run; see `docs/prompt-caching.md`.
 
 ## Part D — Decisions
 

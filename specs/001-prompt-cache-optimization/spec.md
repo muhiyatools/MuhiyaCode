@@ -231,7 +231,9 @@ event or a documented provider limitation.
 
 - **SC-001**: In realistic benchmark sessions of at least 20 turns on a cache-supporting
   provider, from each session's second request onward, 99–100% of previously transmitted stable
-  context tokens are served as cache reads on every request.
+  context tokens are served as cache reads on every request. This is evaluated as
+  `prefix_stability_rate = Σread / Σ(prompt - new_tail)`; raw `Σread/Σprompt` is reported
+  separately because its ceiling depends on the workload's newly appended tail.
 - **SC-002**: Rebuilding the same request from identical session state — including across a
   process restart and session resume — produces byte-identical payloads in 100% of determinism
   test cases.

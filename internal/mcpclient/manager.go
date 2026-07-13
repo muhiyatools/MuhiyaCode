@@ -5,6 +5,7 @@ package mcpclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,6 +19,11 @@ import (
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/state"
 )
+
+// ErrAuthExpired (M6) is the sentinel returned by oauthAccessToken when the
+// access+refresh tokens have nothing the manager can use. The manager routes
+// this to auth_required state without string-sniffing.
+var ErrAuthExpired = errors.New("mcp auth expired")
 
 type Status struct {
 	Name      string
@@ -40,6 +46,7 @@ type Manager struct {
 	secretsMu      sync.Mutex
 	refreshStop    context.CancelFunc
 	closed         bool
+	dedup          *refreshDedup
 	connections    []*connection
 	tools          map[string]*mcpTool
 	statuses       map[string]Status
@@ -87,6 +94,87 @@ func New(paths state.Paths, client *http.Client, confirm ConfirmFunc, onTool fun
 		tools: make(map[string]*mcpTool), statuses: make(map[string]Status), usedNames: make(map[string]bool),
 		surfaceStore: store, pinned: make(map[string]contract.ToolDefinition), applied: make(map[string]contract.ToolDefinition), knownAtStart: make(map[string]bool),
 	}
+}
+
+// lazyStartTimeout (M5) caps how long EnsureLive blocks on a single server's
+// first-time connect. A wedged server cannot stall the agent turn past this
+// horizon.
+const lazyStartTimeout = 15 * time.Second
+
+// EnsureLive (M5) lazily connects a single server named by `serverName`. It is
+// called from the forwarding path when an mcp__ tool is dispatched but the
+// manager has no live connection for that server yet. The call is bounded by
+// lazyStartTimeout so a wedged server cannot stall the calling turn; on
+// failure it surfaces an H8-style unavailable message and flips the status to
+// `error` so the next call retries through a real Test.
+func (m *Manager) EnsureLive(ctx context.Context, serverName string) error {
+	if m.HasLiveServer(serverName) {
+		return nil
+	}
+	m.setStatus(serverName, "connecting", "Connecting...", 0)
+	connectCtx, cancel := context.WithTimeout(ctx, lazyStartTimeout)
+	defer cancel()
+	done := make(chan struct{})
+	var refreshErr error
+	go func() {
+		defer close(done)
+		m.refresh(connectCtx, serverName)
+	}()
+	select {
+	case <-done:
+	case <-connectCtx.Done():
+		refreshErr = fmt.Errorf("MCP server %s did not start in %s", serverName, lazyStartTimeout)
+	}
+	if m.HasLiveServer(serverName) {
+		return nil
+	}
+	if refreshErr == nil {
+		refreshErr = fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", serverName)
+	}
+	m.setStatus(serverName, "error", refreshErr.Error(), 0)
+	return refreshErr
+}
+
+// HasLiveServer reports whether `serverName` currently has an open MCP
+// session. Used by M5's lazy-connect gate.
+func (m *Manager) HasLiveServer(serverName string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, connection := range m.connections {
+		if connection.server.Name == serverName {
+			return true
+		}
+	}
+	return false
+}
+
+// connectionForTest returns the live connection pointer for `serverName` so
+// tests can prove that EnsureLive/replay paths do not merge or replace an
+// existing connection. Not intended for production callers.
+func (m *Manager) connectionForTest(serverName string) *connection {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, connection := range m.connections {
+		if connection.server.Name == serverName {
+			return connection
+		}
+	}
+	return nil
+}
+
+// serverForTool extracts the MCP server name from a tool name. Names follow
+// the `mcp__<server>__<tool>` convention; the prefix is mandatory whenever a
+// tool name has been registered through the MCP machinery.
+func serverForTool(toolName string) string {
+	rest := strings.TrimPrefix(toolName, "mcp__")
+	if rest == toolName {
+		return ""
+	}
+	index := strings.Index(rest, "__")
+	if index <= 0 {
+		return ""
+	}
+	return rest[:index]
 }
 
 // PinnedTools loads the deterministic cached surface before the session's
@@ -154,6 +242,14 @@ func (m *Manager) TakeBoundaryChange() (BoundaryChange, bool, error) {
 }
 
 func (m *Manager) cachedDefinitions() (map[string]contract.ToolDefinition, map[string]bool, error) {
+	return m.surfaceForCurrent(true)
+}
+
+// surfaceForCurrent rebuilds the cached surface for the active MCP config,
+// optionally limiting the work to the "known" servers (those already on disk
+// from past sessions). knownOnly=false prefills the `known` map with every
+// enabled server — useful so M5 can decide whether the lazy path is safe.
+func (m *Manager) surfaceForCurrent(knownOnly bool) (map[string]contract.ToolDefinition, map[string]bool, error) {
 	config, err := state.LoadMCPConfig(m.paths)
 	if err != nil {
 		return nil, nil, err
@@ -173,8 +269,9 @@ func (m *Manager) cachedDefinitions() (map[string]contract.ToolDefinition, map[s
 		}
 		fingerprint := state.MCPServerFingerprint(server, secrets.Env[server.Name])
 		snapshot, ok := m.surfaceStore.Get(fingerprint)
-		known[fingerprint] = ok
-		if !ok {
+		if knownOnly {
+			known[fingerprint] = ok
+		} else if !ok {
 			continue
 		}
 		for _, definition := range snapshot.Tools {
@@ -182,6 +279,24 @@ func (m *Manager) cachedDefinitions() (map[string]contract.ToolDefinition, map[s
 		}
 	}
 	return definitions, known, nil
+}
+
+// AllConfiguredServersHaveSurface (M5) reports whether every enabled MCP
+// server in the current config has a cached pinned surface. Session boot can
+// safely skip the eager Refresh and rely on the lazy per-tool path when this
+// returns true. Unknown auth state or store errors fall back to "no" to avoid
+// suppressing the warm-up round.
+func (m *Manager) AllConfiguredServersHaveSurface() bool {
+	_, known, err := m.surfaceForCurrent(false)
+	if err != nil || len(known) == 0 {
+		return false
+	}
+	for _, ok := range known {
+		if !ok {
+			return false
+		}
+	}
+	return true
 }
 
 func (m *Manager) forwardingToolsLocked() []contract.Tool {
@@ -197,10 +312,41 @@ func (m *Manager) forwardingToolsLocked() []contract.Tool {
 	return tools
 }
 
+// refreshDedup tracks the last refresh start time so M7 can short-circuit
+// near-simultaneous callers instead of cancelling the in-flight round.
+type refreshDedup struct {
+	started  time.Time
+	done     chan struct{}
+	serverFP string
+}
+
+var debounceWindow = time.Second
+
 func (m *Manager) Refresh(ctx context.Context, deadline time.Duration) {
+	m.refreshInternal(ctx, deadline, false, "")
+}
+
+// RefreshBlocking (M1) is the explicit user-initiated variant: it ignores any
+// short implicit deadline and blocks until the underlying refresh completes
+// (or the caller's context is cancelled). Authorize/Test rely on this so the
+// modal they re-render after the call shows the new state, not "connecting".
+func (m *Manager) RefreshBlocking(ctx context.Context) {
+	m.refreshInternal(ctx, 0, true, "")
+}
+
+func (m *Manager) refreshInternal(ctx context.Context, deadline time.Duration, blocking bool, serverName string) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
+		return
+	}
+	if !blocking && m.dedup != nil && time.Since(m.dedup.started) < debounceWindow && m.dedup.serverFP == serverName {
+		done := m.dedup.done
+		m.mu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
 		return
 	}
 	if m.refreshStop != nil {
@@ -208,14 +354,23 @@ func (m *Manager) Refresh(ctx context.Context, deadline time.Duration) {
 	}
 	refreshCtx, cancel := context.WithCancel(ctx)
 	m.refreshStop = cancel
-	m.mu.Unlock()
 	done := make(chan struct{})
+	m.dedup = &refreshDedup{started: time.Now(), done: done, serverFP: serverName}
+	m.mu.Unlock()
 	go func() {
 		defer close(done)
-		m.refresh(refreshCtx)
+		m.refresh(refreshCtx, serverName)
 	}()
-	if deadline <= 0 {
-		<-done
+	if deadline <= 0 || blocking {
+		// D3: bound the blocking wait on the caller's context too. With a plain
+		// session context this only returns on shutdown (unchanged behaviour);
+		// with a 30s-timeout context (Authorize/Test) it guarantees the wait
+		// returns even if a transport ignores cancellation. The connect goroutine
+		// is cancelled via refreshCtx (derived from ctx), so it does not leak.
+		select {
+		case <-done:
+		case <-ctx.Done():
+		}
 		return
 	}
 	timer := time.NewTimer(deadline)
@@ -226,20 +381,37 @@ func (m *Manager) Refresh(ctx context.Context, deadline time.Duration) {
 	}
 }
 
-func (m *Manager) refresh(ctx context.Context) {
+// refresh runs a connect round. If onlyName is empty, every enabled server is
+// (re)connected. Otherwise only that one server is targeted — used by M5's
+// lazy path so a single tool call never restarts every connection.
+func (m *Manager) refresh(ctx context.Context, onlyName string) {
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 
 	m.mu.Lock()
 	previous := m.connections
-	m.connections = nil
-	m.tools = make(map[string]*mcpTool)
-	m.statuses = make(map[string]Status)
-	m.usedNames = make(map[string]bool)
-	m.mu.Unlock()
-	for _, connection := range previous {
-		_ = connection.session.Close()
+	if onlyName == "" {
+		m.connections = nil
+		m.tools = make(map[string]*mcpTool)
+		// M3: do NOT reset statuses wholesale — entries for configured servers
+		// would briefly vanish and `mcpServerInfos` would render "not connected".
+		// Set per-server "connecting" entries as each goroutine starts.
+		m.usedNames = make(map[string]bool)
+	} else {
+		filtered := previous[:0]
+		for _, connection := range previous {
+			if connection.server.Name != onlyName {
+				filtered = append(filtered, connection)
+				continue
+			}
+			_ = connection.session.Close()
+			for _, tool := range connection.tools {
+				delete(m.tools, tool.exposedName)
+			}
+		}
+		m.connections = filtered
 	}
+	m.mu.Unlock()
 
 	config, err := state.LoadMCPConfig(m.paths)
 	if err != nil {
@@ -254,6 +426,9 @@ func (m *Manager) refresh(ctx context.Context) {
 	var wait sync.WaitGroup
 	for _, server := range config.Servers {
 		server := server
+		if onlyName != "" && server.Name != onlyName {
+			continue
+		}
 		if !server.Enabled {
 			m.setStatus(server.Name, "disabled", "Server is disabled.", 0)
 			continue
@@ -268,8 +443,12 @@ func (m *Manager) refresh(ctx context.Context) {
 			m.setStatus(server.Name, "connecting", "Connecting...", 0)
 			connection, err := m.connect(ctx, server, secrets)
 			if err != nil {
+				// M6: typed sentinel detection. ErrAuthExpired covers the
+				// "token valid but no refresh" case. Otherwise fall back to
+				// the legacy substring match for transports that report 401
+				// in different formats.
 				stateName := "error"
-				if strings.Contains(strings.ToLower(err.Error()), "401") || strings.Contains(strings.ToLower(err.Error()), "unauthorized") {
+				if errors.Is(err, ErrAuthExpired) || strings.Contains(strings.ToLower(err.Error()), "401") || strings.Contains(strings.ToLower(err.Error()), "unauthorized") {
 					stateName = "auth_required"
 				}
 				m.setStatus(server.Name, stateName, err.Error(), 0)
@@ -427,8 +606,24 @@ func (t *forwardingTool) Execute(ctx context.Context, arguments json.RawMessage)
 	t.manager.mu.RLock()
 	live := t.manager.tools[name]
 	t.manager.mu.RUnlock()
+	if live != nil {
+		return live.Execute(ctx, arguments)
+	}
+	// M5 lazy-connect: the model surfaced this tool from the cached pinned
+	// surface but the live session is not open yet. Connect just this
+	// server on demand so an unused MCP server still costs nothing at boot.
+	server := serverForTool(name)
+	if server == "" {
+		return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
+	}
+	if err := t.manager.EnsureLive(ctx, server); err != nil {
+		return "", err
+	}
+	t.manager.mu.RLock()
+	live = t.manager.tools[name]
+	t.manager.mu.RUnlock()
 	if live == nil {
-		return "", fmt.Errorf("MCP tool %s is not connected yet", name)
+		return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
 	}
 	return live.Execute(ctx, arguments)
 }
@@ -451,9 +646,52 @@ func (t *mcpTool) Execute(ctx context.Context, arguments json.RawMessage) (strin
 	defer cancel()
 	result, err := t.connection.session.CallTool(ctx, &mcp.CallToolParams{Name: t.remoteName, Arguments: args})
 	if err != nil {
+		// M8: transport-layer failures (closed connection / EOF / broken
+		// pipe) flip to error state and drop the live connection so the
+		// next call retries once through the M5 lazy path. Other errors
+		// leave the connection alone.
+		if isTransportClosed(err) {
+			t.manager.markServerError(t.connection.server.Name, t.connection.server.Name+": "+err.Error())
+		}
 		return "", err
 	}
 	return formatResult(result), nil
+}
+
+// isTransportClosed (M8) sniffs the few common transport-level failure shapes;
+// conservatively returns true only when the error text matches a closed /
+// EOF / broken-pipe shape, not on every API error.
+func isTransportClosed(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "broken pipe") || strings.Contains(s, "eof") || strings.Contains(s, "connection closed") || strings.Contains(s, "connection reset")
+}
+
+// markServerError (M8) drops a server's live connection and marks its status
+// as error so the lazy M5 path retries once on the next tool call. Other
+// servers are not touched.
+func (m *Manager) markServerError(name string, msg string) {
+	m.mu.Lock()
+	for index, connection := range m.connections {
+		if connection.server.Name == name {
+			m.connections = append(m.connections[:index], m.connections[index+1:]...)
+			_ = connection.session.Close()
+			// T031/REV D1: also drop this server's tool entries from m.tools,
+			// mirroring refresh(). Without this the forwarding tool keeps finding
+			// the stale live tool (pointing at the now-closed session) and calls
+			// the dead session on every retry — the M5 lazy reconnect (EnsureLive,
+			// which only runs when the live lookup is nil) is never reached, so the
+			// server can never recover without a manual Test.
+			for _, tool := range connection.tools {
+				delete(m.tools, tool.exposedName)
+			}
+			break
+		}
+	}
+	m.mu.Unlock()
+	m.setStatus(name, "error", msg, 0)
 }
 
 func formatResult(result *mcp.CallToolResult) string {

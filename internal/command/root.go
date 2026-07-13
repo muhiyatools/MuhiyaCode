@@ -64,7 +64,9 @@ type interactiveOptions struct {
 
 func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 	bridge := tui.NewBridge()
-	app, err := OpenApplication(ApplicationOptions{
+	// T021: open the fast core (config/DB/session) now so the composer can appear
+	// immediately; build the runtime in the background via the Hydrate closure.
+	app, err := openApplicationCore(ApplicationOptions{
 		Context: cmd.Context(), Workspace: options.Workspace, SessionID: options.SessionID,
 		NewSession: options.Fresh, Title: promptTitle(options.Prompt), Callbacks: bridge.Callbacks(), DisableMCP: options.NoMCP,
 	})
@@ -72,11 +74,39 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 		return err
 	}
 	defer app.Close()
+	hydrate := func(ctx context.Context) (tui.HydratedRuntime, error) {
+		if err := app.Hydrate(ctx); err != nil {
+			return tui.HydratedRuntime{}, err
+		}
+		// One-shot startup notices are read from the now-live engine: config gaps,
+		// plus any restored goal/plan-state resurrected from the sidecars (G4/P2).
+		notice := configurationNotice(*app.Settings(), app.secrets)
+		if restored := app.Runtime().Engine.RestoredGoalNotice(); restored != "" {
+			notice = joinNotice(notice, restored)
+		}
+		if restored := app.Runtime().Engine.RestoredPlanNotice(); restored != "" {
+			notice = joinNotice(notice, restored)
+		}
+		return tui.HydratedRuntime{
+			Runtime: app.Runtime(), Actions: app.Actions(), Recent: app.Recent(), Notice: notice,
+		}, nil
+	}
 	return tui.Run(tui.Options{
-		Runtime: app.Runtime(), Bridge: bridge, Actions: app.Actions(), Version: buildinfo.Version,
-		InitialPrompt: options.Prompt, Recent: app.Recent(), Notice: configurationNotice(*app.Settings(), app.secrets),
-		Context: cmd.Context(), Simple: options.Simple,
+		// A partial runtime (settings + session, no engine) lets the loading shell
+		// render the real header/title immediately; Hydrate fills in the engine.
+		Runtime: tui.Runtime{Settings: app.settings, Session: app.session},
+		Bridge:  bridge, Version: buildinfo.Version,
+		InitialPrompt: options.Prompt, Context: cmd.Context(), Simple: options.Simple,
+		Hydrate: hydrate,
 	})
+}
+
+// joinNotice appends add to base on its own line, tolerating an empty base.
+func joinNotice(base, add string) string {
+	if base == "" {
+		return add
+	}
+	return base + "\n" + add
 }
 
 func runOneShot(cmd *cobra.Command, cwd, prompt string, fresh, noMCP bool) error {
@@ -431,15 +461,21 @@ func doctorRTL(cmd *cobra.Command) error {
 	mixed := `راجع workspace: F:\MuhiyaCode Agent\dist ثم نفّذ الاختبارات.`
 	response := "نعم، أستطيع مساعدتك في تنفيذ المشاريع البرمجية المتاحة."
 	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "MuhiyaCode RTL diagnostics\nmode: %s  align: %s\n\n", settings.RTL.Mode, settings.RTL.Align)
-	fmt.Fprintln(out, "Native Arabic:")
+	fmt.Fprintf(out, "MuhiyaCode RTL diagnostics\nmode: %s  align: %s\n", settings.RTL.Mode, settings.RTL.Align)
+	fmt.Fprintf(out, "terminal BiDi control emitted: %q\n\n", tui.TerminalBiDiControl(settings.RTL.Mode))
+	fmt.Fprintln(out, "Native Arabic (logical order — what the model receives):")
 	fmt.Fprintln(out, sample)
 	fmt.Fprintln(out, response)
-	fmt.Fprintln(out, "\nVisual fallback:")
+	fmt.Fprintln(out, "\nVisual fallback (shaped + reordered — what the app draws):")
 	fmt.Fprintln(out, tui.RenderRTL(sample, "visual"))
 	fmt.Fprintln(out, tui.RenderRTL(response, "visual"))
 	fmt.Fprintln(out, "\nMixed Arabic and path:")
 	fmt.Fprintln(out, tui.RenderRTL(mixed, settings.RTL.Mode))
+	if _, ok := tui.CopyRoundTrip(sample, "visual"); ok {
+		fmt.Fprintln(out, "\ncopy round-trip: OK (selecting the shaped text yields the original logical text)")
+	} else {
+		fmt.Fprintln(out, "\ncopy round-trip: DEGRADED (mixed-direction line; whole-message copy is still exact)")
+	}
 	return nil
 }
 
@@ -459,6 +495,32 @@ func loadConfig() (state.Paths, contract.Settings, contract.Secrets, error) {
 func inheritedWorkspace(cmd *cobra.Command) string {
 	value, _ := cmd.Flags().GetString("cwd")
 	return value
+}
+
+// mcpSecretValues flattens configured MCP OAuth/env secret values so both the
+// engine's memory-candidate screening and the CLI `memory remember` path redact
+// against the same full secret set (005 US3 security).
+func mcpSecretValues(paths state.Paths) []string {
+	secrets, err := state.LoadMCPSecrets(paths)
+	if err != nil {
+		return nil
+	}
+	var values []string
+	for _, server := range secrets.OAuth {
+		for _, value := range server {
+			if text, ok := value.(string); ok && text != "" {
+				values = append(values, text)
+			}
+		}
+	}
+	for _, server := range secrets.Env {
+		for _, value := range server {
+			if value != "" {
+				values = append(values, value)
+			}
+		}
+	}
+	return values
 }
 
 func configurationNotice(settings contract.Settings, secrets contract.Secrets) string {

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math/rand/v2"
 	"net/http"
 	"strconv"
@@ -146,6 +147,13 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	if input.Reasoning != "" {
 		req.Header.Set("X-Muhiya-Effort", string(input.Reasoning))
 	}
+	// X-Muhiya-Session is a per-stream pin; derived once and stable across the
+	// whole session so the gateway keeps a stable upstream model routing for
+	// the cache namespace. The orchestrator threads it from e.session.ID with
+	// a per-stream suffix (":main" / ":sub" / ":aux"). Never regenerated here.
+	if input.SessionID != "" {
+		req.Header.Set("X-Muhiya-Session", input.SessionID)
+	}
 	response, err := cfg.Client.Do(req)
 	if err != nil {
 		return contract.ChatResponse{}, false, 0, err
@@ -160,19 +168,33 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	idle := time.AfterFunc(cfg.IdleTimeout, cancel)
 	defer idle.Stop()
 	acc := NewStreamAccumulator(input.OnToken, input.OnReasoningToken)
+	rawUsageCount := 0
+	var lastRawUsage json.RawMessage
+	// 003 (D1): the gateway emits a non-standard final chunk carrying muhiya_log
+	// {cost, log_id, usage_estimated} for allowlisted client apps (MuhiyaCode is
+	// on the allowlist). Capture the last one; absence is normal (generic/older
+	// gateways) and simply leaves cost unavailable — never estimated locally.
+	var costMeta *muhiyaLogMeta
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
 	for scanner.Scan() {
 		idle.Reset(cfg.IdleTimeout)
 		line := scanner.Text()
+		if meta, ok := muhiyaLogFromSSELine(line); ok {
+			costMeta = meta
+		}
 		if err := acc.ConsumeLine(line); err != nil {
 			return contract.ChatResponse{}, acc.ReceivedData(), 0, err
 		}
 		if cfg.RawUsageObserver != nil {
 			if usage, ok := rawUsageFromSSELine(line); ok {
-				if err := cfg.RawUsageObserver(RawUsagePayload{At: time.Now().UTC(), Model: model.ID, Payload: usage}); err != nil {
-					return contract.ChatResponse{}, acc.ReceivedData(), 0, fmt.Errorf("record raw provider usage: %w", err)
-				}
+				// A2/T006: capture rather than record-and-fail inline. A provider
+				// (or the gateway's own fallback/stream-recovery paths) can emit
+				// zero or several usage frames for one request; that is a metrics
+				// imperfection, not a reason to abort an otherwise-successful
+				// turn. We record the LAST frame after the stream completes.
+				rawUsageCount++
+				lastRawUsage = usage
 			}
 		}
 		select {
@@ -190,25 +212,93 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	if !acc.ReceivedData() {
 		return contract.ChatResponse{}, false, 0, errors.New("provider stream ended without any recognizable data")
 	}
+	if cfg.RawUsageObserver != nil {
+		// A2/T006: tolerate 0 or >1 usage frames. Record the last frame when one
+		// was present; a zero-frame response leaves usage as parsed/estimated by
+		// the accumulator (and is flagged estimated on the gateway request-log
+		// path, not here). Only a genuine recording-hook failure surfaces.
+		switch {
+		case rawUsageCount == 0:
+			log.Printf("[gateway] provider emitted no usage object for one request; usage recorded as estimated")
+		case rawUsageCount > 1:
+			log.Printf("[gateway] provider emitted %d usage objects for one request; recording the last", rawUsageCount)
+			if err := cfg.RawUsageObserver(RawUsagePayload{At: time.Now().UTC(), Model: model.ID, Payload: lastRawUsage}); err != nil {
+				return contract.ChatResponse{}, acc.ReceivedData(), 0, fmt.Errorf("record raw provider usage: %w", err)
+			}
+		default:
+			if err := cfg.RawUsageObserver(RawUsagePayload{At: time.Now().UTC(), Model: model.ID, Payload: lastRawUsage}); err != nil {
+				return contract.ChatResponse{}, acc.ReceivedData(), 0, fmt.Errorf("record raw provider usage: %w", err)
+			}
+		}
+	}
 	result := acc.Result()
 	visible, inlineReasoning := SplitThinkBlocks(result.Content)
 	reasoning := strings.TrimSpace(strings.Join(nonempty(result.Reasoning, inlineReasoning), "\n"))
-	return contract.ChatResponse{Content: visible, Reasoning: reasoning, ToolCalls: result.ToolCalls, Usage: result.Usage}, acc.ReceivedData(), 0, nil
+	usage := result.Usage
+	if costMeta != nil {
+		usage.CostUSD = costMeta.cost
+		usage.CostEstimated = costMeta.estimated
+		usage.CostLogID = costMeta.logID
+	}
+	return contract.ChatResponse{Content: visible, Reasoning: reasoning, ToolCalls: result.ToolCalls, Usage: usage}, acc.ReceivedData(), 0, nil
 }
 
-func replayMessages(messages []contract.Message, profile ModelProfile, reasoning contract.ReasoningTier) []contract.Message {
+// muhiyaLogMeta is the parsed muhiya_log object from a gateway meta chunk.
+type muhiyaLogMeta struct {
+	cost      *float64
+	estimated bool
+	logID     string
+}
+
+// muhiyaLogFromSSELine extracts the muhiya_log object from one SSE data line.
+// Missing or malformed muhiya_log yields ok=false; the caller treats absence as
+// "cost unavailable" and never fabricates a value.
+func muhiyaLogFromSSELine(line string) (*muhiyaLogMeta, bool) {
+	line = strings.TrimSpace(line)
+	if !strings.HasPrefix(line, "data:") {
+		return nil, false
+	}
+	data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+	if data == "" || data == "[DONE]" || !strings.Contains(data, "muhiya_log") {
+		return nil, false
+	}
+	var envelope struct {
+		MuhiyaLog *struct {
+			Cost           *float64 `json:"cost"`
+			LogID          string   `json:"log_id"`
+			UsageEstimated bool     `json:"usage_estimated"`
+		} `json:"muhiya_log"`
+	}
+	if json.Unmarshal([]byte(data), &envelope) != nil || envelope.MuhiyaLog == nil {
+		return nil, false
+	}
+	return &muhiyaLogMeta{cost: envelope.MuhiyaLog.Cost, estimated: envelope.MuhiyaLog.UsageEstimated, logID: envelope.MuhiyaLog.LogID}, true
+}
+
+func replayMessages(messages []contract.Message, profile ModelProfile, _ contract.ReasoningTier) []contract.Message {
 	result := make([]contract.Message, len(messages))
 	copy(result, messages)
 	for index := range result {
 		// Never replay captured reasoning. DeepSeek thinking-mode tool-call
 		// turns require the key to exist, so emit only the minimal empty form.
 		result[index].ReasoningContent = nil
-		if profile.Family == "deepseek" && reasoning != "" && result[index].Role == contract.RoleAssistant && len(result[index].ToolCalls) > 0 {
+		if profile.Family == "deepseek" && result[index].Role == contract.RoleAssistant && len(result[index].ToolCalls) > 0 {
 			empty := ""
 			result[index].ReasoningContent = &empty
 		}
 	}
 	return result
+}
+
+// StableRequestMessages exposes the provider's final replay representation so
+// the orchestrator hashes the same bytes the gateway serializes.
+func (p *OpenAICompatible) StableRequestMessages(input contract.ChatRequest) ([]contract.Message, error) {
+	cfg := p.snapshot()
+	model, err := resolveModel(cfg, input.ModelID)
+	if err != nil {
+		return nil, err
+	}
+	return replayMessages(input.Messages, ResolveModelProfile(model.ID+" "+model.Name), input.Reasoning), nil
 }
 
 func rawUsageFromSSELine(line string) (json.RawMessage, bool) {
@@ -225,7 +315,7 @@ func rawUsageFromSSELine(line string) (json.RawMessage, bool) {
 		return nil, false
 	}
 	usage, exists := envelope["usage"]
-	if !exists {
+	if !exists || bytes.Equal(bytes.TrimSpace(usage), []byte("null")) {
 		return nil, false
 	}
 	return append(json.RawMessage(nil), usage...), true
@@ -269,6 +359,9 @@ func fetchModels(parent context.Context, cfg Config, endpoint string) ([]contrac
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	req.Header.Set("X-Client-App", "MuhiyaCode")
+	// Note: fetchModels has no ChatRequest. The session pin is meaningful only
+	// for chat calls (which carry the cached prefix); model discovery never
+	// participates in upstream cache routing.
 	response, err := cfg.Client.Do(req)
 	if err != nil {
 		return nil, err

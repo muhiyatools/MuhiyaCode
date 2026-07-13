@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
@@ -38,7 +39,14 @@ func testRuntime(t *testing.T) Runtime {
 
 func TestModelRendersAtMinimumTerminalSize(t *testing.T) {
 	model := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	// 003 (T017): 40×14 is below the 60×20 render floor → the clean too-small pane.
 	updated, _ := model.Update(tea.WindowSizeMsg{Width: 40, Height: 14})
+	model = updated.(*Model)
+	if !strings.Contains(model.View().Content, "terminal too small") {
+		t.Fatalf("below-floor view did not show the too-small message:\n%s", model.View().Content)
+	}
+	// At the design baseline the full UI renders.
+	updated, _ = model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	model = updated.(*Model)
 	model.items = append(model.items,
 		item{kind: "user", content: "Please inspect the project."},
@@ -47,11 +55,159 @@ func TestModelRendersAtMinimumTerminalSize(t *testing.T) {
 	)
 	model.refreshViewport(true)
 	view := model.View()
-	if !strings.Contains(view.Content, "MuhiyaCode") || !strings.Contains(view.Content, "Enter send") {
-		t.Fatalf("narrow view omitted core UI:\n%s", view.Content)
+	if !strings.Contains(view.Content, "MuhiyaCode") {
+		t.Fatalf("baseline view omitted core UI:\n%s", view.Content)
 	}
-	if model.viewport.Width() != 40 || model.viewport.Height() < 3 {
+	if model.viewport.Width() != 80 || model.viewport.Height() < 3 {
 		t.Fatalf("viewport size = %dx%d", model.viewport.Width(), model.viewport.Height())
+	}
+}
+
+// TestTypingAndIdleTickDoNotReRenderTranscript is the US1/US2 hot-path guard:
+// the O(all items) transcript render must fire only when the transcript changes,
+// so a keystroke or an idle 100ms tick never pays it, while a streaming chunk
+// (which does change the transcript) still does.
+func TestTypingAndIdleTickDoNotReRenderTranscript(t *testing.T) {
+	model := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(*Model)
+	var lines []string
+	for i := 0; i < 300; i++ {
+		lines = append(lines, "assistant answer line filler content here")
+	}
+	model.items = append(model.items, item{kind: "assistant", content: strings.Join(lines, "\n\n")})
+	model.refreshViewport(true)
+	baseRenders := model.transcriptRenders
+	baseView := model.viewport.View()
+
+	updated, _ = model.Update(tickMsg(model.started))
+	model = updated.(*Model)
+	if model.transcriptRenders != baseRenders {
+		t.Fatalf("idle tick re-rendered the transcript (%d → %d)", baseRenders, model.transcriptRenders)
+	}
+
+	updated, _ = model.Update(tea.KeyPressMsg{Code: 'a', Text: "a"})
+	model = updated.(*Model)
+	if model.transcriptRenders != baseRenders {
+		t.Fatalf("keystroke re-rendered the transcript (%d → %d)", baseRenders, model.transcriptRenders)
+	}
+	if model.viewport.View() != baseView {
+		t.Fatal("transcript view changed on a keystroke")
+	}
+
+	updated, _ = model.Update(streamMsg{text: "new streamed token"})
+	model = updated.(*Model)
+	if model.transcriptRenders <= baseRenders {
+		t.Fatalf("a streaming chunk must re-render the transcript (still %d)", model.transcriptRenders)
+	}
+}
+
+// TestIdleStopsTickingBusyRestarts is the US2 T030 guard: when nothing needs
+// animating, an arriving tick stops the loop (no recurring idle work); entering
+// an animated state restarts it.
+func TestIdleStopsTickingBusyRestarts(t *testing.T) {
+	model := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(*Model)
+
+	model.ticking = true
+	model.busy = false
+	model.flash = noticeState{}
+	model.mcpModalAtRest = false
+	updated, _ = model.Update(tickMsg(model.started))
+	model = updated.(*Model)
+	if model.ticking {
+		t.Fatal("an idle tick must stop the animation loop (ticking=false)")
+	}
+
+	model.busy = true
+	if cmd := model.ensureTick(); cmd == nil || !model.ticking {
+		t.Fatal("entering a busy state must restart the tick")
+	}
+
+	// A notice with an expiry also keeps the loop alive.
+	model.busy = false
+	model.ticking = false
+	model.flash = noticeState{text: "hi", expires: model.started.Add(5 * time.Second)}
+	if !model.needsAnimation() {
+		t.Fatal("a notice pending expiry must require the tick")
+	}
+}
+
+// TestTranscriptBlockCacheReusesUnchangedItems is the US1 render-memoization
+// guard: during streaming, an unchanged transcript item reuses its cached block
+// (renderTextBlock is skipped) while the growing draft re-renders — so a
+// transcript re-render is O(changed items), not O(all items).
+func TestTranscriptBlockCacheReusesUnchangedItems(t *testing.T) {
+	model := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(*Model)
+	model.items = append(model.items,
+		item{kind: "assistant", content: "## First\nStable answer content here."},
+		item{kind: "assistant_draft", content: "streaming"},
+	)
+	model.refreshViewport(true)
+	if model.items[0].cachedWidth != model.contentWidth() || model.items[0].cachedBlock == "" {
+		t.Fatalf("immutable item was not cached: %+v", model.items[0])
+	}
+	// Poison the immutable item's cache, then change ONLY the streaming draft and
+	// re-render. If the poisoned block survives, the unchanged item was reused
+	// (not re-rendered); if it were re-rendered it would overwrite the poison.
+	model.items[0].cachedBlock = "POISONED"
+	model.items[1].content += " more streamed tokens"
+	model.refreshViewport(true)
+	if model.items[0].cachedBlock != "POISONED" {
+		t.Fatal("cache not reused: an unchanged item was re-rendered during streaming")
+	}
+	if model.items[1].cachedLen != len(model.items[1].content) {
+		t.Fatal("the changed streaming draft was not re-rendered")
+	}
+}
+
+// TestStreamingAccumulatesAndToolMap is the US1 T019 guard: the Builder-backed
+// draft accumulates every streamed byte in order and resets between answers, and
+// tool output/finish route through the O(1) active-tool map.
+func TestStreamingAccumulatesAndToolMap(t *testing.T) {
+	model := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	updated, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = updated.(*Model)
+
+	chunks := []string{"Hello ", "world", "! ", "streamed ", "answer."}
+	want := ""
+	for _, c := range chunks {
+		want += c
+		updated, _ = model.Update(streamMsg{text: c})
+		model = updated.(*Model)
+	}
+	last := model.items[len(model.items)-1]
+	if last.kind != "assistant_draft" || last.content != want {
+		t.Fatalf("streamed content lost/reordered: %q want %q", last.content, want)
+	}
+
+	// Finish, then a new stream must start a fresh draft (no bleed).
+	updated, _ = model.Update(resultMsg{answer: want})
+	model = updated.(*Model)
+	updated, _ = model.Update(streamMsg{text: "Next"})
+	model = updated.(*Model)
+	if got := model.items[len(model.items)-1].content; got != "Next" {
+		t.Fatalf("draft bled across answers: %q", got)
+	}
+
+	// Tool output/finish route through the active-tool map.
+	updated, _ = model.Update(toolStartMsg{name: "run_shell"})
+	model = updated.(*Model)
+	if model.activeTools["run_shell"] == nil {
+		t.Fatal("toolStart did not register the active tool")
+	}
+	updated, _ = model.Update(toolOutputMsg{name: "run_shell", output: "line\n"})
+	model = updated.(*Model)
+	if model.activeTools["run_shell"].output != "line\n" {
+		t.Fatalf("tool output not applied via map: %q", model.activeTools["run_shell"].output)
+	}
+	updated, _ = model.Update(toolEndMsg{name: "run_shell", output: "done"})
+	model = updated.(*Model)
+	if model.activeTools["run_shell"] != nil {
+		t.Fatal("finishTool did not remove the tool from the active map")
 	}
 }
 
@@ -102,7 +258,8 @@ func TestSlashCommandResolvesHighlightedMatch(t *testing.T) {
 }
 
 func TestCommandPaletteNeverOverflows(t *testing.T) {
-	for _, height := range []int{16, 20, 40} {
+	// 003 (T017): heights at/above the 20-row render floor.
+	for _, height := range []int{20, 24, 40} {
 		model := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 		updated, _ := model.Update(tea.WindowSizeMsg{Width: 70, Height: height})
 		model = updated.(*Model)
@@ -143,7 +300,7 @@ func TestMCPModalAndSkillsSelection(t *testing.T) {
 	acts := Actions{
 		MCP: MCPActions{List: func(context.Context) ([]MCPServerInfo, error) {
 			return []MCPServerInfo{
-				{Name: "filesystem", Transport: "stdio", Enabled: true, State: "ready", ToolCount: 4},
+				{Name: "filesystem", Transport: "stdio", Enabled: true, State: "connected", ToolCount: 4},
 				{Name: "supabase", Transport: "http", Enabled: false, OAuth: true, State: "disabled"},
 			}, nil
 		}},
@@ -196,7 +353,7 @@ func TestMCPModalAndSkillsSelection(t *testing.T) {
 
 func TestMarkdownTableRendersAligned(t *testing.T) {
 	source := "| Indicator | Status |\n|-----------|--------|\n| GDP Growth | ~3.5-4.5% |\n| Inflation | elevated |"
-	rendered := RenderMarkdown(source, 60, "off", newPalette())
+	rendered := RenderMarkdown(source, 60, "off", "auto", newPalette("dark"))
 	if strings.Contains(rendered, "|---") {
 		t.Fatalf("raw separator leaked into output:\n%s", rendered)
 	}
@@ -207,7 +364,7 @@ func TestMarkdownTableRendersAligned(t *testing.T) {
 		t.Fatalf("table cells missing:\n%s", rendered)
 	}
 	// A narrow terminal must not overflow the width.
-	for _, line := range strings.Split(RenderMarkdown(source, 30, "off", newPalette()), "\n") {
+	for _, line := range strings.Split(RenderMarkdown(source, 30, "off", "auto", newPalette("dark")), "\n") {
 		if w := ansiWidth(line); w > 30 {
 			t.Fatalf("table line overflows narrow width (%d): %q", w, line)
 		}
@@ -225,14 +382,18 @@ func TestPromptStyleActivityAndPaste(t *testing.T) {
 	_ = m.Init() // focuses the input, as the Bubble Tea runtime does
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 
-	// User prompts render with a "> " marker and no "YOU" header.
+	// 003 (T027/FR-015): user prompts render with the surface band alone — no
+	// "> " prefix and no "YOU" header.
 	m.items = append(m.items, item{kind: "user", content: "please fix the bug"})
 	transcript := m.renderTranscript()
 	if strings.Contains(transcript, "YOU") {
 		t.Fatal("user prompt still shows the YOU header")
 	}
-	if !strings.Contains(transcript, ">") || !strings.Contains(transcript, "please fix the bug") {
-		t.Fatalf("user prompt marker missing:\n%s", transcript)
+	if strings.Contains(transcript, "> please fix") {
+		t.Fatalf("user prompt still shows the removed '> ' prefix:\n%s", transcript)
+	}
+	if !strings.Contains(transcript, "please fix the bug") {
+		t.Fatalf("user prompt content missing:\n%s", transcript)
 	}
 
 	// Idle: no standing "Ready" line above the input.
@@ -261,7 +422,8 @@ func TestPromptStyleActivityAndPaste(t *testing.T) {
 // across terminal heights, driving selection to both ends.
 func TestModalRenderNeverPanics(t *testing.T) {
 	for _, choiceCount := range []int{1, 2, 3, 4, 12} {
-		for _, height := range []int{14, 16, 24, 40} {
+		// 003 (T017): heights at/above the 20-row render floor.
+		for _, height := range []int{20, 24, 40} {
 			m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 			m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 70, Height: height})
 			choices := make([]contract.QuestionChoice, choiceCount)
@@ -314,6 +476,13 @@ func pump(t *testing.T, m *Model, cmd tea.Cmd, height int) *Model {
 		if lines := lineCount(m.View().Content); lines > height {
 			t.Fatalf("view overflowed to %d lines (height %d)", lines, height)
 		}
+		if _, isTick := msg.(tickMsg); isTick {
+			// The animation tick is a runtime-driven timer, not part of the logical
+			// command flow under test. Deliver it once (so the model processes the
+			// transition) but do not chase its reschedules — otherwise this
+			// synchronous pump would block on real 100ms tea.Tick sleeps.
+			break
+		}
 		cmd = next
 	}
 	return m
@@ -343,9 +512,6 @@ func TestEverySlashCommandFlowIsCrashFree(t *testing.T) {
 	}
 	for _, height := range []int{16, 30} {
 		for _, command := range commands {
-			if command.name == "/exit" {
-				continue // quits the program; nothing to render afterwards
-			}
 			m := NewModel(Options{Runtime: testRuntime(t), Version: "test", Actions: acts})
 			m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 70, Height: height})
 			m.input.SetValue(command.name)
@@ -394,6 +560,225 @@ func TestBridgeFallbackAndToolStreaming(t *testing.T) {
 	}
 }
 
+func TestMCPModalRefreshesUntilTerminal(t *testing.T) {
+	calls := 0
+	states := [][]MCPServerInfo{
+		{{Name: "remote", Transport: "http", Enabled: true, State: "connecting"}},
+		{{Name: "remote", Transport: "http", Enabled: true, State: "connecting", Status: "still connecting"}},
+		{{Name: "remote", Transport: "http", Enabled: true, State: "connected", ToolCount: 3}},
+	}
+	acts := Actions{MCP: MCPActions{List: func(context.Context) ([]MCPServerInfo, error) {
+		index := calls
+		if index >= len(states) {
+			index = len(states) - 1
+		}
+		calls++
+		return states[index], nil
+	}}}
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test", Actions: acts})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 90, Height: 30})
+	// Drive the /mcp command which fires the first mcp-list action.
+	pump(t, m, m.runSlash("/mcp"), 30)
+	if m.modal == nil {
+		t.Fatal("MCP modal did not open")
+	}
+	if !m.mcpModalAtRest {
+		t.Fatal("MCP modal should be flagged at rest for live refresh")
+	}
+	if m.modal.choices[0].Label != "remote (connecting…)" {
+		t.Fatalf("first snapshot label = %q", m.modal.choices[0].Label)
+	}
+	// Tick the simulation: the action chain produces a new mcp-list,
+	// which we pump through Update. Two ticks get us from connecting
+	// through connected.
+	for i := 0; i < 3; i++ {
+		updated, cmd := m.Update(mcpRefreshTickMsg{})
+		m = updated.(*Model)
+		if cmd == nil {
+			break
+		}
+		pump(t, m, cmd, 30)
+	}
+	if calls < 3 {
+		t.Fatalf("expected at least 3 List calls (initial + 2 refresh), got %d", calls)
+	}
+	foundConnected := false
+	for _, choices := range []contract.QuestionChoice(nil) {
+		_ = choices
+	}
+	for _, c := range m.modal.choices {
+		if strings.Contains(c.Label, "● remote") || strings.Contains(c.Label, "remote") && !strings.Contains(c.Label, "connecting") {
+			foundConnected = true
+		}
+	}
+	if !foundConnected {
+		t.Fatalf("modal choices did not advance to connected: %+v", m.modal.choices)
+	}
+	if m.mcpModalAtRest {
+		t.Fatal("modal stays at rest after every server reached a terminal state")
+	}
+}
+
+// TestTaskSummaryEntryHasThreeMetricsOnly (003 US2) verifies the post-task
+// summary is a transcript entry with exactly credits/tokens/cache% — and none of
+// the removed noise (duration, effort, task class, tool counts, session %).
+func TestTaskSummaryEntryHasThreeMetricsOnly(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.busy = true
+	sessionRate := 0.78
+	credits := 0.0242
+	stats := contract.TaskStats{Effort: contract.EffortLow, DurationMS: 1234, Usage: contract.Usage{TotalTokens: 5000, CacheReadTokens: ptrInt(3500), CacheMissTokens: ptrInt(1500)}, ToolCalls: 4, TaskClass: "build", SessionHitRate: &sessionRate, CreditsUSD: &credits}
+	updated, _ := m.Update(statsMsg(stats))
+	m = updated.(*Model)
+	updated, _ = m.Update(resultMsg{answer: "done"})
+	m = updated.(*Model)
+	view := m.View().Content
+	// Present: the three metrics (credits = 0.0242 USD × 100 = 2.42; cache 70%).
+	for _, want := range []string{"credits 2.42", "tokens", "cache 70%"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("summary missing %q\n%s", want, view)
+		}
+	}
+	// Absent: all the removed noise.
+	for _, gone := range []string{"1.2s", "build", "billed", "4 tools", "session 78%", "thought for"} {
+		if strings.Contains(view, gone) {
+			t.Fatalf("summary still shows removed field %q\n%s", gone, view)
+		}
+	}
+	// The summary is a persistent transcript entry.
+	found := false
+	for _, it := range m.items {
+		if it.kind == "summary" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no summary transcript entry was appended")
+	}
+}
+
+// TestTaskSummaryOmitsUnavailableAndMarksInterrupted (003 FR-012/FR-013a).
+func TestTaskSummaryOmitsUnavailableAndMarksInterrupted(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.busy = true
+	// No credits, no cache fields → only tokens; interrupted marker present.
+	stats := contract.TaskStats{Usage: contract.Usage{TotalTokens: 1200}, StopCause: contract.StopCauseUserStop}
+	updated, _ := m.Update(statsMsg(stats))
+	m = updated.(*Model)
+	updated, _ = m.Update(resultMsg{answer: "partial"})
+	m = updated.(*Model)
+	view := m.View().Content
+	if strings.Contains(view, "credits") || strings.Contains(view, "cache ") {
+		t.Fatalf("summary showed unavailable credits/cache:\n%s", view)
+	}
+	if !strings.Contains(view, "interrupted") {
+		t.Fatalf("interrupted task not marked:\n%s", view)
+	}
+}
+
+// TestReasoningTailRuneSafe verifies the live reasoning tail stays valid UTF-8
+// with Arabic/emoji input (rune-safe truncation never splits a multi-byte rune)
+// and is bounded to the collapsed ~300-rune tail shown while a task runs.
+func TestReasoningTailRuneSafe(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.busy = true
+	for i := 0; i < 50; i++ {
+		updated, _ := m.Update(streamMsg{reasoning: "مرحبا 🌍 reasoning " + strings.Repeat("x", 20) + "\n"})
+		m = updated.(*Model)
+	}
+	if !utf8.ValidString(m.reasoning) {
+		t.Fatal("reasoning contains invalid UTF-8 — a multi-byte rune was split")
+	}
+	if len([]rune(m.reasoning)) > 300 {
+		t.Fatalf("reasoning tail should stay bounded to ~300 runes, got %d", len([]rune(m.reasoning)))
+	}
+	if !m.busy {
+		t.Fatal("test setup: model should be busy")
+	}
+	if view := m.View().Content; !strings.Contains(view, "thinking…") {
+		t.Fatalf("busy model should show the live thinking line:\n%s", view)
+	}
+}
+
+// TestThinkingIsEphemeralAfterCompletion (003 T019/FR-009) verifies the thinking
+// indicator disappears entirely on completion — no "thought for Ns" residue and
+// no leftover "thinking…" line.
+func TestThinkingIsEphemeralAfterCompletion(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.busy = true
+	updated, _ := m.Update(streamMsg{text: "Hello", reasoning: "thinking about X"})
+	m = updated.(*Model)
+	if m.thoughtStart.IsZero() {
+		t.Fatal("first reasoning token did not set thoughtStart")
+	}
+	time.Sleep(20 * time.Millisecond)
+	updated, _ = m.Update(resultMsg{answer: "Hello"})
+	m = updated.(*Model)
+	view := m.View().Content
+	if strings.Contains(view, "thought for ") {
+		t.Fatalf("post-task 'thought for Ns' residue leaked into the view:\n%s", view)
+	}
+	if strings.Contains(m.renderActivity(), "thinking") {
+		t.Fatal("activity kept a thinking line after completion")
+	}
+	if strings.Contains(view, "Ready") {
+		t.Fatal("idle 'Ready' line leaked into the view")
+	}
+}
+
+// TestPlanReadyModalOpensOnStatsMsg (P2) verifies that a task-complete stats
+// message with PlanReady set opens the Proceed now / Proceed later / Keep
+// planning modal, and that the "Proceed later" choice sets the engine's
+// pending-plan flag and clears plan mode.
+func TestPlanReadyModalOpensOnStatsMsg(t *testing.T) {
+	rt := testRuntime(t)
+	rt.Engine.SetPlanMode(true)
+	m := NewModel(Options{Runtime: rt, Version: "test"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	updated, _ := m.Update(statsMsg(contract.TaskStats{PlanReady: true, TaskClass: "plan"}))
+	m = updated.(*Model)
+	if m.modal == nil {
+		t.Fatal("PlanReady stats did not open the proceed modal")
+	}
+	var labels []string
+	for _, c := range m.modal.choices {
+		labels = append(labels, c.Label)
+	}
+	if !strings.Contains(strings.Join(labels, "|"), "Proceed now") || !strings.Contains(strings.Join(labels, "|"), "Proceed later") || !strings.Contains(strings.Join(labels, "|"), "Keep planning") {
+		t.Fatalf("proceed modal choices wrong: %v", labels)
+	}
+	// Select "Proceed later" (index 1) via the modal's onSelect callback and
+	// pump any command. Proceed later sets the pending-plan flag and clears
+	// plan mode without submitting, so the flag must remain set.
+	cmd := m.modal.onSelect(1)
+	m = pump(t, m, cmd, 30)
+	if !m.runtime.Engine.PendingPlan() {
+		t.Fatal("Proceed later did not set the engine pending-plan flag")
+	}
+	if m.runtime.Engine.PlanMode() {
+		t.Fatal("Proceed later did not clear plan mode")
+	}
+}
+
+// TestTerminatedReasonSurfacesAsWarn (H5) verifies that a task-complete stats
+// message carrying TerminatedReason surfaces as a TUI warn notice so the user
+// knows why the task stopped short of the turn ceiling.
+func TestTerminatedReasonSurfacesAsWarn(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	updated, _ := m.Update(statsMsg(contract.TaskStats{TerminatedReason: "repeated tool failures — 8 failures in the last 6 turns; stopping to report"}))
+	m = updated.(*Model)
+	if m.flash.level != "warn" || !strings.Contains(m.flash.text, "Task terminated") || !strings.Contains(m.flash.text, "repeated tool failures") {
+		t.Fatalf("TerminatedReason did not surface as a warn: level=%q flash=%q", m.flash.level, m.flash.text)
+	}
+}
+
+func ptrInt(v int) *int { return &v }
+
 func TestRTLAndWrappingAreStable(t *testing.T) {
 	source := `راجع workspace: F:\MuhiyaCode Agent\dist ثم نفّذ الاختبارات.`
 	if got := RenderRTL(source, "native"); got != source {
@@ -418,7 +803,7 @@ func TestRTLAndWrappingAreStable(t *testing.T) {
 			t.Fatalf("wrapped line exceeds width: %q", line)
 		}
 	}
-	markdown := RenderMarkdown("# Result\n\n- one\n- `two`\n```go\nfmt.Println(1)\n```", 24, "off", newPalette())
+	markdown := RenderMarkdown("# Result\n\n- one\n- `two`\n```go\nfmt.Println(1)\n```", 24, "off", "auto", newPalette("dark"))
 	if strings.Contains(markdown, "```") || !strings.Contains(markdown, "Result") || !strings.Contains(markdown, "fmt.Println") {
 		t.Fatalf("markdown render = %q", markdown)
 	}

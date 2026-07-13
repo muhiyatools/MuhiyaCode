@@ -17,7 +17,7 @@ type MCPServerInfo struct {
 	Target    string // command+args, or url
 	Enabled   bool
 	OAuth     bool
-	State     string // "ready" | "error" | "auth_required" | "disabled" | ...
+	State     string // "connected" | "connecting" | "error" | "auth_required" | "disabled" | "authorized" | "not connected"
 	Status    string // human-readable message
 	ToolCount int
 }
@@ -41,6 +41,9 @@ type MCPActions struct {
 	SetEnabled func(context.Context, string, bool) error
 	Authorize  func(context.Context, string) error
 	Test       func(context.Context, string) ([]MCPServerInfo, error)
+	// Refresh (D2) kicks a background, non-blocking manager refresh so opening
+	// the modal begins connecting lazy servers. Optional (may be nil in tests).
+	Refresh func(context.Context)
 }
 
 // mcpActionResult is what an MCP mutation returns to handleAction: a message to
@@ -52,12 +55,48 @@ type mcpActionResult struct {
 }
 
 func (m *Model) openMCP() tea.Cmd {
-	return actionCommand("mcp-list", func() (any, error) { return m.actions.MCP.List(m.ctx) })
+	list := actionCommand("mcp-list", func() (any, error) { return m.actions.MCP.List(m.ctx) })
+	if m.actions.MCP.Refresh == nil {
+		return list
+	}
+	// D2/T033: kick a background (non-blocking) refresh when the modal opens so
+	// lazy-connect servers (which start with no live status → "not connected")
+	// begin connecting. The M2 tick then observes them move to connected/error
+	// and the poll terminates naturally. The refresh runs in its own tea command
+	// goroutine, so it never blocks the UI.
+	refresh := func() tea.Msg {
+		m.actions.MCP.Refresh(m.ctx)
+		return nil
+	}
+	return tea.Batch(refresh, list)
 }
 
-// showMCPList renders the top-level server list once List resolves.
+// showMCPList renders the top-level server list once List resolves. The
+// modal is flagged open (mcpModalAtRest) so tickMsg keeps repolling until
+// every server reaches a terminal state.
 func (m *Model) showMCPList(value any) tea.Cmd {
 	servers, _ := value.([]MCPServerInfo)
+	m.installMCPChoices("MCP servers", servers)
+	return nil
+}
+
+// refreshMCPChoices (M2) rebuilds the choice list / summary inside the
+// already-open MCP modal. Selection state is preserved when the new list
+// contains the previously highlighted server; otherwise it falls back to 0.
+func (m *Model) refreshMCPChoices(value any) {
+	m.mcpRefreshIn = false
+	if m.modal == nil {
+		return
+	}
+	servers, _ := value.([]MCPServerInfo)
+	title := m.modal.title
+	m.installMCPChoices(title, servers)
+}
+
+// installMCPChoices wipes and rebuilds the choice slice on the current
+// modal. The "server → choice" mapping preserves selection so a stable
+// server stays highlighted through every refresh tick.
+func (m *Model) installMCPChoices(title string, servers []MCPServerInfo) {
 	choices := make([]contract.QuestionChoice, 0, len(servers)+2)
 	for _, server := range servers {
 		choices = append(choices, contract.QuestionChoice{Label: mcpLabel(server), Description: mcpDescription(server)})
@@ -66,20 +105,46 @@ func (m *Model) showMCPList(value any) tea.Cmd {
 		contract.QuestionChoice{Label: "＋ Add server", Description: "Register a new stdio or HTTP MCP server"},
 		contract.QuestionChoice{Label: "Close", Description: "Return to the session"},
 	)
-	captured := append([]MCPServerInfo(nil), servers...)
-	m.openChoice("MCP servers", mcpSummary(captured), choices, func(index int) tea.Cmd {
-		switch {
-		case index < len(captured):
-			m.openMCPServer(captured[index])
-			return nil
-		case index == len(captured):
-			m.openMCPAdd()
-			return nil
-		default:
-			return nil
+	// M4: keep the current server list on the model so the select closure resolves
+	// row → action against the LATEST list, not a snapshot captured at first open.
+	// A live refresh that adds/removes a server would otherwise misroute clicks.
+	m.mcpServers = append([]MCPServerInfo(nil), servers...)
+	if m.modal == nil || m.modal.title != title {
+		m.openChoice(title, mcpSummary(servers), choices, func(index int) tea.Cmd {
+			current := m.mcpServers
+			switch {
+			case index < len(current):
+				m.openMCPServer(current[index])
+				return nil
+			case index == len(current):
+				m.openMCPAdd()
+				return nil
+			default:
+				return nil
+			}
+		})
+	} else {
+		m.modal.choices = choices
+		m.modal.message = mcpSummary(servers)
+	}
+	m.mcpModalAtRest = hasMCPPendingStates(servers)
+}
+
+// hasMCPPendingStates reports whether any server is still in a non-terminal
+// state, gating M2's poll on/off.
+func hasMCPPendingStates(servers []MCPServerInfo) bool {
+	for _, server := range servers {
+		switch server.State {
+		// D2/T033: "not connected" is TERMINAL, not pending. With M5 lazy-connect
+		// a cached-surface server sits in "not connected" until first use, so
+		// treating it as pending made the modal tick spin forever. The modal's
+		// background Refresh (openMCP) is what moves such servers to
+		// connecting→connected; only the genuinely in-flight states below poll.
+		case "", "connecting", "authorized":
+			return true
 		}
-	})
-	return nil
+	}
+	return false
 }
 
 // openMCPServer shows the per-server action menu.
@@ -215,11 +280,19 @@ func (m *Model) afterMCPAction(value any) tea.Cmd {
 	return m.showMCPList(result.servers)
 }
 
+// mcpLabel (M4) renders the per-server state dot and "connecting" label
+// distinctly so the user can tell in-progress handshakes from idle servers.
+// Other states use the existing glyphs: ● connected, × error/auth_required,
+// · disabled, ○ not configured.
 func mcpLabel(server MCPServerInfo) string {
 	dot := "○"
 	switch server.State {
-	case "ready", "connected":
+	case "connected":
 		dot = "●"
+	case "connecting":
+		return server.Name + " (connecting…)"
+	case "authorized":
+		return server.Name + " (authorized — connecting…)"
 	case "error", "auth_required":
 		dot = "×"
 	}
@@ -238,7 +311,7 @@ func mcpDescription(server MCPServerInfo) string {
 	if server.ToolCount > 0 {
 		parts = append(parts, fmt.Sprintf("%d tools", server.ToolCount))
 	}
-	if server.Status != "" && server.State != "ready" && server.State != "connected" {
+	if server.Status != "" && server.State != "connected" {
 		parts = append(parts, server.Status)
 	}
 	return strings.Join(parts, " · ")
@@ -265,13 +338,13 @@ func mcpSummary(servers []MCPServerInfo) string {
 	if len(servers) == 0 {
 		return "No MCP servers registered yet. Add one to expose its tools to the agent."
 	}
-	ready := 0
+	connected := 0
 	for _, server := range servers {
-		if server.Enabled && (server.State == "ready" || server.State == "connected") {
-			ready++
+		if server.Enabled && server.State == "connected" {
+			connected++
 		}
 	}
-	return fmt.Sprintf("%d server(s) configured · %d connected. Choose one to manage it.", len(servers), ready)
+	return fmt.Sprintf("%d server(s) configured · %d connected. Choose one to manage it.", len(servers), connected)
 }
 
 func boolText(value bool) string {

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"golang.org/x/text/unicode/norm"
 )
 
 func Run(options Options) error {
@@ -20,9 +21,31 @@ func Run(options Options) error {
 		options.Context = context.Background()
 	}
 	if options.Simple || os.Getenv("MUHIYA_SIMPLE_TUI") == "1" || !isTerminal(os.Stdin) || !isTerminal(os.Stdout) {
+		// T021: line mode runs the engine synchronously, so a two-stage launch must
+		// hydrate the runtime before delegating (the loading shell is TUI-only).
+		if options.Runtime.Engine == nil && options.Hydrate != nil {
+			result, err := options.Hydrate(options.Context)
+			if err != nil {
+				return err
+			}
+			options.Runtime, options.Actions, options.Recent = result.Runtime, result.Actions, result.Recent
+			if options.Notice == "" {
+				options.Notice = result.Notice
+			}
+		}
 		return RunLine(options, os.Stdin, os.Stdout)
 	}
 	model := NewModel(options)
+	// 006 T033: negotiate terminal BiDi. In auto/visual the app owns BiDi, so emit
+	// BDSM-explicit (CSI 8 l) to stop a BiDi-capable terminal from double-reversing
+	// the already-visual output; restore terminal-owned BiDi on exit. Ignored by
+	// BiDi-agnostic terminals, so it is safe everywhere (research R7).
+	if options.Runtime.Settings != nil {
+		if seq := TerminalBiDiControl(options.Runtime.Settings.RTL.Mode); seq != "" {
+			fmt.Fprint(os.Stdout, seq)
+			defer fmt.Fprint(os.Stdout, "\x1b[8h")
+		}
+	}
 	program := tea.NewProgram(model, tea.WithContext(options.Context))
 	options.Bridge.Attach(program)
 	finalModel, err := program.Run()
@@ -62,7 +85,9 @@ func RunLine(options Options, input io.Reader, output io.Writer) error {
 	})
 	fmt.Fprintf(output, "MuhiyaCode v%s · %s\n", options.Version, options.Runtime.Session.WorkspacePath)
 	runPrompt := func(prompt string) error {
-		answer, _, err := options.Runtime.Engine.Run(options.Context, prompt)
+		// 006 (T030, FR-013): the model receives normalized logical Unicode, same as
+		// the TUI submit path.
+		answer, _, err := options.Runtime.Engine.Run(options.Context, norm.NFC.String(prompt))
 		if err != nil {
 			return err
 		}
@@ -90,10 +115,9 @@ func RunLine(options Options, input io.Reader, output io.Writer) error {
 			return nil
 		}
 		switch line {
-		case "", "/exit", "/quit":
-			if line != "" || err == io.EOF {
-				return nil
-			}
+		case "":
+			// Blank line: re-prompt. A blank line at EOF already returned above; end
+			// the line-mode REPL with EOF (Ctrl+D) or by closing the input.
 		case "/context":
 			report := options.Runtime.Engine.ContextReport()
 			fmt.Fprintf(output, "context %d/%d tokens (%.1f%%)\n", report.HistoryTokens, report.ContextLimit, report.Percent)

@@ -38,6 +38,18 @@ type options struct {
 	prices     priceTable
 }
 
+// allScenarios is the registered scenario set; "all" expands to exactly this list.
+var allScenarios = []string{"coding-session", "fat-context"}
+
+func knownScenario(name string) bool {
+	for _, scenario := range allScenarios {
+		if scenario == name {
+			return true
+		}
+	}
+	return false
+}
+
 type priceTable struct {
 	UncachedInputPerMillion float64 `json:"uncached_input_per_million"`
 	CacheReadPerMillion     float64 `json:"cache_read_per_million"`
@@ -51,6 +63,17 @@ type turnResult struct {
 	Answer     string `json:"answer,omitempty"`
 	DurationMS int64  `json:"duration_ms"`
 	Error      string `json:"error,omitempty"`
+	// Expect/ExpectMet (005-T036) record the workload's per-prompt completion
+	// check: a substring the final assistant answer must contain
+	// (case-insensitive). Nil ExpectMet means the prompt carried no check.
+	Expect    string `json:"expect,omitempty"`
+	ExpectMet *bool  `json:"expect_met,omitempty"`
+}
+
+// workloadTurn is one scripted prompt plus its optional completion check.
+type workloadTurn struct {
+	Prompt string
+	Expect string
 }
 
 type runResult struct {
@@ -72,6 +95,9 @@ type runResult struct {
 	InvalidationEvents  []contract.InvalidationEvent   `json:"invalidation_events"`
 	InvalidationByCause map[string]int                 `json:"invalidation_by_cause"`
 	RawProviderLog      string                         `json:"raw_provider_log"`
+	// WorkloadChecks/WorkloadCheckFailures count per-prompt completion checks.
+	WorkloadChecks        int `json:"workload_checks"`
+	WorkloadCheckFailures int `json:"workload_check_failures"`
 }
 
 type comparison struct {
@@ -82,21 +108,25 @@ type comparison struct {
 }
 
 type scenarioCompare struct {
-	Model                    string    `json:"model"`
-	Effort                   string    `json:"effort"`
-	BaselineRuns             int       `json:"baseline_runs"`
-	ImprovedRuns             int       `json:"improved_runs"`
-	BaselineSteadyStateRates []float64 `json:"baseline_steady_state_rates"`
-	ImprovedSteadyStateRates []float64 `json:"improved_steady_state_rates"`
-	BaselineMean             *float64  `json:"baseline_mean"`
-	ImprovedMean             *float64  `json:"improved_mean"`
-	ImprovedVariancePP       *float64  `json:"improved_variance_percentage_points"`
-	BaselineCost             *float64  `json:"baseline_total_cost"`
-	ImprovedCost             *float64  `json:"improved_total_cost"`
-	CostDelta                *float64  `json:"cost_delta"`
-	UnattributedMisses       int       `json:"unattributed_misses"`
-	MeetsSteadyStateTarget   bool      `json:"meets_steady_state_target"`
-	MeetsVarianceTarget      bool      `json:"meets_variance_target"`
+	Model                        string    `json:"model"`
+	Effort                       string    `json:"effort"`
+	BaselineRuns                 int       `json:"baseline_runs"`
+	ImprovedRuns                 int       `json:"improved_runs"`
+	BaselineSteadyStateRates     []float64 `json:"baseline_steady_state_rates"`
+	ImprovedSteadyStateRates     []float64 `json:"improved_steady_state_rates"`
+	BaselinePrefixStabilityRates []float64 `json:"baseline_prefix_stability_rates"`
+	ImprovedPrefixStabilityRates []float64 `json:"improved_prefix_stability_rates"`
+	BaselineMean                 *float64  `json:"baseline_mean"`
+	ImprovedMean                 *float64  `json:"improved_mean"`
+	BaselineRawMean              *float64  `json:"baseline_raw_mean"`
+	ImprovedRawMean              *float64  `json:"improved_raw_mean"`
+	ImprovedVariancePP           *float64  `json:"improved_variance_percentage_points"`
+	BaselineCost                 *float64  `json:"baseline_total_cost"`
+	ImprovedCost                 *float64  `json:"improved_total_cost"`
+	CostDelta                    *float64  `json:"cost_delta"`
+	UnattributedMisses           int       `json:"unattributed_misses"`
+	MeetsSteadyStateTarget       bool      `json:"meets_steady_state_target"`
+	MeetsSC005                   bool      `json:"meets_sc_005"`
 }
 
 func main() {
@@ -127,7 +157,7 @@ func parseOptions(args []string) (options, []string, error) {
 	var opts options
 	flags := flag.NewFlagSet("cachebench", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	flags.StringVar(&opts.scenario, "scenario", "all", "scenario name (all or coding-session)")
+	flags.StringVar(&opts.scenario, "scenario", "all", "scenario name (all, coding-session, or fat-context)")
 	flags.IntVar(&opts.runs, "runs", 3, "number of repetitions")
 	flags.StringVar(&opts.buildLabel, "build-label", "", "baseline or improved")
 	flags.StringVar(&opts.outDir, "out", "", "result directory")
@@ -155,7 +185,7 @@ func parseOptions(args []string) (options, []string, error) {
 	if strings.TrimSpace(opts.outDir) == "" {
 		return options{}, nil, errors.New("-out is required")
 	}
-	if opts.scenario != "all" && opts.scenario != "coding-session" {
+	if opts.scenario != "all" && !knownScenario(opts.scenario) {
 		return options{}, nil, fmt.Errorf("unknown scenario %q", opts.scenario)
 	}
 	return opts, flags.Args(), nil
@@ -165,13 +195,6 @@ func executeRuns(opts options) error {
 	fixture, err := filepath.Abs(opts.fixtureDir)
 	if err != nil {
 		return err
-	}
-	turns, err := loadWorkload(filepath.Join(fixture, "workload.md"))
-	if err != nil {
-		return err
-	}
-	if len(turns) < 20 {
-		return fmt.Errorf("scenario must contain at least 20 turns, got %d", len(turns))
 	}
 	outDir, err := filepath.Abs(opts.outDir)
 	if err != nil {
@@ -207,23 +230,46 @@ func executeRuns(opts options) error {
 	}
 	settings.PermissionMode = contract.PermissionAutoAccept
 
-	for runIndex := 1; runIndex <= opts.runs; runIndex++ {
-		result, err := executeOne(opts, fixture, outDir, sourcePaths, settings, secrets, turns, runIndex)
-		if writeErr := writeRunResult(outDir, result); writeErr != nil {
-			return writeErr
-		}
-		printRunSummary(result)
+	scenarios := []string{opts.scenario}
+	if opts.scenario == "all" {
+		scenarios = allScenarios
+	}
+	for _, scenario := range scenarios {
+		scenarioTurns, err := loadWorkload(filepath.Join(fixture, "workload.md"))
 		if err != nil {
 			return err
+		}
+		if len(scenarioTurns) < 20 {
+			return fmt.Errorf("scenario %s must contain at least 20 turns, got %d", scenario, len(scenarioTurns))
+		}
+		if scenario == "fat-context" {
+			scenarioTurns = withFatStableContext(scenarioTurns)
+		}
+		for runIndex := 1; runIndex <= opts.runs; runIndex++ {
+			result, err := executeOne(opts, scenario, fixture, outDir, sourcePaths, settings, secrets, scenarioTurns, runIndex)
+			if writeErr := writeRunResult(outDir, result); writeErr != nil {
+				return writeErr
+			}
+			printRunSummary(result)
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
-func executeOne(opts options, fixture, outDir string, sourcePaths state.Paths, settings contract.Settings, secrets contract.Secrets, prompts []string, runIndex int) (runResult, error) {
+func withFatStableContext(prompts []workloadTurn) []workloadTurn {
+	result := append([]workloadTurn(nil), prompts...)
+	seed := strings.Repeat("Stable cache benchmark context: taskboard records have deterministic identifiers, titles, states, and audit metadata.\n", 1800)
+	result[0].Prompt = result[0].Prompt + "\n\nTreat this seeded reference as stable session context for all later turns:\n" + seed
+	return result
+}
+
+func executeOne(opts options, scenario, fixture, outDir string, sourcePaths state.Paths, settings contract.Settings, secrets contract.Secrets, prompts []workloadTurn, runIndex int) (runResult, error) {
 	started := time.Now().UTC()
 	result := runResult{
-		Scenario: "coding-session", Build: opts.buildLabel, RunIndex: runIndex,
+		Scenario: scenario, Build: opts.buildLabel, RunIndex: runIndex,
 		GitCommit: currentGitCommit(),
 		Model:     settings.Provider.ActiveModelID, Effort: settings.Effort, StartedAt: started,
 		PriceSource: strings.TrimSpace(opts.prices.Source), InvalidationByCause: map[string]int{},
@@ -280,17 +326,26 @@ func executeOne(opts options, fixture, outDir string, sourcePaths state.Paths, s
 	}
 	defer app.Close()
 
-	for index, prompt := range prompts {
+	for index, item := range prompts {
 		turnStarted := time.Now()
 		ctx, cancel := context.WithTimeout(context.Background(), opts.turnLimit)
-		answer, _, runErr := app.Runtime().Engine.Run(ctx, prompt)
+		answer, _, runErr := app.Runtime().Engine.Run(ctx, item.Prompt)
 		cancel()
-		turn := turnResult{Index: index + 1, Prompt: prompt, Answer: answer, DurationMS: time.Since(turnStarted).Milliseconds()}
+		turn := turnResult{Index: index + 1, Prompt: item.Prompt, Answer: answer, DurationMS: time.Since(turnStarted).Milliseconds()}
 		if runErr != nil {
 			turn.Error = runErr.Error()
 			result.Turns = append(result.Turns, turn)
 			finalizeResult(&result, app, opts.prices, started)
 			return result, fmt.Errorf("scenario turn %d failed: %w", index+1, runErr)
+		}
+		if item.Expect != "" {
+			turn.Expect = item.Expect
+			met := strings.Contains(strings.ToLower(answer), strings.ToLower(item.Expect))
+			turn.ExpectMet = &met
+			result.WorkloadChecks++
+			if !met {
+				result.WorkloadCheckFailures++
+			}
 		}
 		result.CompletedTurns++
 		result.Turns = append(result.Turns, turn)
@@ -356,23 +411,33 @@ func deriveCost(aggregate contract.SessionUsageAggregate, prices priceTable) *fl
 	return &cost
 }
 
-var workloadLine = regexp.MustCompile(`^\s*\d+\.\s+(.+?)\s*$`)
+var (
+	workloadLine = regexp.MustCompile(`^\s*\d+\.\s+(.+?)\s*$`)
+	// workloadExpect (005-T036) attaches a completion check to the preceding
+	// numbered prompt: a substring the final assistant answer must contain.
+	// Older workload files without expect lines keep working unchanged.
+	workloadExpect = regexp.MustCompile(`^\s*expect:\s*(.+?)\s*$`)
+)
 
-func loadWorkload(path string) ([]string, error) {
+func loadWorkload(path string) ([]workloadTurn, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
-	var prompts []string
+	var turns []workloadTurn
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		match := workloadLine.FindStringSubmatch(scanner.Text())
-		if len(match) == 2 {
-			prompts = append(prompts, match[1])
+		line := scanner.Text()
+		if match := workloadExpect.FindStringSubmatch(line); len(match) == 2 && len(turns) > 0 {
+			turns[len(turns)-1].Expect = match[1]
+			continue
+		}
+		if match := workloadLine.FindStringSubmatch(line); len(match) == 2 {
+			turns = append(turns, workloadTurn{Prompt: match[1]})
 		}
 	}
-	return prompts, scanner.Err()
+	return turns, scanner.Err()
 }
 
 func writeRunResult(outDir string, result runResult) error {
@@ -381,15 +446,19 @@ func writeRunResult(outDir string, result runResult) error {
 }
 
 func printRunSummary(result runResult) {
-	rate := "unavailable"
+	rawRate := "unavailable"
 	if result.Aggregate.SteadyStateHitRate != nil {
-		rate = fmt.Sprintf("%.2f%%", *result.Aggregate.SteadyStateHitRate*100)
+		rawRate = fmt.Sprintf("%.2f%%", *result.Aggregate.SteadyStateHitRate*100)
+	}
+	stabilityRate := "unavailable"
+	if result.Aggregate.PrefixStabilityRate != nil {
+		stabilityRate = fmt.Sprintf("%.2f%%", *result.Aggregate.PrefixStabilityRate*100)
 	}
 	cost := "unavailable"
 	if result.DerivedCost != nil {
 		cost = fmt.Sprintf("%.6f", *result.DerivedCost)
 	}
-	fmt.Printf("%s run %d: turns=%d requests=%d steady=%s cost=%s unattributed=%d\n", result.Scenario, result.RunIndex, result.CompletedTurns, result.Aggregate.Requests, rate, cost, result.UnattributedMisses)
+	fmt.Printf("%s run %d: turns=%d requests=%d prefix-stability=%s raw-steady=%s cost=%s unattributed=%d checks-failed=%d/%d\n", result.Scenario, result.RunIndex, result.CompletedTurns, result.Aggregate.Requests, stabilityRate, rawRate, cost, result.UnattributedMisses, result.WorkloadCheckFailures, result.WorkloadChecks)
 }
 
 func validatePinnedModel(settings contract.Settings) error {
@@ -413,8 +482,9 @@ func validatePinnedModel(settings contract.Settings) error {
 }
 
 type rawLogger struct {
-	mu   sync.Mutex
-	file *os.File
+	mu     sync.Mutex
+	file   *os.File
+	writer *bufio.Writer
 }
 
 func newRawLogger(path string) (*rawLogger, error) {
@@ -422,7 +492,7 @@ func newRawLogger(path string) (*rawLogger, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &rawLogger{file: file}, nil
+	return &rawLogger{file: file, writer: bufio.NewWriterSize(file, 64*1024)}, nil
 }
 
 func (l *rawLogger) Append(payload gateway.RawUsagePayload) error {
@@ -432,17 +502,16 @@ func (l *rawLogger) Append(payload gateway.RawUsagePayload) error {
 	if err != nil {
 		return err
 	}
-	if _, err := l.file.Write(append(line, '\n')); err != nil {
-		return err
-	}
-	return l.file.Sync()
+	_, err = l.writer.Write(append(line, '\n'))
+	return err
 }
 
 func (l *rawLogger) Close() error {
 	if l == nil || l.file == nil {
 		return nil
 	}
-	return l.file.Close()
+	flushErr := l.writer.Flush()
+	return errors.Join(flushErr, l.file.Close())
 }
 
 func setMuhiyaHome(home string) func() {
@@ -555,35 +624,67 @@ func buildComparison(baselineDir, improvedDir string, baseline, improved []runRe
 	for name := range names {
 		baseRuns := filterScenario(baseline, name)
 		newRuns := filterScenario(improved, name)
-		if len(baseRuns) == 0 || len(newRuns) == 0 {
-			return comparison{}, fmt.Errorf("scenario %q is missing an arm", name)
+		entry, err := compareScenario(name, baseRuns, newRuns)
+		if err != nil {
+			return comparison{}, err
 		}
-		if baseRuns[0].Model != newRuns[0].Model || baseRuns[0].Effort != newRuns[0].Effort {
-			return comparison{}, fmt.Errorf("scenario %q model/effort changed between arms", name)
-		}
-		entry := scenarioCompare{Model: baseRuns[0].Model, Effort: string(baseRuns[0].Effort), BaselineRuns: len(baseRuns), ImprovedRuns: len(newRuns)}
-		entry.BaselineSteadyStateRates = availableRates(baseRuns)
-		entry.ImprovedSteadyStateRates = availableRates(newRuns)
-		entry.BaselineMean = mean(entry.BaselineSteadyStateRates)
-		entry.ImprovedMean = mean(entry.ImprovedSteadyStateRates)
-		entry.ImprovedVariancePP = rangePercentagePoints(entry.ImprovedSteadyStateRates)
-		entry.BaselineCost = totalCost(baseRuns)
-		entry.ImprovedCost = totalCost(newRuns)
-		if entry.BaselineCost != nil && entry.ImprovedCost != nil {
-			delta := *entry.ImprovedCost - *entry.BaselineCost
-			entry.CostDelta = &delta
-		}
-		for _, run := range newRuns {
-			entry.UnattributedMisses += run.UnattributedMisses
-		}
-		entry.MeetsSteadyStateTarget = len(entry.ImprovedSteadyStateRates) == len(newRuns)
-		for _, rate := range entry.ImprovedSteadyStateRates {
-			entry.MeetsSteadyStateTarget = entry.MeetsSteadyStateTarget && rate >= 0.99
-		}
-		entry.MeetsVarianceTarget = entry.ImprovedVariancePP != nil && *entry.ImprovedVariancePP <= 1.0
 		result.Scenarios[name] = entry
 	}
 	return result, nil
+}
+
+func compareScenario(name string, baseline, improved []runResult) (scenarioCompare, error) {
+	if len(baseline) == 0 || len(improved) == 0 {
+		return scenarioCompare{}, fmt.Errorf("scenario %q is missing an arm", name)
+	}
+	if baseline[0].Model != improved[0].Model || baseline[0].Effort != improved[0].Effort {
+		return scenarioCompare{}, fmt.Errorf("scenario %q model/effort changed between arms", name)
+	}
+	entry := scenarioRates(baseline, improved)
+	entry.BaselineCost, entry.ImprovedCost = totalCost(baseline), totalCost(improved)
+	if entry.BaselineCost != nil && entry.ImprovedCost != nil {
+		delta := *entry.ImprovedCost - *entry.BaselineCost
+		entry.CostDelta = &delta
+	}
+	for _, run := range improved {
+		entry.UnattributedMisses += run.UnattributedMisses
+	}
+	entry.MeetsSteadyStateTarget = everyRateAtLeast(entry.ImprovedPrefixStabilityRates, len(improved), 0.99)
+	baselineMeetsTarget := everyRateAtLeast(entry.BaselinePrefixStabilityRates, len(baseline), 0.99)
+	entry.MeetsSC005 = entry.MeetsSteadyStateTarget && !baselineMeetsTarget && entry.ImprovedVariancePP != nil && *entry.ImprovedVariancePP <= 1.0
+	return entry, nil
+}
+
+func scenarioRates(baseline, improved []runResult) scenarioCompare {
+	entry := scenarioCompare{Model: baseline[0].Model, Effort: string(baseline[0].Effort), BaselineRuns: len(baseline), ImprovedRuns: len(improved)}
+	entry.BaselineSteadyStateRates, entry.ImprovedSteadyStateRates = availableRates(baseline), availableRates(improved)
+	entry.BaselinePrefixStabilityRates, entry.ImprovedPrefixStabilityRates = availablePrefixRates(baseline), availablePrefixRates(improved)
+	entry.BaselineRawMean, entry.ImprovedRawMean = mean(entry.BaselineSteadyStateRates), mean(entry.ImprovedSteadyStateRates)
+	entry.BaselineMean, entry.ImprovedMean = mean(entry.BaselinePrefixStabilityRates), mean(entry.ImprovedPrefixStabilityRates)
+	entry.ImprovedVariancePP = rangePercentagePoints(entry.ImprovedPrefixStabilityRates)
+	return entry
+}
+
+func everyRateAtLeast(rates []float64, expected int, target float64) bool {
+	if len(rates) != expected {
+		return false
+	}
+	for _, rate := range rates {
+		if rate < target {
+			return false
+		}
+	}
+	return true
+}
+
+func availablePrefixRates(results []runResult) []float64 {
+	var values []float64
+	for _, result := range results {
+		if result.Aggregate.PrefixStabilityRate != nil {
+			values = append(values, *result.Aggregate.PrefixStabilityRate)
+		}
+	}
+	return values
 }
 
 func filterScenario(results []runResult, name string) []runResult {
@@ -651,11 +752,12 @@ func comparisonMarkdown(result comparison) string {
 	sort.Strings(names)
 	var output strings.Builder
 	output.WriteString("# Cachebench comparison\n\n")
-	output.WriteString("| Scenario | Baseline mean | Improved mean | Variance (pp) | Cost delta | Unattributed | SC-001 | SC-005 |\n")
-	output.WriteString("|---|---:|---:|---:|---:|---:|---|---|\n")
+	output.WriteString("SC-001 uses prefix stability; raw steady-state remains the cost/workload KPI.\n\n")
+	output.WriteString("| Scenario | Baseline stability | Improved stability | Baseline raw | Improved raw | Variance (pp) | Cost delta | Unattributed | SC-001 | SC-005 |\n")
+	output.WriteString("|---|---:|---:|---:|---:|---:|---:|---:|---|---|\n")
 	for _, name := range names {
 		entry := result.Scenarios[name]
-		fmt.Fprintf(&output, "| %s | %s | %s | %s | %s | %d | %t | %t |\n", name, formatRate(entry.BaselineMean), formatRate(entry.ImprovedMean), formatFloat(entry.ImprovedVariancePP), formatFloat(entry.CostDelta), entry.UnattributedMisses, entry.MeetsSteadyStateTarget, entry.MeetsVarianceTarget)
+		fmt.Fprintf(&output, "| %s | %s | %s | %s | %s | %s | %s | %d | %t | %t |\n", name, formatRate(entry.BaselineMean), formatRate(entry.ImprovedMean), formatRate(entry.BaselineRawMean), formatRate(entry.ImprovedRawMean), formatFloat(entry.ImprovedVariancePP), formatFloat(entry.CostDelta), entry.UnattributedMisses, entry.MeetsSteadyStateTarget, entry.MeetsSC005)
 	}
 	return output.String()
 }

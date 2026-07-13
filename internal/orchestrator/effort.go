@@ -28,8 +28,8 @@ var effortProfiles = map[contract.EffortLevel]EffortProfile{
 	contract.EffortLow: {
 		Level: contract.EffortLow, Rank: 0,
 		Summary:      "Fast, direct work with the lightest useful checks.",
-		Directives:   []string{"Act directly; read only files required for the change.", "Run at most one targeted check when risk justifies it.", "Do not expand scope."},
-		MaxAgentRuns: 0, MaxTurns: 16, AgentTurnScale: .75,
+		Directives:   []string{"Act directly; read only files required for the change.", "Delegate at most one subagent run, and only when it clearly saves context.", "Run at most one targeted check when risk justifies it.", "Do not expand scope."},
+		MaxAgentRuns: 1, MaxTurns: 16, AgentTurnScale: .75,
 		KeepFullToolOutputs: 4, TrimmedToolOutputChars: 500, ToolOutputCap: 8_000, CompactThreshold: .80,
 		Reasoning: contract.ReasoningLow, AgentReasoning: contract.ReasoningLow,
 	},

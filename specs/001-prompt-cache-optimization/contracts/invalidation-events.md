@@ -11,7 +11,7 @@ shape), `internal/state` (persistence), `internal/tui` (annotations), cache-guar
 | `fold` | Consolidated maintenance pass folding completed-task payloads | `pressure` | Requires pressure ≥ 0.60 |
 | `trim` | Maintenance pass rewriting aged/superseded tool payloads | `pressure` | Same pass as fold when both apply — one event per pass with combined scope |
 | `compact` | Structured summary compaction | `pressure` | Includes the summary-message insertion |
-| `window-drop` | Oldest units dropped from the assembled request | `pressure` | Recorded when assembly excludes previously sent units |
+| `window-drop` | Oldest units dropped from the assembled request | `pressure`, `boundary` | `boundary` identifies estimator bootstrap below the pressure floor |
 | `toolset-change` | Pinned MCP surface change (user add/remove/enable/disable/authorize; first-ever handshake of an uncached server) | `user-action`, `boundary` | Applied only at task boundaries |
 | `model-switch` | `/model` | `user-action` | Prompt model fields refresh in the same boundary |
 | `prompt-rebuild` | Any R1 recomposition that changes bytes (config change, template version change) | `config-change` | Must name the changed input |
@@ -48,9 +48,12 @@ else if PrefixShape(cur) != PrefixShape(prev)
                                           → attribution = agent
                                             change_reasons = CompareShape reasons,
                                             cross-linked to the InvalidationEvent(s)
+else if prompt shrank without an event OR cache read regressed by more than two 64-token
+        blocks while messages grew OR miss > new_tail + two blocks
+                                          → attribution = agent-suspect
 else                                      → attribution = provider
-                                            (identical bytes; miss caused by provider
-                                             TTL/eviction/scope — documented limitation)
+                                            (identical bytes and miss inside the bounded
+                                             new-tail/quantization tolerance)
 ```
 
 Notes:
@@ -58,7 +61,8 @@ Notes:
 - `cold-start` is definitionally excluded from `steady_state_hit_rate` (SC-001).
 - `agent` attributions without a matching ledger event are contract violations (tests assert
   zero).
-- `provider` attributions feed the limitations register in `docs/prompt-caching.md` with
+- `agent-suspect` is unattributed until a matching client invalidation is identified; it can
+  never be used to satisfy SC-007. `provider` attributions feed the limitations register in `docs/prompt-caching.md` with
   observed evidence (FR-011).
 - The active tail (R4) of every request is expected uncached input; attribution concerns the
   R1–R3 prefix only. Benchmarks compute expected-new-tail tokens per turn to bound how much

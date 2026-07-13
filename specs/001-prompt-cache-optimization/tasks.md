@@ -198,8 +198,8 @@ prefix-of relationship between consecutive requests) + V5 (live: improved arm
 - [X] T031 [US1] Restart-determinism test: build session → send mock turns → persist → reload
       in a fresh process context → assert the next request's R1+R2+R3 bytes are identical
       (covers date, probe, MCP-pinning fixes; SC-002) — new
-      `internal/orchestrator/restart_determinism_test.go` (contract W9; depends T017, T020,
-      T021)
+      `internal/orchestrator/restart_determinism_test.go` plus disk reload coverage in
+      `internal/state/toolcache_test.go` (contract W9; depends T017, T020, T021)
 - [X] T032 [US1] Mock-endpoint cache-guard suite: OpenAI-compatible mock whose "hit tokens" =
       byte-identical common prefix with the previous request; scenarios per quickstart V2
       (dialogue, tool loops, MCP-pinned surface, restart replay, steering, goal continuation,
@@ -252,10 +252,10 @@ run in parallel with US1.
 - [X] T039 [US2] SC-004 cross-check test: drive the mock endpoint with injected usage payloads
       (both provider shapes + absent + malformed) through the full engine loop and assert
       recorded/displayed figures equal the injected payloads exactly — in
-      `internal/orchestrator/usage_integrity_test.go` (depends T011, T035)
+      `internal/command/application_test.go:202` (depends T011, T035)
 - [X] T040 [US2] Resume-continuity test: run turns → restart → assert `/context` cumulative
       figures equal the pre-restart sums from `usage.jsonl` — in
-      `internal/orchestrator/usage_resume_test.go` (depends T008, T035)
+      `internal/orchestrator/usage_record_test.go:10` (depends T008, T035)
 
 **Checkpoint**: Accounting is visibly trustworthy and provider-faithful, independent of US1's
 behavior fixes.

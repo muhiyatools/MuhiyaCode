@@ -19,7 +19,7 @@ func ResolveModelProfile(name string) ModelProfile {
 	lower := strings.ToLower(name)
 	switch {
 	case strings.Contains(lower, "deepseek"):
-		return ModelProfile{Family: "deepseek", Temperature: .1, TopP: .95, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, PromptAddendum: "DeepSeek: use native structured tool calls; do not emit DSML. After tool results, continue to a concrete final answer."}
+		return ModelProfile{Family: "deepseek", Temperature: .1, TopP: .95, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, PromptAddendum: "DeepSeek: use native structured tool calls; do not emit DSML. After tool results, continue to a concrete final answer. Report only work actually performed; if steps remain, say so."}
 	case strings.Contains(lower, "minimax"):
 		return ModelProfile{Family: "minimax", Temperature: .15, TopP: .95, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, PromptAddendum: "MiniMax: keep tool arguments exact and finish tool-driven work with a concise result."}
 	case strings.Contains(lower, "glm") || strings.Contains(lower, "zhipu"):

@@ -151,8 +151,10 @@ func validInvalidationTrigger(trigger contract.InvalidationTrigger) bool {
 
 func triggerAllowedForCause(cause contract.InvalidationCause, trigger contract.InvalidationTrigger) bool {
 	switch cause {
-	case contract.InvalidationFold, contract.InvalidationTrim, contract.InvalidationCompact, contract.InvalidationWindowDrop:
+	case contract.InvalidationFold, contract.InvalidationTrim, contract.InvalidationCompact:
 		return trigger == contract.InvalidationPressure
+	case contract.InvalidationWindowDrop:
+		return trigger == contract.InvalidationPressure || trigger == contract.InvalidationBoundary
 	case contract.InvalidationToolsetChange:
 		return trigger == contract.InvalidationUserAction || trigger == contract.InvalidationBoundary
 	case contract.InvalidationModelSwitch, contract.InvalidationUserCompact:

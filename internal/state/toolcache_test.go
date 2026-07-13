@@ -44,7 +44,11 @@ func TestProbeStoreLastGoodIsCallerControlled(t *testing.T) {
 	if err := store.Put(ProbeSnapshot{Fingerprint: fingerprint, WebSearch: ProbeSupported, CheckedAt: time.Unix(1, 0)}); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := store.Get(fingerprint)
+	reloaded, err := NewProbeStore(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reloaded.Get(fingerprint)
 	if !ok || got.WebSearch != ProbeSupported {
 		t.Fatalf("snapshot=%+v ok=%v", got, ok)
 	}
