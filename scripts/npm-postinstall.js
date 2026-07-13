@@ -11,7 +11,7 @@ const https = require("https");
 const { execFileSync } = require("child_process");
 
 // --- edit this if your repository owner/name differs -----------------------
-const REPO = "muhiya/muhiyacode";
+const REPO = "muhiyatools/MuhiyaCode";
 // ---------------------------------------------------------------------------
 
 const pkg = require(path.join(__dirname, "..", "package.json"));
