@@ -104,8 +104,16 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 }
 
 func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model contract.Model, profile ModelProfile, input contract.ChatRequest) (contract.ChatResponse, bool, time.Duration, error) {
-	ctx, cancel := context.WithTimeout(parent, cfg.RequestLifetime)
+	// Timeout model (feature 007 R1): RequestLifetime is a FIRST-BYTE deadline. It
+	// bounds connect + TLS + the wait for response headers, during which DeepSeek may
+	// queue a request for up to ~10 minutes behind keep-alive traffic. Once headers
+	// arrive and the stream is flowing, this deadline is retired (below) and the
+	// rolling IdleTimeout alone governs, so a long answer after a long queue is never
+	// cut off by a whole-attempt cap.
+	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
+	lifetime := time.AfterFunc(cfg.RequestLifetime, cancel)
+	defer lifetime.Stop()
 	temperature := profile.Temperature
 	if input.Temperature != nil {
 		temperature = *input.Temperature
@@ -113,6 +121,13 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	maxTokens := input.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = profile.MaxOutputTokens
+	}
+	// Capability guard (feature 007 CP-3): never request more output than the
+	// provider's documented ceiling. A no-op for the common 16k default; a runaway
+	// guard for an over-large caller value.
+	if clamped, wasClamped := profile.ClampOutputTokens(maxTokens); wasClamped {
+		log.Printf("[gateway] requested max_tokens %d exceeds the documented %s ceiling %d; clamping", maxTokens, profile.Family, profile.OutputTokenLimit)
+		maxTokens = clamped
 	}
 	body := map[string]any{
 		"model": model.ID, "messages": replayMessages(input.Messages, profile, input.Reasoning), "temperature": temperature,
@@ -165,6 +180,11 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 		return contract.ChatResponse{}, false, retryAfter(response.Header.Get("Retry-After")), httpErr
 	}
 
+	// Streaming begins: headers are in, so retire the first-byte deadline and let the
+	// rolling idle timeout govern the stream. Keep-alive comment/empty lines reset
+	// this timer (see the scan loop), so a queued-but-alive stream survives well past
+	// RequestLifetime as long as the provider keeps signalling (feature 007 R1).
+	lifetime.Stop()
 	idle := time.AfterFunc(cfg.IdleTimeout, cancel)
 	defer idle.Stop()
 	acc := NewStreamAccumulator(input.OnToken, input.OnReasoningToken)

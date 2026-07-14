@@ -21,6 +21,10 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
       - name: Verify release source
         run: |
           go mod verify
@@ -38,4 +42,23 @@ jobs:
         uses: actions/attest@v4
         with:
           subject-checksums: ./dist/checksums.txt
+      - name: Publish npm wrapper
+        # Runs after the GitHub Release archives exist (the postinstall pulls the
+        # binary from them). The tag must match package.json's version, and an
+        # already-published version is skipped rather than failing the run — so
+        # re-tagging v1.0.0 just (re)creates the release without a duplicate publish.
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="$(node -p "require('./package.json').version")"
+          if [ "$VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::tag $GITHUB_REF_NAME (=$VERSION) != package.json version $PKG_VERSION"
+            exit 1
+          fi
+          if npm view "muhiyacode@$VERSION" version >/dev/null 2>&1; then
+            echo "muhiyacode@$VERSION already on npm — skipping publish."
+          else
+            npm publish
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 

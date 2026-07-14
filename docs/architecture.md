@@ -69,3 +69,28 @@ terminate on cancellation; no package-global worker goroutines are allowed.
     presentation-only — it never reaches the request-assembly path or the prefix
     cache. On very long sessions the in-memory transcript window is bounded (with a
     visible trim marker); the durable session transcript is never truncated.
+
+## DeepSeek API alignment (feature 007)
+
+The request chain (MuhiyaCode → Muhiya Gateway → DeepSeek) is aligned to DeepSeek's
+documented behavior; full audit in `specs/007-deepseek-api-alignment/`.
+
+13. **Timeouts follow DeepSeek's keep-alive contract.** `RequestLifetime` is now a
+    first-byte deadline (connect + header wait, up to the documented ~10-minute
+    pre-inference window); once the stream flows the rolling idle timeout alone
+    governs, and `: keep-alive` comment / empty lines are liveness (they reset the
+    idle timer), so a long answer after a long queue is never cut off. The gateway's
+    upstream `ResponseHeaderTimeout` is likewise 630s.
+14. **Stable, private per-user identity.** The gateway stamps a documented `user_id`
+    on every DeepSeek request: `"mu-" + HMAC-SHA256(secret, accountID)`, opaque and
+    server-authoritative (inbound `user`/`user_id` are stripped first). It gives the
+    provider its documented per-user KVCache isolation without leaking account data;
+    it is a top-level parameter, never part of the tokenized prefix.
+15. **Valid parameters only.** Reasoning controls reach DeepSeek exclusively as the
+    documented `thinking` object + `reasoning_effort: high|max` (no raw client value
+    on any path); deprecated `frequency_penalty`/`presence_penalty` are never
+    forwarded; a client-side capability profile (limits, deprecated set, beta
+    adoption) keeps requests in range, surfaced read-only in `/context`.
+16. **Cache-miss observability.** `request_logs.cache_miss_tokens` records the
+    provider-reported miss count alongside the hit count; estimated rows leave it
+    null (honest measurement). Cache accounting is otherwise unchanged.

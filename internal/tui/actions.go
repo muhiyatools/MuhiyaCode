@@ -8,6 +8,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/gateway"
 	"github.com/muhiya/muhiyacode/internal/orchestrator"
 )
 
@@ -28,7 +29,11 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	}
 	switch command {
 	case "/context":
-		m.openInfo("Context usage", formatContextReport(m.runtime.Engine.ContextReport()))
+		report := formatContextReport(m.runtime.Engine.ContextReport())
+		if m.runtime.Settings != nil {
+			report += "\n\n" + formatCapabilityProfile(gateway.ResolveModelProfile(m.runtime.Settings.Provider.ActiveModelID))
+		}
+		m.openInfo("Context usage", report)
 	case "/compact":
 		if m.busy {
 			m.notify("Stop the running task before compacting.")
@@ -507,6 +512,29 @@ func formatContextReport(report orchestrator.ContextReport) string {
 		for _, event := range report.Invalidations[start:] {
 			lines = append(lines, fmt.Sprintf("    - %s: %s (%s)", event.Cause, event.Scope, event.At.Local().Format("15:04:05")))
 		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// formatCapabilityProfile renders the active provider capability profile read-only
+// in the /context modal (feature 007 T031, contracts/capability-profile.md §3): the
+// documented limits, the operational budget, and each beta feature's adoption status,
+// so a user can see exactly what MuhiyaCode will and will not send to the provider.
+func formatCapabilityProfile(profile gateway.ModelProfile) string {
+	lines := []string{
+		"Provider capability (" + profile.Family + ")",
+	}
+	if profile.ContextWindowLimit > 0 {
+		lines = append(lines, fmt.Sprintf("  Context window: %s documented · %s operational budget", formatTokens(profile.ContextWindowLimit), formatTokens(profile.DefaultContextWindow)))
+	}
+	if profile.OutputTokenLimit > 0 {
+		lines = append(lines, fmt.Sprintf("  Max output:     %s documented · %s default", formatTokens(profile.OutputTokenLimit), formatTokens(profile.MaxOutputTokens)))
+	}
+	if len(profile.DeprecatedParams) > 0 {
+		lines = append(lines, "  Never sent (deprecated): "+strings.Join(profile.DeprecatedParams, ", "))
+	}
+	for _, feature := range profile.BetaFeatures {
+		lines = append(lines, fmt.Sprintf("  Beta %s: %s", feature.Name, feature.Status))
 	}
 	return strings.Join(lines, "\n")
 }

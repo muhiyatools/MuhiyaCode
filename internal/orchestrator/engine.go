@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/gateway"
 )
 
 const (
@@ -2067,12 +2068,21 @@ func floatPointer(value float64) *float64 {
 }
 
 func (e *Engine) contextLimit() int {
+	limit := 128000
 	for _, model := range e.settings.Provider.Models {
 		if model.ID == e.settings.Provider.ActiveModelID && model.ContextLimit > 0 {
-			return model.ContextLimit
+			limit = model.ContextLimit
+			break
 		}
 	}
-	return 128000
+	// Capability guard (feature 007 CP-4/FR-004): the operational context budget must
+	// never exceed the provider's documented context window, or the pipeline could
+	// build an over-limit request. A no-op for the default 128k; a guard against a
+	// misconfigured ContextLimit.
+	if ceiling := gateway.ResolveModelProfile(e.settings.Provider.ActiveModelID).ContextWindowLimit; ceiling > 0 && limit > ceiling {
+		limit = ceiling
+	}
+	return limit
 }
 
 func (e *Engine) emitContext(lastRequest int) {
