@@ -2,6 +2,13 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
+## 1.0.1
+
+- Added a DeepSeek capability profile: requests now stay within the provider's documented context and output-token limits, never send deprecated parameters, and `/context` shows the active provider capabilities.
+- Reworked request timeouts into a first-byte deadline so a long-queued request survives the provider's keep-alive window instead of aborting early, while a genuinely stalled stream is still cancelled.
+- Fixed right-to-left input: the first (rightmost) word of a long Arabic prompt is no longer truncated off the composer's right edge.
+- Rewrote the README as a concise, production-grade landing page.
+
 ## 1.0.0 - Unreleased
 
 - Rebuilt the complete terminal coding agent in Go with no TypeScript, Bun, Node.js, or npm runtime dependency.
