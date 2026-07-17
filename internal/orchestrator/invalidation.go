@@ -129,8 +129,7 @@ func validInvalidationCause(cause contract.InvalidationCause) bool {
 		contract.InvalidationToolsetChange,
 		contract.InvalidationModelSwitch,
 		contract.InvalidationPromptRebuild,
-		contract.InvalidationUserCompact,
-		contract.InvalidationProbeChange:
+		contract.InvalidationUserCompact:
 		return true
 	default:
 		return false
@@ -151,15 +150,21 @@ func validInvalidationTrigger(trigger contract.InvalidationTrigger) bool {
 
 func triggerAllowedForCause(cause contract.InvalidationCause, trigger contract.InvalidationTrigger) bool {
 	switch cause {
-	case contract.InvalidationFold, contract.InvalidationTrim, contract.InvalidationCompact:
+	case contract.InvalidationCompact:
 		return trigger == contract.InvalidationPressure
+	case contract.InvalidationFold, contract.InvalidationTrim:
+		// Pressure is the usual driver; a boundary is the other legitimate trigger —
+		// the stale-resume prune-first (Ultimate Polish C7) folds at a session
+		// boundary because the provider cache is already cold, so shrinking history
+		// before the first request costs no cache. Compaction stays pressure-only.
+		return trigger == contract.InvalidationPressure || trigger == contract.InvalidationBoundary
 	case contract.InvalidationWindowDrop:
 		return trigger == contract.InvalidationPressure || trigger == contract.InvalidationBoundary
 	case contract.InvalidationToolsetChange:
 		return trigger == contract.InvalidationUserAction || trigger == contract.InvalidationBoundary
 	case contract.InvalidationModelSwitch, contract.InvalidationUserCompact:
 		return trigger == contract.InvalidationUserAction
-	case contract.InvalidationPromptRebuild, contract.InvalidationProbeChange:
+	case contract.InvalidationPromptRebuild:
 		return trigger == contract.InvalidationConfigChange
 	default:
 		return false

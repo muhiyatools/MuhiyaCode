@@ -2,9 +2,35 @@ package tui
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
+	"strings"
 	"testing"
 )
+
+// featureLogicFiles lists every non-test TUI source file EXCEPT render.go
+// (defines the palette table) and theme.go (builds the Theme) — the files
+// that must route color/breakpoints through the Theme rather than embedding
+// literals. Discovered dynamically (feature 010 US4 split) so splitting a
+// file never silently drops it from the check.
+func featureLogicFiles(t *testing.T) []string {
+	t.Helper()
+	matches, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatalf("glob: %v", err)
+	}
+	exempt := map[string]bool{"render.go": true, "theme.go": true}
+	var files []string
+	for _, f := range matches {
+		if strings.HasSuffix(f, "_test.go") || exempt[f] {
+			continue
+		}
+		files = append(files, f)
+	}
+	sort.Strings(files)
+	return files
+}
 
 // TestThemePaletteIsSingleSource (US6 T070) proves the feature-logic files route
 // all color through the palette rather than embedding raw hex — colors have one
@@ -13,7 +39,7 @@ func TestThemePaletteIsSingleSource(t *testing.T) {
 	hexColor := regexp.MustCompile(`#[0-9A-Fa-f]{6}`)
 	// render.go defines the palette table; theme.go builds the Theme. Every other
 	// TUI source file must be free of raw color literals.
-	for _, f := range []string{"view.go", "model.go", "actions.go", "mcp.go", "pastes.go", "selection.go", "mouse.go", "bridge.go"} {
+	for _, f := range featureLogicFiles(t) {
 		src, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
@@ -28,7 +54,7 @@ func TestThemePaletteIsSingleSource(t *testing.T) {
 // width breakpoints come from the Theme, not scattered magic literals.
 func TestThemeBreakpointsAreSingleSource(t *testing.T) {
 	bp := regexp.MustCompile(`m\.width [<>]=? ?(60|80|96)\b|m\.height [<>]=? ?20\b`)
-	for _, f := range []string{"view.go", "model.go", "actions.go"} {
+	for _, f := range featureLogicFiles(t) {
 		src, err := os.ReadFile(f)
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)

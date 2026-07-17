@@ -145,6 +145,23 @@ func (h *History) RewriteVersion() int {
 
 func EstimateTokens(text string) int { return (len(text)+3)/4 + 4 }
 
+// TokensForChars estimates the token count of a component chars bytes long using
+// the calibrated tokens-per-char ratio when available (feature 008 UD-12, the
+// /context usage-by-category rows). Zero chars is zero tokens — category rows
+// must not inherit the flat +4 constant the text estimators add.
+func (h *History) TokensForChars(chars int) int {
+	if chars <= 0 {
+		return 0
+	}
+	h.mu.RLock()
+	ratio := h.tokPerChar
+	h.mu.RUnlock()
+	if ratio <= 0 {
+		return (chars + 3) / 4
+	}
+	return int(float64(chars) * ratio)
+}
+
 func EstimateMessageTokens(message contract.Message) int {
 	total := EstimateTokens(message.Content)
 	for _, call := range message.ToolCalls {
@@ -357,7 +374,7 @@ func foldCompletedMessages(messages []contract.Message, limit int) bool {
 		m := &messages[i]
 		if m.Role == contract.RoleTool && len(m.Content) > defaultFoldKeepChars && !strings.Contains(m.Content, FoldNote) {
 			headline := strings.SplitN(m.Content, "\n", 2)[0]
-			m.Content = truncate(headline, 120) + " " + FoldNote
+			m.Content = contract.TruncateEllipsis(headline, 120) + " " + FoldNote
 			changed = true
 		} else if m.Role == contract.RoleAssistant {
 			folded := foldCalls(m.ToolCalls)
@@ -486,11 +503,6 @@ func GroupUnits(messages []contract.Message) [][]contract.Message {
 	return units
 }
 
-func assembleRequest(messages []contract.Message, summary, system string, contextLimit, reserve int) []contract.Message {
-	result, _, _ := assembleRequestWithStart(messages, summary, system, contextLimit, reserve)
-	return result
-}
-
 func assembleRequestWithStart(messages []contract.Message, summary, system string, contextLimit, reserve int) ([]contract.Message, int, int) {
 	budget := max(8_000, contextLimit-reserve)
 	header := []contract.Message{{Role: contract.RoleSystem, Content: system}}
@@ -537,7 +549,7 @@ func foldCalls(calls []contract.ToolCall) []contract.ToolCall {
 				break
 			}
 		}
-		folded, _ := json.Marshal(map[string]string{"folded": strings.TrimSpace(call.ToolName() + " " + truncate(target, 80))})
+		folded, _ := json.Marshal(map[string]string{"folded": strings.TrimSpace(call.ToolName() + " " + contract.TruncateEllipsis(target, 80))})
 		result[i] = contract.NewToolCall(call.ID, call.ToolName(), string(folded))
 	}
 	return result
@@ -642,12 +654,4 @@ func (h *History) saveLocked() {
 	if h.persist != nil {
 		_ = h.persist(h.snapshotLocked())
 	}
-}
-
-func truncate(value string, size int) string {
-	runes := []rune(value)
-	if len(runes) <= size {
-		return value
-	}
-	return string(runes[:size])
 }

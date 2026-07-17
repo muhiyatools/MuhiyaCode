@@ -182,7 +182,7 @@ func GenerateFixture(ctx context.Context, root string, seed int64, eventCount in
 	fixture.SessionID = session.ID
 
 	for _, event := range data.Events {
-		if err := db.AddEvent(ctx, session.ID, event.Role, event.Type, event.Content); err != nil {
+		if err := db.AddEvent(ctx, session.ID, event.Role, event.Type, event.Content, ""); err != nil {
 			return Fixture{}, fmt.Errorf("add event %d: %w", event.Index, err)
 		}
 	}

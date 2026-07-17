@@ -21,7 +21,7 @@ func TestSSEAccumulator(t *testing.T) {
 		`data: {"choices":[{"delta":{"content":"there","tool_calls":[{"index":0,"function":{"name":"file","arguments":"th\":\"a.go\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"prompt_tokens_details":{"cached_tokens":8}}}`,
 		`data: [DONE]`,
 	}, "\n")
-	result, err := ParseOpenAIStream(stream)
+	result, err := decodeSSEStream(stream, ModelProfile{})
 	if err != nil {
 		t.Fatal(err)
 	}

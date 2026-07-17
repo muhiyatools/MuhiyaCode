@@ -1,0 +1,22 @@
+{
+  "version": 3,
+  "signatures": {
+    "git_diff {}": {
+      "callId": "call_00_gH8HfdWfowH9SPrs2tl69238",
+      "kind": "search"
+    }
+  },
+  "coverage": {},
+  "inspectedFiles": [
+    "auth/password.go",
+    "auth/session.go",
+    "auth/token.go",
+    "billing/invoice.go",
+    "billing/tax.go",
+    "notify/email.go",
+    "notify/sms.go",
+    "reports/export.go",
+    "reports/summary.go"
+  ],
+  "fullReads": 0
+}

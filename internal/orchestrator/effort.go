@@ -5,14 +5,21 @@ package orchestrator
 import "github.com/muhiya/muhiyacode/internal/contract"
 
 type EffortProfile struct {
-	Level                  contract.EffortLevel
-	Rank                   int
-	Summary                string
-	Directives             []string
+	Level   contract.EffortLevel
+	Rank    int
+	Summary string
+	// MaxAgentRuns is the subagent allowance ceiling (min'd with the task class
+	// cap). Scope (feature 009 PL-4): for a DIRECT task it is per task; for an
+	// orchestrated pipeline task it applies PER PHASE — task size selects which
+	// phases run, effort selects how many subagents each phase may use.
+	// ParallelAgents lets independent run_subagent calls execute concurrently;
+	// AutoReview makes the engine nudge one review-subagent pass at the end of
+	// substantial file-changing work (feature 008 DG-7). The former
+	// Directives/PlanBeforeEdit fields were dead (populated, never consumed) — their
+	// intent now lives in the static DELEGATION prompt section (feature 008 R1/D2).
 	MaxAgentRuns           int
 	ParallelAgents         bool
 	AutoReview             bool
-	PlanBeforeEdit         bool
 	MaxTurns               int
 	AgentTurnScale         float64
 	KeepFullToolOutputs    int
@@ -28,7 +35,6 @@ var effortProfiles = map[contract.EffortLevel]EffortProfile{
 	contract.EffortLow: {
 		Level: contract.EffortLow, Rank: 0,
 		Summary:      "Fast, direct work with the lightest useful checks.",
-		Directives:   []string{"Act directly; read only files required for the change.", "Delegate at most one subagent run, and only when it clearly saves context.", "Run at most one targeted check when risk justifies it.", "Do not expand scope."},
 		MaxAgentRuns: 1, MaxTurns: 16, AgentTurnScale: .75,
 		KeepFullToolOutputs: 4, TrimmedToolOutputChars: 500, ToolOutputCap: 8_000, CompactThreshold: .80,
 		Reasoning: contract.ReasoningLow, AgentReasoning: contract.ReasoningLow,
@@ -36,24 +42,21 @@ var effortProfiles = map[contract.EffortLevel]EffortProfile{
 	contract.EffortMedium: {
 		Level: contract.EffortMedium, Rank: 1,
 		Summary:      "Balanced speed, cost, and care for everyday engineering.",
-		Directives:   []string{"Work directly unless delegation clearly saves context.", "Run the smallest meaningful check and fix failures.", "Keep changes focused on the request."},
-		MaxAgentRuns: 2, PlanBeforeEdit: true, MaxTurns: 24, AgentTurnScale: 1,
+		MaxAgentRuns: 2, MaxTurns: 24, AgentTurnScale: 1,
 		KeepFullToolOutputs: 5, TrimmedToolOutputChars: 600, ToolOutputCap: 10_000, CompactThreshold: .85,
 		Onboarding: true, Reasoning: contract.ReasoningMedium, AgentReasoning: contract.ReasoningLow,
 	},
 	contract.EffortHigh: {
 		Level: contract.EffortHigh, Rank: 2,
 		Summary:      "Deep work with parallel exploration and thorough checks.",
-		Directives:   []string{"Think through edge cases before editing.", "Delegate independent exploration or isolated subtasks when it saves main context.", "Run the full relevant checks."},
-		MaxAgentRuns: 4, ParallelAgents: true, PlanBeforeEdit: true, MaxTurns: 36, AgentTurnScale: 1.1,
+		MaxAgentRuns: 4, ParallelAgents: true, MaxTurns: 36, AgentTurnScale: 1.1,
 		KeepFullToolOutputs: 6, TrimmedToolOutputChars: 700, ToolOutputCap: 16_000, CompactThreshold: .87,
 		Onboarding: true, Reasoning: contract.ReasoningHigh, AgentReasoning: contract.ReasoningMedium,
 	},
 	contract.EffortMax: {
 		Level: contract.EffortMax, Rank: 3,
 		Summary:      "Production-critical migrations, audits, and architecture work.",
-		Directives:   []string{"Design before implementation and maintain a real plan.", "Use parallel agents for independent work and a review pass.", "Validate exhaustively and review the complete diff."},
-		MaxAgentRuns: 8, ParallelAgents: true, AutoReview: true, PlanBeforeEdit: true, MaxTurns: 48, AgentTurnScale: 1.4,
+		MaxAgentRuns: 8, ParallelAgents: true, AutoReview: true, MaxTurns: 48, AgentTurnScale: 1.4,
 		KeepFullToolOutputs: 8, TrimmedToolOutputChars: 900, ToolOutputCap: 24_000, CompactThreshold: .90,
 		Onboarding: true, Reasoning: contract.ReasoningMax, AgentReasoning: contract.ReasoningHigh,
 	},

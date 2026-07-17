@@ -3,6 +3,9 @@ package gateway
 import (
 	"regexp"
 	"strings"
+
+	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
 // BetaFeature records a provider beta capability and whether MuhiyaCode adopts it
@@ -14,6 +17,13 @@ type BetaFeature struct {
 	Status    string
 	Rationale string
 }
+
+type ReasoningReplayPolicy string
+
+const (
+	ReasoningReplayStrip    ReasoningReplayPolicy = "strip"
+	ReasoningReplayPreserve ReasoningReplayPolicy = "preserve"
+)
 
 // ModelProfile is the client's boot-frozen capability profile for a model family
 // (feature 007, contracts/capability-profile.md). It is the single source of truth
@@ -33,6 +43,9 @@ type ModelProfile struct {
 	DefaultContextWindow int // operational context budget (deliberate cost/latency bound)
 	ContextWindowLimit   int // documented provider context window; the operational budget must stay within it (0 = unknown)
 	NeedsToolCallRescue  bool
+	ParsesReasoning      bool
+	ReasoningReplay      ReasoningReplayPolicy
+	CacheMinPromptTokens int
 	PromptAddendum       string
 	// Capability metadata (feature 007). Documented parameter surface for the family;
 	// empty slices mean "unknown / permissive" so non-DeepSeek providers degrade
@@ -70,20 +83,46 @@ func ResolveModelProfile(name string) ModelProfile {
 			MaxOutputTokens: 16_000, OutputTokenLimit: 384_000,
 			DefaultContextWindow: 128_000, ContextWindowLimit: 1_000_000,
 			NeedsToolCallRescue: true,
-			PromptAddendum:      "DeepSeek: use native structured tool calls; do not emit DSML. After tool results, continue to a concrete final answer. Report only work actually performed; if steps remain, say so.",
+			ParsesReasoning:     true,
+			ReasoningReplay:     ReasoningReplayStrip,
+			PromptAddendum:      instructions.GatewayDeepSeekAddendumBody,
 			SupportedParams:     deepSeekSupportedParams,
 			DeprecatedParams:    deepSeekDeprecatedParams,
 			JSONModeRules:       "response_format=json_object requires the word \"json\" plus an example of the shape in the prompt, and max_tokens sized to avoid truncation (known: occasional empty content).",
 			BetaFeatures:        deepSeekBetaFeatures,
 			KeepAliveNote:       "streaming keep-alive arrives as \": keep-alive\" comment lines; non-streaming as empty lines — both are liveness, not data.",
 		}
-	case strings.Contains(lower, "minimax"):
-		return ModelProfile{Family: "minimax", Temperature: .15, TopP: .95, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, PromptAddendum: "MiniMax: keep tool arguments exact and finish tool-driven work with a concise result."}
+	case isMiniMaxModelName(lower):
+		limit := 204_800
+		if isMiniMaxM3Name(lower) {
+			limit = 1_000_000
+		}
+		return ModelProfile{
+			Family: "minimax", Temperature: .15, TopP: .95,
+			MaxOutputTokens: limit, OutputTokenLimit: limit,
+			DefaultContextWindow: limit, ContextWindowLimit: limit,
+			NeedsToolCallRescue: true, ParsesReasoning: true,
+			ReasoningReplay: ReasoningReplayPreserve, CacheMinPromptTokens: 512,
+			PromptAddendum:  instructions.GatewayMiniMaxAddendumBody,
+			SupportedParams: []string{"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options", "tools", "tool_choice", "reasoning_split"},
+		}
 	case strings.Contains(lower, "glm") || strings.Contains(lower, "zhipu"):
-		return ModelProfile{Family: "glm", Temperature: .1, TopP: .9, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, PromptAddendum: "GLM: use one valid JSON object per native tool call and never narrate a call instead of executing it."}
+		return ModelProfile{Family: "glm", Temperature: .1, TopP: .9, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, PromptAddendum: instructions.GatewayGLMAddendumBody}
 	default:
-		return ModelProfile{Family: "generic", Temperature: .1, TopP: .95, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, PromptAddendum: "Use native structured tool calls and exact schema field names."}
+		return ModelProfile{Family: "generic", Temperature: .1, TopP: .95, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, PromptAddendum: instructions.GatewayGenericAddendumBody}
 	}
+}
+
+func isMiniMaxModelName(lower string) bool {
+	lower = strings.TrimSpace(lower)
+	return strings.Contains(lower, "minimax") || lower == "m3" || strings.HasPrefix(lower, "m3 ") || lower == "m2" || strings.HasPrefix(lower, "m2.") || strings.HasPrefix(lower, "m2 ")
+}
+
+// isMiniMaxM3Name delegates to the single foundation-package detector
+// (contract.IsMiniMaxM3Name) so gateway and state share one truth. The input
+// is already lowercased by the caller; contract lowercases idempotently.
+func isMiniMaxM3Name(lower string) bool {
+	return contract.IsMiniMaxM3Name(lower)
 }
 
 // ClampOutputTokens returns req bounded to the documented output-token ceiling. It
@@ -95,17 +134,6 @@ func (p ModelProfile) ClampOutputTokens(req int) (value int, clamped bool) {
 		return p.OutputTokenLimit, true
 	}
 	return req, false
-}
-
-// IsDeprecatedParam reports whether name is a parameter the provider has deprecated
-// and MuhiyaCode must never emit (contracts/capability-profile.md CP-2).
-func (p ModelProfile) IsDeprecatedParam(name string) bool {
-	for _, d := range p.DeprecatedParams {
-		if d == name {
-			return true
-		}
-	}
-	return false
 }
 
 var thinkBlock = regexp.MustCompile(`(?is)<think>(.*?)</think>`)

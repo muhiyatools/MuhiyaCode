@@ -73,7 +73,7 @@ func TestPlanModeGuaranteesAgentFloor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.SetPlanMode(true)
+	engine.SetLifecycleState(contract.LifecyclePlanning)
 	// Small-class prompt: without the plan-mode floor this task gets agents=0.
 	if _, _, err := engine.Run(context.Background(), "plan the config change"); err != nil {
 		t.Fatal(err)

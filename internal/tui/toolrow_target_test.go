@@ -8,34 +8,9 @@ import (
 )
 
 // 004 US5 (T045): the write/edit tool row names its target file, and paths are
-// middle-truncated so the filename survives on narrow terminals.
-
-func TestApplyPatchTargetDerivation(t *testing.T) {
-	cases := []struct{ name, patch, want string }{
-		{"single file", "--- a/internal/x.go\n+++ b/internal/x.go\n@@ -1 +1 @@\n-a\n+b\n", "internal/x.go"},
-		{"new file falls back nowhere (uses +++)", "--- /dev/null\n+++ b/new.go\n@@ -0,0 +1 @@\n+x\n", "new.go"},
-		{"deletion falls back to the --- side", "--- a/gone.go\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n", "gone.go"},
-		{"multi-file gets a (+N more) suffix", "--- a/one.go\n+++ b/one.go\n@@ -1 +1 @@\n-a\n+b\n--- a/two.go\n+++ b/two.go\n@@ -1 +1 @@\n-c\n+d\n", "one.go (+1 more)"},
-		{"malformed omitted cleanly", "not a patch at all", ""},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := patchTargetFile(tc.patch); got != tc.want {
-				t.Fatalf("patchTargetFile = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestToolTargetApplyPatchDispatch(t *testing.T) {
-	got := toolTarget("apply_patch", []byte(`{"patch":"--- a/f.go\n+++ b/f.go\n@@ -1 +1 @@\n-a\n+b\n"}`))
-	if got != "f.go" {
-		t.Fatalf("toolTarget apply_patch = %q, want f.go", got)
-	}
-	if got := toolTarget("apply_patch", []byte(`{"patch":"garbage"}`)); got != "" {
-		t.Fatalf("malformed apply_patch target = %q, want empty (omitted cleanly)", got)
-	}
-}
+// middle-truncated so the filename survives on narrow terminals. The target
+// DERIVATION logic itself now lives in and is tested by internal/contract
+// (ToolTarget / PatchTargetFile); these tests cover the tui RENDER of it.
 
 // The collapsed row renders label → path → counts, in that order, for every
 // file-mutation tool including apply_patch.

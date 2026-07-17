@@ -187,7 +187,7 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	lifetime.Stop()
 	idle := time.AfterFunc(cfg.IdleTimeout, cancel)
 	defer idle.Stop()
-	acc := NewStreamAccumulator(input.OnToken, input.OnReasoningToken)
+	acc := NewStreamAccumulatorForProfile(profile, input.OnToken, input.OnReasoningToken)
 	rawUsageCount := 0
 	var lastRawUsage json.RawMessage
 	// 003 (D1): the gateway emits a non-standard final chunk carrying muhiya_log
@@ -260,7 +260,7 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 		usage.CostEstimated = costMeta.estimated
 		usage.CostLogID = costMeta.logID
 	}
-	return contract.ChatResponse{Content: visible, Reasoning: reasoning, ToolCalls: result.ToolCalls, Usage: usage}, acc.ReceivedData(), 0, nil
+	return contract.ChatResponse{Content: visible, Reasoning: reasoning, ReasoningDetails: result.ReasoningDetails, ToolCalls: result.ToolCalls, Usage: usage}, acc.ReceivedData(), 0, nil
 }
 
 // muhiyaLogMeta is the parsed muhiya_log object from a gateway meta chunk.
@@ -299,15 +299,75 @@ func replayMessages(messages []contract.Message, profile ModelProfile, _ contrac
 	result := make([]contract.Message, len(messages))
 	copy(result, messages)
 	for index := range result {
-		// Never replay captured reasoning. DeepSeek thinking-mode tool-call
-		// turns require the key to exist, so emit only the minimal empty form.
+		if profile.ReasoningReplay == ReasoningReplayPreserve && result[index].Role == contract.RoleAssistant {
+			if len(result[index].ReasoningDetails) == 0 && result[index].ReasoningContent != nil && strings.TrimSpace(*result[index].ReasoningContent) != "" {
+				result[index].ReasoningDetails = reasoningDetailsFromText(*result[index].ReasoningContent)
+			}
+			// MiniMax consumes reasoning_details, never DeepSeek's reasoning_content.
+			result[index].ReasoningContent = nil
+			continue
+		}
+		// Today's default and DeepSeek policy strip captured reasoning. DeepSeek
+		// thinking-mode tool-call turns retain its required empty key.
 		result[index].ReasoningContent = nil
+		result[index].ReasoningDetails = nil
 		if profile.Family == "deepseek" && result[index].Role == contract.RoleAssistant && len(result[index].ToolCalls) > 0 {
 			empty := ""
 			result[index].ReasoningContent = &empty
 		}
 	}
+	return repairToolMessageSequence(result)
+}
+
+// repairToolMessageSequence is a last-mile wire invariant: every assistant
+// tool_calls message must be followed immediately by one tool result for each
+// announced call ID. Valid histories pass through byte-for-byte. If a resumed,
+// compacted, or provider-rescued history lost one result, synthesize a bounded
+// failure result so the next request can recover instead of being rejected as
+// malformed by the upstream. Orphan tool messages are omitted for the same
+// reason; they cannot be meaningful without their announcing assistant turn.
+func repairToolMessageSequence(messages []contract.Message) []contract.Message {
+	result := make([]contract.Message, 0, len(messages))
+	for index := 0; index < len(messages); {
+		message := messages[index]
+		if message.Role == contract.RoleTool {
+			index++
+			continue
+		}
+		result = append(result, message)
+		index++
+		if message.Role != contract.RoleAssistant || len(message.ToolCalls) == 0 {
+			continue
+		}
+		expected := make(map[string]bool, len(message.ToolCalls))
+		for _, call := range message.ToolCalls {
+			expected[call.ID] = true
+		}
+		seen := make(map[string]bool, len(message.ToolCalls))
+		for index < len(messages) && messages[index].Role == contract.RoleTool {
+			tool := messages[index]
+			if expected[tool.ToolCallID] && !seen[tool.ToolCallID] {
+				result = append(result, tool)
+				seen[tool.ToolCallID] = true
+			}
+			index++
+		}
+		for _, call := range message.ToolCalls {
+			if seen[call.ID] {
+				continue
+			}
+			result = append(result, contract.Message{
+				Role: contract.RoleTool, ToolCallID: call.ID,
+				Content: "Tool result unavailable: the harness repaired a missing historical tool-call pairing. Re-run the call if its result is still needed.",
+			})
+		}
+	}
 	return result
+}
+
+func reasoningDetailsFromText(text string) json.RawMessage {
+	details, _ := json.Marshal([]map[string]string{{"type": "text", "text": text}})
+	return details
 }
 
 // StableRequestMessages exposes the provider's final replay representation so

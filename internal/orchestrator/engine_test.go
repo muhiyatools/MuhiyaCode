@@ -3,12 +3,32 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
+
+// seededWorkspace returns a temp dir pre-populated with a few Go source files so
+// the workspace reads as an EXISTING codebase rather than greenfield. Pipeline
+// tests whose plans cite real files (engine.go, provider.go, …) represent
+// working ON existing code; without seed files the dynamic research fan-out
+// correctly classifies a bare t.TempDir() as greenfield and skips research,
+// which those fixtures do not intend. Use this wherever a test drives the
+// research phase and expects it to run.
+func seededWorkspace(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"main.go", "engine.go", "provider.go", "util.go"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("package x\n\nfunc F() {}\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return dir
+}
 
 func TestEngineExecutesToolAndFinalizes(t *testing.T) {
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
@@ -21,7 +41,7 @@ func TestEngineExecutesToolAndFinalizes(t *testing.T) {
 	engine, err := NewEngine(EngineConfig{
 		Settings: &settings, Session: contract.Session{ID: "s1", WorkspacePath: t.TempDir()}, Provider: provider,
 		Registry: NewRegistry(tool), History: NewHistory(HistorySnapshot{Version: 1}, nil),
-		Persistence: Persistence{AddEvent: func(_ context.Context, role, kind, _ string) error {
+		Persistence: Persistence{AddEvent: func(_ context.Context, role, kind, _, _ string) error {
 			events = append(events, role+":"+kind)
 			return nil
 		}},

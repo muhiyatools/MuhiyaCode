@@ -11,13 +11,15 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/bmatcuk/doublestar/v4"
 	"github.com/pmezard/go-difflib/difflib"
+
+	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
 var ignoredNames = map[string]bool{".git": true, "node_modules": true, "vendor": true, "dist": true, "build": true, ".next": true, ".cache": true, "coverage": true}
@@ -34,10 +36,10 @@ func (w *Workspace) List(ctx context.Context, options ListOptions) (ListResult, 
 	result := ListResult{Root: relativeSlash(w.root, target)}
 	info, err := os.Stat(target)
 	if err != nil {
-		return result, err
+		return result, friendlyPathError(err, relativeSlash(w.root, target))
 	}
 	if !info.IsDir() {
-		return result, fmt.Errorf("list path is not a directory: %s", target)
+		return result, fmt.Errorf(instructions.WorkspaceListNotDirectoryTmpl, target)
 	}
 	baseDepth := strings.Count(filepath.Clean(target), string(filepath.Separator))
 	errStop := errors.New("list complete")
@@ -85,6 +87,11 @@ func (w *Workspace) Read(ctx context.Context, options ReadOptions) (ReadResult, 
 	}
 	data, err := readTextFile(target, MaxReadBytes)
 	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			if suggestions := w.suggestByBaseName(target); len(suggestions) > 0 {
+				err = fmt.Errorf("%w; did you mean: %s?", err, strings.Join(suggestions, ", "))
+			}
+		}
 		return ReadResult{}, err
 	}
 	lines := splitLines(string(data))
@@ -127,11 +134,14 @@ func (w *Workspace) Grep(ctx context.Context, options GrepOptions) (SearchResult
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return SearchResult{}, fmt.Errorf("invalid search pattern: %w", err)
+		// Teach the fix, not just the failure: literal emoji in character
+		// classes are a live recurring model mistake ("invalid character
+		// class range: 😀-🇿").
+		return SearchResult{}, fmt.Errorf(instructions.WorkspaceGrepInvalidPatternTmpl, err)
 	}
 	info, err := os.Stat(target)
 	if err != nil {
-		return SearchResult{}, err
+		return SearchResult{}, friendlyPathError(err, relativeSlash(w.root, target))
 	}
 	files := []string{target}
 	if info.IsDir() {
@@ -160,7 +170,7 @@ func (w *Workspace) Grep(ctx context.Context, options GrepOptions) (SearchResult
 		}
 		for index, line := range splitLines(string(data)) {
 			if re.MatchString(line) {
-				result.Matches = append(result.Matches, Match{Path: relativeSlash(w.root, file), Line: index + 1, Text: truncateLine(line, 500)})
+				result.Matches = append(result.Matches, Match{Path: relativeSlash(w.root, file), Line: index + 1, Text: contract.TruncateEllipsis(line, 500)})
 				if len(result.Matches) >= maxResults {
 					result.Truncated = true
 					return result, nil
@@ -241,7 +251,7 @@ func (w *Workspace) MultiEdit(ctx context.Context, path string, edits []Edit) (E
 	result := EditResult{Path: relativeSlash(w.root, target)}
 	for index, edit := range edits {
 		if edit.Old == "" {
-			result.Skipped = append(result.Skipped, fmt.Sprintf("edit %d: oldString is empty", index+1))
+			result.Skipped = append(result.Skipped, fmt.Sprintf(instructions.WorkspaceEditEmptyOldStringTmpl, index+1))
 			continue
 		}
 		next, replacements, note, applyErr := applyEditText(current, edit)
@@ -359,7 +369,7 @@ func (w *Workspace) canOverwrite(target string) bool {
 
 func applyEditText(content string, edit Edit) (string, int, string, error) {
 	if edit.Old == edit.New {
-		return content, 0, "oldString and newString are identical; skipped.", nil
+		return content, 0, instructions.WorkspaceEditIdenticalBody, nil
 	}
 	newline := "\n"
 	if strings.Contains(content, "\r\n") {
@@ -370,15 +380,15 @@ func applyEditText(content string, edit Edit) (string, int, string, error) {
 	count := strings.Count(current, old)
 	if count == 0 {
 		if nextValue != "" && strings.Contains(current, nextValue) {
-			return content, 0, "newString is already present; skipped stale edit.", nil
+			return content, 0, instructions.WorkspaceEditAlreadyPresentBody, nil
 		}
 		current, count = trailingWhitespaceMatch(current, old)
 		if count == 0 {
-			return content, 0, "oldString not found; closest region: " + closestRegion(normalize(content), old), nil
+			return content, 0, instructions.WorkspaceEditNotFoundPrefix + closestRegion(normalize(content), old), nil
 		}
 	}
 	if count > 1 && !edit.ReplaceAll {
-		return content, 0, "oldString appears " + strconv.Itoa(count) + " times; add surrounding context or set replaceAll", nil
+		return content, 0, fmt.Sprintf(instructions.WorkspaceEditAmbiguousTmpl, count), nil
 	}
 	if edit.ReplaceAll {
 		current = strings.ReplaceAll(current, old, nextValue)
@@ -433,7 +443,7 @@ func closestRegion(content, needle string) string {
 	lines := strings.Split(content, "\n")
 	best := 0
 	for i, line := range lines {
-		if anchor != "" && strings.Contains(strings.TrimSpace(line), truncateLine(anchor, 40)) {
+		if anchor != "" && strings.Contains(strings.TrimSpace(line), contract.TruncateEllipsis(anchor, 40)) {
 			best = i
 			break
 		}
@@ -454,6 +464,27 @@ func compactDiff(path, before, after string, maxLines int) string {
 		lines = append(lines[:maxLines], fmt.Sprintf("... [diff truncated, %d lines omitted]", len(lines)-maxLines))
 	}
 	return strings.Join(lines, "\n")
+}
+
+// suggestByBaseName returns up to three workspace-relative paths whose base
+// name equals the missing file's base name case-insensitively. It only runs on
+// the read-not-found error path, so a bounded workspace walk is acceptable.
+func (w *Workspace) suggestByBaseName(missing string) []string {
+	base := filepath.Base(missing)
+	files, err := collectFiles(w.root, 20_000)
+	if err != nil {
+		return nil
+	}
+	var suggestions []string
+	for _, file := range files {
+		if strings.EqualFold(filepath.Base(file), base) {
+			suggestions = append(suggestions, relativeSlash(w.root, file))
+			if len(suggestions) >= 3 {
+				break
+			}
+		}
+	}
+	return suggestions
 }
 
 func collectFiles(root string, maxFiles int) ([]string, error) {
@@ -483,6 +514,10 @@ func collectFiles(root string, maxFiles int) ([]string, error) {
 func readTextFile(path string, limit int64) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
+		// Return the raw not-exist error unchanged so Read's basename-suggestion
+		// path (errors.Is(fs.ErrNotExist)) still fires; os.Open's message already
+		// names the path in plain English (no opaque GetFileAttributesEx — that is
+		// os.Stat's spelling, handled on the list/search paths via friendlyPathError).
 		return nil, err
 	}
 	defer file.Close()
@@ -492,10 +527,10 @@ func readTextFile(path string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("file exceeds %d-byte limit", limit)
+		return nil, fmt.Errorf(instructions.WorkspaceFileExceedsLimitTmpl, limit)
 	}
 	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
-		return nil, fmt.Errorf("binary or non-UTF-8 file is not supported")
+		return nil, errors.New(instructions.WorkspaceBinaryUnsupportedBody)
 	}
 	return data, nil
 }
@@ -559,13 +594,6 @@ func buildOutline(lines []string) string {
 		}
 	}
 	return strings.Join(symbols, ", ")
-}
-
-func truncateLine(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	return value[:limit] + " ..."
 }
 
 func shellQuote(value string) string {

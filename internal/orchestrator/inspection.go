@@ -358,6 +358,7 @@ func (l *InspectionLedger) pathKey(raw string) string {
 }
 
 var readResultRE = regexp.MustCompile(`\(lines (\d+)-(\d+) of (\d+)\)`)
+
 var readHeaderRE = regexp.MustCompile(`(?m)^(?:Read )?(.+?) \(lines \d+-\d+ of \d+\)\.?$`)
 
 func parseReadResult(output string) (int, int, int) {
@@ -475,23 +476,4 @@ func canonicalKey(path string) string {
 		value = strings.ToLower(value)
 	}
 	return value
-}
-
-var readOnlyShellRE = regexp.MustCompile(`(?i)^\s*(git\s+(status|diff|log|show|branch|blame)|go\s+(test|vet|list)|npm\s+test|bun\s+test|rg\b|grep\b|findstr\b|ls\b|dir\b|get-childitem\b|cat\b|get-content\b|type\b|head\b|tail\b|wc\b|pwd\b|which\b|where\b)`)
-var shellWriteHintRE = regexp.MustCompile(`(?i)[>|]|--fix|\btee\b|\bmv\b|\brm\b|\bcp\b|\bsed\s+-i\b`)
-
-func IsReadOnlyShell(command string) bool {
-	return readOnlyShellRE.MatchString(command) && !shellWriteHintRE.MatchString(command)
-}
-
-func uniqueStrings(values []string) []string {
-	seen := make(map[string]bool)
-	result := make([]string, 0, len(values))
-	for _, value := range values {
-		if value != "" && !seen[value] {
-			seen[value] = true
-			result = append(result, value)
-		}
-	}
-	return result
 }

@@ -36,7 +36,6 @@ func TestGoalStateNoRaceUnderConcurrentAccess(t *testing.T) {
 			engine.SetGoal("objective")
 			engine.GoalSnapshot()
 			engine.ClearGoal()
-			engine.SetPlanMode(i%2 == 0)
 			engine.PlanMode()
 			engine.LastGoalResult()
 			engine.SetPendingPlan(i%3 == 0)
@@ -285,33 +284,10 @@ func TestGoalSidecarClearedOnCompletion(t *testing.T) {
 	}
 }
 
-// TestPlanModeClearsGoalSidecar (G3+G4) verifies that entering plan mode
-// clears an active goal AND drops the sidecar so the cleared goal does not
-// resurrect on resume.
-func TestPlanModeClearsGoalSidecar(t *testing.T) {
-	settings := engineSettings()
-	cleared := false
-	engine, _ := NewEngine(EngineConfig{
-		Settings: &settings, Session: contract.Session{ID: "g4c", WorkspacePath: t.TempDir()},
-		Provider: &scriptedProvider{responses: []contract.ChatResponse{{Content: "ok"}}},
-		Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{},
-		Persistence: Persistence{
-			WriteGoal: func(_ context.Context, snapshot contract.GoalSnapshot) error { return nil },
-			ClearGoal: func(_ context.Context) error { cleared = true; return nil },
-		},
-	})
-	engine.SetGoal("investigate the bug")
-	if cleared {
-		t.Fatal("SetGoal should write, not clear, the sidecar")
-	}
-	engine.SetPlanMode(true)
-	if !cleared {
-		t.Fatal("entering plan mode did not clear the goal sidecar (G3+G4)")
-	}
-	if goal, active := engine.GoalSnapshot(); active {
-		t.Fatalf("plan mode should have cleared the active goal: %+v", goal)
-	}
-}
+// Ultimate Polish P1: TestPlanModeClearsGoalSidecar was removed with SetPlanMode.
+// The plan⇄goal exclusion now runs the other direction (SetGoal takes over a
+// read-only planning phase — see lifecycle_test.go) plus the DG2 refusal + brief
+// backstop (goal_hardening_test.go); there is no manual plan toggle to clear a goal.
 
 // Plan mode blocks mutating tools and lets read-only tools through.
 func TestPlanModeBlocksMutations(t *testing.T) {
@@ -322,7 +298,7 @@ func TestPlanModeBlocksMutations(t *testing.T) {
 	settings := engineSettings()
 	writer := &recordingTool{name: "write_file"}
 	engine, _ := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "s", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(writer), Prompt: PromptContext{}})
-	engine.SetPlanMode(true)
+	engine.SetLifecycleState(contract.LifecyclePlanning)
 	if _, _, err := engine.Run(context.Background(), "add a file"); err != nil {
 		t.Fatal(err)
 	}

@@ -231,7 +231,7 @@ func TestUsageParsingMergesPartialUsageWithProviderPrecedence(t *testing.T) {
 		`data: {"choices":[],"usage":{"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":100}}`,
 		`data: [DONE]`,
 	}, "\n")
-	result, err := ParseOpenAIStream(stream)
+	result, err := decodeSSEStream(stream, ModelProfile{})
 	if err != nil {
 		t.Fatalf("partial usage stream failed: %v", err)
 	}
@@ -255,12 +255,51 @@ func TestRawUsagePayloadPreservesProviderObject(t *testing.T) {
 	}
 }
 
+func TestMiniMaxUsageThresholdAndReasoningDetails(t *testing.T) {
+	profile := ResolveModelProfile("MiniMax-M3")
+	below := NewStreamAccumulatorForProfile(profile, nil, nil)
+	if err := below.ConsumeLine(`data: {"choices":[],"usage":{"prompt_tokens":511,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":400}}}`); err != nil {
+		t.Fatal(err)
+	}
+	if usage := below.Result().Usage; usage.CacheReadTokens != nil || usage.CacheMissTokens != nil {
+		t.Fatalf("sub-threshold MiniMax cache values must be unavailable: %#v", usage)
+	}
+
+	warm := NewStreamAccumulatorForProfile(profile, nil, nil)
+	line := `data: {"choices":[{"delta":{"reasoning_details":[{"type":"text","text":"inspect "},{"type":"text","text":"carefully"}]}}],"usage":{"prompt_tokens":1000,"completion_tokens":20,"prompt_tokens_details":{"cached_tokens":700}}}`
+	if err := warm.ConsumeLine(line); err != nil {
+		t.Fatal(err)
+	}
+	result := warm.Result()
+	if result.Reasoning != "inspect carefully" || string(result.ReasoningDetails) != `[{"text":"inspect ","type":"text"},{"text":"carefully","type":"text"}]` {
+		t.Fatalf("MiniMax reasoning parse = text %q details %s", result.Reasoning, result.ReasoningDetails)
+	}
+	if result.Usage.CacheReadTokens == nil || *result.Usage.CacheReadTokens != 700 || result.Usage.CacheMissTokens == nil || *result.Usage.CacheMissTokens != 300 || !result.Usage.MissDerived {
+		t.Fatalf("MiniMax usage parse = %#v", result.Usage)
+	}
+}
+
+// decodeSSEStream replays a full batch SSE payload through the same
+// line-by-line ConsumeLine path the live streaming provider uses (feature 010
+// T035: the tests that used to call the removed batch-decode island
+// ParseOpenAIStream/NewStreamAccumulator now exercise the one real decode
+// path instead — no separate implementation left to drift from it).
+func decodeSSEStream(text string, profile ModelProfile) (StreamResult, error) {
+	a := NewStreamAccumulatorForProfile(profile, nil, nil)
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if err := a.ConsumeLine(line); err != nil {
+			return StreamResult{}, err
+		}
+	}
+	return a.Result(), nil
+}
+
 func parseUsageGolden(t *testing.T, usage string) contract.Usage {
 	t.Helper()
 	stream := "data: {\"choices\":[],\"usage\":" + usage + "}\n\ndata: [DONE]\n"
-	result, err := ParseOpenAIStream(stream)
+	result, err := decodeSSEStream(stream, ModelProfile{})
 	if err != nil {
-		t.Fatalf("ParseOpenAIStream returned an error for usage %s: %v", usage, err)
+		t.Fatalf("decodeSSEStream returned an error for usage %s: %v", usage, err)
 	}
 	return result.Usage
 }

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
 type subagentSpec struct {
@@ -31,8 +32,55 @@ type subagentResult struct {
 	Usage                               contract.Usage
 }
 
+type HandoffContract struct {
+	Role         string
+	Scope        string
+	Context      string
+	Deliverable  string
+	OutputFormat string
+}
+
+func (h HandoffContract) Render() string {
+	context := strings.TrimSpace(h.Context)
+	if context == "" {
+		context = instructions.HandoffContractNoOverlapNote
+	}
+	return instructions.HandoffContractHeader + "\n" +
+		"Role: " + h.Role + "\n" +
+		"Scope: " + h.Scope + "\n" +
+		"Context: " + context + "\n" +
+		"Deliverable: " + h.Deliverable + "\n" +
+		"OutputFormat: " + h.OutputFormat
+}
+
+func handoffRole(agent string) string {
+	switch agent {
+	case "general":
+		return "implement-step"
+	case "review":
+		return "review"
+	default:
+		return "research-scope"
+	}
+}
+
+func handoffFor(input subagentInput, context string) HandoffContract {
+	role := handoffRole(input.Agent)
+	deliverable := instructions.HandoffDeliverableResearch
+	format := instructions.ReportFormatResearch
+	switch role {
+	case "implement-step":
+		deliverable = instructions.HandoffDeliverableImplementation
+		format = instructions.ReportFormatImplementation
+	case "review":
+		deliverable = instructions.HandoffDeliverableReview
+		format = instructions.ReportFormatReview
+	}
+	return HandoffContract{Role: role, Scope: contract.TruncateEllipsis(input.Task, 1200), Context: context, Deliverable: deliverable, OutputFormat: format}
+}
+
 func (e *Engine) subagentSpecs() map[string]subagentSpec {
-	read := map[string]bool{"list_files": true, "read_file": true, "grep": true, "search_text": true, "glob": true, "git_status": true, "git_diff": true}
+	read := map[string]bool{"list_files": true, "read_file": true, "grep": true, "search_text": true, "glob": true, "git_status": true, "git_diff": true, "run_shell": true}
 	all := make(map[string]bool)
 	for _, name := range e.registry.Names() {
 		all[name] = true
@@ -45,24 +93,31 @@ func (e *Engine) subagentSpecs() map[string]subagentSpec {
 		return result
 	}
 	return map[string]subagentSpec{
-		"explore": {Name: "explore", Description: "Read-only codebase exploration that returns grounded findings.", Allowed: clone(read), MaxTurns: 12, System: "Explore the requested code paths efficiently. Search first, batch reads, cite exact files and symbols, and report only verified findings. You cannot edit."},
-		"plan":    {Name: "plan", Description: "Read-only implementation planning grounded in the real code.", Allowed: clone(read), MaxTurns: 14, System: "Inspect the relevant code, then return an ordered implementation plan with exact files/functions, edge cases, and verification. Do not edit."},
-		"review":  {Name: "review", Description: "Read-only correctness and security review with ranked findings.", Allowed: clone(read), MaxTurns: 14, System: "Review the diff and surrounding code. Report only verified correctness, security, or reliability issues ranked by severity with file:line and a failure scenario. No style nits; do not edit."},
-		"general": {Name: "general", Description: "Full-tool agent for an isolated, self-contained coding subtask.", Allowed: all, MaxTurns: 24, System: "Complete the isolated subtask end to end. Inspect before editing, make focused changes, run the smallest meaningful checks, and report changed files, verification, and remaining risk. Do not ask the user questions."},
+		"explore": {Name: "explore", Description: instructions.SubagentExploreDescription, Allowed: clone(read), MaxTurns: 12, System: instructions.SubagentExploreSystem},
+		"plan":    {Name: "plan", Description: instructions.SubagentPlanDescription, Allowed: clone(read), MaxTurns: 14, System: instructions.SubagentPlanSystem},
+		"review":  {Name: "review", Description: instructions.SubagentReviewDescription, Allowed: clone(read), MaxTurns: 14, System: instructions.SubagentReviewSystem},
+		"general": {Name: "general", Description: instructions.SubagentGeneralDescription, Allowed: all, MaxTurns: 24, System: instructions.SubagentGeneralSystem},
 	}
 }
 
 func (e *Engine) runSubagentTool(ctx context.Context, raw json.RawMessage) (string, error) {
 	var input subagentInput
-	if err := json.Unmarshal(raw, &input); err != nil {
+	if err := decodeToolArgs(raw, &input); err != nil {
 		return "", fmt.Errorf("invalid run_subagent arguments: %w", err)
 	}
+	return e.runSubagentInput(ctx, input)
+}
+
+// runSubagentInput is the typed core behind run_subagent. The model's tool
+// call enters through runSubagentTool's JSON boundary; harness-driven pipeline
+// launches call this directly with the struct (no marshal/unmarshal round-trip).
+func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (string, error) {
 	input.Agent, input.Task, input.Title = strings.TrimSpace(input.Agent), strings.TrimSpace(input.Task), strings.TrimSpace(input.Title)
 	// P3: in plan mode, the "general" subagent gets the full mutating registry.
 	// Block it at the gate so the UI's read-only invariant cannot be bypassed
 	// by spawning a general subagent from inside a plan-mode task.
 	if e.PlanMode() && input.Agent == "general" {
-		return "", errors.New("blocked: plan mode is read-only; only explore/plan/review subagents are available. Use them to investigate, then finish your plan.")
+		return "", errors.New(instructions.GateSubagentPlanModeGeneralBody)
 	}
 	spec, ok := e.subagentSpecs()[input.Agent]
 	if !ok || input.Task == "" {
@@ -80,29 +135,41 @@ func (e *Engine) runSubagentTool(ctx context.Context, raw json.RawMessage) (stri
 			return fmt.Sprintf("Subagent %q report (reused; workspace unchanged; zero tokens):\n%s", input.Agent, body), nil
 		}
 	}
+	l := e.Lifecycle()
+	phaseBudgeted := l.Orchestrated()
 	e.taskMu.Lock()
 	limit := e.taskAgentCap
-	if limit <= 0 || e.taskAgentRuns >= limit {
+	used := e.taskAgentRuns
+	if phaseBudgeted {
+		if e.taskPhaseAgentRuns == nil {
+			e.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
+		}
+		used = e.taskPhaseAgentRuns[l.State]
+	}
+	if limit <= 0 || used >= limit {
 		e.taskAgentDenied++
-		denied, used := e.taskAgentDenied, e.taskAgentRuns
+		denied := e.taskAgentDenied
 		e.taskMu.Unlock()
 		// The denial must teach the model to stop delegating: state the reason,
 		// state the only useful next action, and escalate on repeat calls so a
 		// retry loop converges instead of burning turns on a closed door.
-		reason := fmt.Sprintf("subagent budget exhausted (%d of %d run(s) used)", used, limit)
+		reason := fmt.Sprintf(instructions.GateSubagentBudgetExhaustedTmpl, used, limit)
 		if limit <= 0 {
-			reason = "no subagent budget for this task (agents=0)"
+			reason = instructions.GateSubagentBudgetZeroBody
 		}
 		// 004 US3 (T035): when the task has NO subagent budget at all (agents=0),
 		// the door is closed from the very first call — say so immediately instead
 		// of inviting a second attempt. A mid-task exhaustion (limit>0) still gives
 		// the softer message first and escalates only on a repeat.
 		if denied > 1 || limit <= 0 {
-			return "", fmt.Errorf("%s. run_subagent is closed for the rest of this task and every further call will fail — do NOT call it again. Continue the remaining work directly with your own read/edit tools now", reason)
+			return "", fmt.Errorf(instructions.GateSubagentBudgetClosedTmpl, reason)
 		}
-		return "", fmt.Errorf("%s; complete the remaining work directly with your own tools instead of delegating", reason)
+		return "", fmt.Errorf(instructions.GateSubagentBudgetSoftTmpl, reason)
 	}
 	e.taskAgentRuns++
+	if phaseBudgeted {
+		e.taskPhaseAgentRuns[l.State]++
+	}
 	e.runCounter++
 	runID := fmt.Sprintf("a%d-%x", e.runCounter, time.Now().UnixMilli())
 	e.taskMu.Unlock()
@@ -110,13 +177,16 @@ func (e *Engine) runSubagentTool(ctx context.Context, raw json.RawMessage) (stri
 		input.Title = deriveTitle(input.Task)
 	}
 	result := e.executeSubagent(ctx, runID, input, spec)
-	if result.Status == "done" && len(result.Report) >= 80 && (input.Agent == "explore" || input.Agent == "plan") && e.knowledge != nil {
-		e.knowledge.AddReport(input.Agent, input.Title, input.Task, result.Report)
+	// Every usable report banks with its phase/role provenance; consumers that
+	// need research evidence filter on it (Knowledge.ResearchFindings) rather
+	// than this call discriminating by agent kind.
+	if result.Status == "done" && len(result.Report) >= 80 && e.knowledge != nil {
+		e.knowledge.AddPhaseReport(input.Agent, pipelineLabel(l.State), handoffRole(input.Agent), input.Title, input.Task, result.Report)
 	}
 	e.addTaskAgentUsage(result.Usage)
 	if e.persistence.AddEvent != nil {
-		summary, _ := json.Marshal(map[string]any{"runId": result.RunID, "agent": result.Agent, "title": result.Title, "status": result.Status, "turns": result.Turns, "toolCalls": result.ToolCalls, "usage": result.Usage, "task": truncateEllipsis(input.Task, 2000), "report": truncateEllipsis(result.Report, 4000)})
-		_ = e.persistence.AddEvent(ctx, "agent", "run_summary", e.redact(string(summary)))
+		summary, _ := json.Marshal(map[string]any{"runId": result.RunID, "agent": result.Agent, "title": result.Title, "status": result.Status, "turns": result.Turns, "toolCalls": result.ToolCalls, "usage": result.Usage, "task": contract.TruncateEllipsis(input.Task, 2000), "report": contract.TruncateEllipsis(result.Report, 4000)})
+		_ = e.persistence.AddEvent(ctx, "agent", "run_summary", e.redact(string(summary)), "")
 	}
 	status := ""
 	if result.Status != "done" {
@@ -125,13 +195,21 @@ func (e *Engine) runSubagentTool(ctx context.Context, raw json.RawMessage) (stri
 	// Report the remaining budget with every run so the model can track it and
 	// switch to direct work BEFORE hitting the exhaustion error.
 	e.taskMu.Lock()
-	remaining := max(0, e.taskAgentCap-e.taskAgentRuns)
+	used = e.taskAgentRuns
+	if phaseBudgeted {
+		used = e.taskPhaseAgentRuns[l.State]
+	}
+	remaining := max(0, e.taskAgentCap-used)
 	e.taskMu.Unlock()
 	budgetNote := fmt.Sprintf("%d subagent run(s) remaining", remaining)
 	if remaining == 0 {
 		budgetNote = "subagent budget now exhausted — do the remaining work directly"
 	}
-	return fmt.Sprintf("Subagent %q report%s (%d turns, %d tool calls; %s):\n%s", result.Agent, status, result.Turns, result.ToolCalls, budgetNote, result.Report), nil
+	// Full reports are durable in the agent event/knowledge sidecars. Return a
+	// bounded handoff to the parent so phase results do not become a second
+	// transcript inside the main conversation.
+	parentReport := contract.TruncateEllipsis(result.Report, 2200)
+	return fmt.Sprintf("Subagent %q report%s (%d turns, %d tool calls; %s):\n%s", result.Agent, status, result.Turns, result.ToolCalls, budgetNote, parentReport), nil
 }
 
 func (e *Engine) executeSubagent(ctx context.Context, runID string, input subagentInput, spec subagentSpec) subagentResult {
@@ -147,15 +225,21 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			break
 		}
 	}
-	e.emitAgent(contract.AgentEvent{Kind: "start", RunID: runID, Agent: input.Agent, Title: input.Title, Task: input.Task, Model: modelName})
+	// Only an orchestrated phase is surfaced on the agent event; a manual /
+	// direct-task subagent carries no phase tag (the TUI hides it), matching the
+	// pre-010 behavior where the pipeline phase was "direct".
+	phase := ""
+	if l := e.Lifecycle(); l.Orchestrated() {
+		phase = pipelineLabel(l.State)
+	}
+	role := handoffRole(input.Agent)
 	shared := ""
 	if e.knowledge != nil {
-		shared = e.knowledge.Briefing(1500)
+		shared = e.knowledge.BriefingForScope(input.Task, 1500)
 	}
-	system := "You are the " + spec.Name + " subagent inside MuhiyaCode. " + spec.System + "\nWorkspace: " + e.session.WorkspacePath + "\n" + capabilityStatement(spec)
-	if shared != "" {
-		system += "\n\nShared session memory:\n" + shared
-	}
+	handoff := handoffFor(input, shared)
+	e.emitAgent(contract.AgentEvent{Kind: "start", RunID: runID, Agent: input.Agent, Phase: phase, Role: role, Title: input.Title, Task: input.Task, Handoff: handoff.Render(), Model: modelName})
+	system := "You are the " + spec.Name + " subagent inside MuhiyaCode. " + spec.System + "\nWorkspace: " + e.session.WorkspacePath + "\n" + capabilityStatement(spec) + "\n\n" + handoff.Render()
 	messages := []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: input.Task}}
 	definitions := e.registry.Definitions(spec.Allowed)
 	// B6/T025: subagents dispatch through the SAME shared gate as the main loop
@@ -168,11 +252,12 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 	// synthetic-tool switch), so a subagent can't reach run_subagent/exit_plan_mode.
 	sub := dispatchScope{
 		counters: newCallCounters(),
+		readOnly: input.Agent != "general",
 		onStart: func(call contract.ToolCall) {
-			e.emitAgent(contract.AgentEvent{Kind: "tool_start", RunID: runID, CallID: call.ID, Tool: call.ToolName(), Arguments: call.ArgumentsJSON()})
+			e.emitAgent(contract.AgentEvent{Kind: "tool_start", RunID: runID, Tool: call.ToolName(), Arguments: call.ArgumentsJSON()})
 		},
 		onEnd: func(call contract.ToolCall, output string) {
-			e.emitAgent(contract.AgentEvent{Kind: "tool_end", RunID: runID, CallID: call.ID, Tool: call.ToolName(), Output: output})
+			e.emitAgent(contract.AgentEvent{Kind: "tool_end", RunID: runID, Tool: call.ToolName(), Output: output})
 		},
 		escalate: func(notice string) {
 			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: notice})
@@ -204,7 +289,14 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 	}
 	var previousShape *PrefixShape
 	maxTurns := max(2, int(math.Ceil(float64(spec.MaxTurns)*Profile(e.effort()).AgentTurnScale)))
-	for turn := 1; turn <= maxTurns; turn++ {
+	// Exhausting the turn budget is NOT a hard failure: the subagent is told to
+	// stop calling tools and gets up to wrapUpTurns extra provider turns to
+	// return whatever it found (verified or partial) as its report. Only a
+	// subagent that returns nothing even then is reported as failed.
+	const wrapUpTurns = 2
+	wrapUp := false
+	lastText := "" // last interim note, for the partial report if the budget is exhausted
+	for turn := 1; turn <= maxTurns+wrapUpTurns; turn++ {
 		result.Turns = turn
 		shape, shapeErr := NewPrefixShape(system, definitions, 0, modelID)
 		if shapeErr != nil {
@@ -225,8 +317,11 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			result.Report = "subagent stable prefix changed without invalidation event: " + strings.Join(reasons, ",")
 			break
 		}
+		requestStart := time.Now()
 		response, err := e.provider.Chat(ctx, contract.ChatRequest{SessionID: e.session.ID + ":sub", Messages: messages, Tools: definitions, ModelID: modelID, Reasoning: Profile(e.effort()).AgentReasoning})
-		if usageErr := e.recordIsolatedUsage(ctx, modelID, response.Usage, previousShape == nil, reasons); usageErr != nil {
+		if usageErr := e.recordUsageAndEmit(func() error {
+			return e.recordIsolatedUsage(ctx, modelID, response.Usage, previousShape == nil, reasons, elapsedMS(requestStart))
+		}); usageErr != nil {
 			result.Status = "failed"
 			result.Report = "persist subagent usage: " + usageErr.Error()
 			break
@@ -234,7 +329,6 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		// Keep the parent's live task-usage display in step with subagent
 		// spending — the task summary already includes it, so the live line
 		// must too.
-		e.emitTaskUsage()
 		previousShape = &shape
 		if err != nil {
 			result.Status = statusFromContext(ctx, "failed")
@@ -245,35 +339,68 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		e.emitAgent(contract.AgentEvent{Kind: "usage", RunID: runID, Usage: result.Usage})
 		calls := response.ToolCalls
 		text := response.Content
-		if len(calls) == 0 && e.rescue != nil {
+		// During wrap-up the text IS the report — never let the rescue path
+		// reinterpret it as tool calls.
+		if len(calls) == 0 && e.rescue != nil && !wrapUp {
 			calls, text = e.rescue(text, toolNames(definitions))
 		}
-		if len(calls) == 0 {
+		// A no-tool-call response is the report as always; in wrap-up any
+		// non-empty text is also accepted as the report even if the model kept
+		// calling tools alongside it.
+		if strings.TrimSpace(text) != "" {
+			lastText = text
+		}
+		if len(calls) == 0 || (wrapUp && strings.TrimSpace(text) != "") {
 			result.Report = strings.TrimSpace(text)
 			if result.Report == "" {
 				result.Report = "(subagent returned no report)"
+				if wrapUp {
+					// INV-3: a turn-budget exhaustion is a bounded degradation, NEVER a
+					// hard failure with a scary "bounded turn limit" string. Return a
+					// guided partial so the parent absorbs the unfinished work.
+					result.Status = "failed"
+					result.Report = turnBudgetPartialReport(lastText)
+					e.recordHarnessEvent(ctx, contract.HarnessRecovery, "subagent-turn-budget", input.Agent)
+				}
 			}
 			break
 		}
-		messages = append(messages, contract.Message{Role: contract.RoleAssistant, Content: text, ToolCalls: calls})
+		messages = append(messages, assistantReplayMessage(response, text, calls))
 		if strings.TrimSpace(text) != "" {
 			e.emitAgent(contract.AgentEvent{Kind: "text", RunID: runID, Content: text})
 		}
-		for _, call := range calls {
-			result.ToolCalls++
-			// B6/T025: one shared gate. Plan-mode blocking (P3 defense in depth),
-			// H1 validation, the failed-cache, the repeat limiter, the storm
-			// breaker, and H7 read-only-shell invalidation all live in gatedExecute
-			// / the sub scope now, so this loop only dispatches and pairs the result.
-			outcome := e.gatedExecute(ctx, call, definitions, Profile(e.effort()), sub)
-			messages = append(messages, contract.Message{Role: contract.RoleTool, ToolCallID: call.ID, Content: outcome.Output})
+		if wrapUp {
+			// The wrap-up prompt forbids further tool work: pair each call with
+			// a synthetic refusal (keeping the transcript well-formed for the
+			// next turn) instead of executing tools past the budget.
+			for _, call := range calls {
+				messages = append(messages, contract.Message{Role: contract.RoleTool, ToolCallID: call.ID, Content: "Turn budget exhausted — tool not executed. Return your complete report now."})
+			}
+		} else {
+			for _, call := range calls {
+				result.ToolCalls++
+				// B6/T025: one shared gate. Plan-mode blocking (P3 defense in depth),
+				// H1 validation, the failed-cache, the repeat limiter, the storm
+				// breaker, and H7 read-only-shell invalidation all live in gatedExecute
+				// / the sub scope now, so this loop only dispatches and pairs the result.
+				outcome := e.gatedExecute(ctx, call, definitions, Profile(e.effort()), sub)
+				messages = append(messages, contract.Message{Role: contract.RoleTool, ToolCallID: call.ID, Content: outcome.Output})
+			}
 		}
-		if turn == maxTurns {
+		if turn == maxTurns+wrapUpTurns {
+			// Both wrap-up turns burned on tool calls with no text (INV-3): return a
+			// guided partial, never the forbidden "bounded turn limit" string.
 			result.Status = "failed"
-			result.Report = "Subagent reached its bounded turn limit before returning a report."
+			result.Report = turnBudgetPartialReport(lastText)
+			e.recordHarnessEvent(ctx, contract.HarnessRecovery, "subagent-turn-budget", input.Agent)
+			break
+		}
+		if !wrapUp && turn >= maxTurns {
+			wrapUp = true
+			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Turn budget reached: stop calling tools and return your complete report NOW with everything you found, verified or partial."})
 		}
 	}
-	e.emitAgent(contract.AgentEvent{Kind: "done", RunID: runID, Agent: input.Agent, Title: input.Title, Status: result.Status, Report: result.Report, Turns: result.Turns, ToolCalls: result.ToolCalls, Usage: result.Usage})
+	e.emitAgent(contract.AgentEvent{Kind: "done", RunID: runID, Agent: input.Agent, Phase: string(phase), Role: role, Title: input.Title, Status: result.Status, Report: result.Report, Usage: result.Usage})
 	return result
 }
 
@@ -283,10 +410,21 @@ func (e *Engine) emitAgent(event contract.AgentEvent) {
 	}
 }
 
+// turnBudgetPartialReport is the INV-3-compliant report for a subagent that
+// exhausted its turn budget: a guided partial that tells the parent to finish the
+// work directly. It NEVER contains the forbidden "bounded turn limit" phrasing.
+func turnBudgetPartialReport(lastText string) string {
+	base := "Subagent exhausted its turn budget before finishing; returning partial progress. The remaining work is unfinished — continue it directly."
+	if s := strings.TrimSpace(lastText); s != "" {
+		return base + " Last interim note: " + contract.Digest(s, 300)
+	}
+	return base
+}
+
 func deriveTitle(task string) string {
 	line := strings.TrimSpace(strings.SplitN(task, "\n", 2)[0])
 	line = strings.Join(strings.Fields(strings.Trim(line, "#>*`-")), " ")
-	return truncateEllipsis(line, 56)
+	return contract.TruncateEllipsis(line, 56)
 }
 
 func statusFromContext(ctx context.Context, fallback string) string {
@@ -297,7 +435,11 @@ func statusFromContext(ctx context.Context, fallback string) string {
 }
 
 func isMutation(name string) bool {
-	return name == "edit_file" || name == "multi_edit" || name == "write_file" || name == "apply_patch" || name == "run_shell" || strings.HasPrefix(name, "mcp__")
+	// save_memory and edit_memory mutate the durable memory store (feature 008
+	// US5, Memory Parity N2), so they take the same plan-mode read-only block as
+	// the file edits they parallel (memory-tool.md MT-9 — no gate weaker than
+	// edit_file's). recall_memory is read-only and stays open.
+	return name == "edit_file" || name == "multi_edit" || name == "write_file" || name == "apply_patch" || name == "run_shell" || name == "save_memory" || name == "edit_memory" || strings.HasPrefix(name, "mcp__")
 }
 
 // capabilityStatement (004 US3, T038) is the explicit boundary a delegated
@@ -314,6 +456,5 @@ func capabilityStatement(spec subagentSpec) string {
 		}
 	}
 	sort.Strings(names)
-	return "Tools available to you: " + strings.Join(names, ", ") +
-		". Anything not listed is unavailable to you — do not attempt it. Return your findings or diffs; when you hit ambiguity or an architectural choice, report it back to the caller rather than deciding it yourself."
+	return instructions.CapabilityStatementPrefix + strings.Join(names, ", ") + instructions.CapabilityStatementSuffix
 }

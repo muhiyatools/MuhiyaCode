@@ -1,0 +1,12 @@
+{
+  "id": "114e3ccb704b",
+  "description": "before editing reports/export.go",
+  "createdAt": "2026-07-14T20:21:27.0605015Z",
+  "files": [
+    {
+      "path": "C:\\Users\\mydwa\\AppData\\Local\\Temp\\delegationbench-workspace-933045577\\reports\\export.go",
+      "existed": true,
+      "content": "// Package reports renders order summaries and CSV exports for OrderDesk.\npackage reports\n\nimport (\n\t\"fmt\"\n\t\"log\"\n\t\"strings\"\n)\n\n// Row is one exported report line. Total is in cents.\ntype Row struct {\n\tOrderID string\n\tTotal   int64\n}\n\n// ExportCSV renders rows as a two-column CSV document.\nfunc ExportCSV(rows []Row) string {\n\tvar b strings.Builder\n\tb.WriteString(\"order_id,total_cents\\n\")\n\tfor _, row := range rows {\n\t\tfmt.Fprintf(\u0026b, \"%s,%d\\n\", row.OrderID, row.Total)\n\t}\n\tlog.Printf(\"expot complete: wrote %d rows\", len(rows))\n\treturn b.String()\n}\n"
+    }
+  ]
+}

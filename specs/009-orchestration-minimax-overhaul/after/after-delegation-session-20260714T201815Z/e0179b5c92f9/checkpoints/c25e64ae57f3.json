@@ -1,0 +1,12 @@
+{
+  "id": "c25e64ae57f3",
+  "description": "before editing auth/token.go",
+  "createdAt": "2026-07-14T20:21:06.9985073Z",
+  "files": [
+    {
+      "path": "C:\\Users\\mydwa\\AppData\\Local\\Temp\\delegationbench-workspace-933045577\\auth\\token.go",
+      "existed": true,
+      "content": "package auth\n\nimport (\n\t\"errors\"\n\t\"time\"\n)\n\n// ErrTokenExpired is returned when a presented token is past its expiry.\nvar ErrTokenExpired = errors.New(\"token has exipred; request a new one\")\n\n// Token is a bearer API token with an absolute expiry.\ntype Token struct {\n\tValue     string\n\tIssuedAt  time.Time\n\tExpiresAt time.Time\n}\n\n// Validate checks the token against the clock.\nfunc (t Token) Validate(now time.Time) error {\n\tif now.After(t.ExpiresAt) {\n\t\treturn ErrTokenExpired\n\t}\n\treturn nil\n}\n"
+    }
+  ]
+}

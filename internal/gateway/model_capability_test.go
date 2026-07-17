@@ -37,13 +37,48 @@ func TestClampOutputTokens(t *testing.T) {
 	if value, clamped := deepseek.ClampOutputTokens(16_000); value != 16_000 || clamped {
 		t.Errorf("ClampOutputTokens(16000) = (%d, %v), want (16000, false)", value, clamped)
 	}
-	generic := ResolveModelProfile("minimax-01")
+	generic := ResolveModelProfile("unrecognized-provider-model")
 	if generic.OutputTokenLimit != 0 {
 		t.Fatalf("expected an unknown (0) output-token limit for the minimax family, got %d", generic.OutputTokenLimit)
 	}
 	if value, clamped := generic.ClampOutputTokens(500_000); clamped {
 		t.Errorf("an unknown limit must never clamp: got (%d, %v)", value, clamped)
 	}
+}
+
+func TestMiniMaxProfileLimitsAndFamilyNames(t *testing.T) {
+	for _, name := range []string{"MiniMax-M3", "M3"} {
+		profile := ResolveModelProfile(name)
+		if profile.Family != "minimax" || profile.ContextWindowLimit != 1_000_000 || profile.OutputTokenLimit != 1_000_000 {
+			t.Fatalf("%s profile = %+v", name, profile)
+		}
+		if !profile.NeedsToolCallRescue || !profile.ParsesReasoning || profile.ReasoningReplay != ReasoningReplayPreserve {
+			t.Fatalf("%s capability flags = %+v", name, profile)
+		}
+	}
+	for _, name := range []string{"MiniMax-M2.7", "M2.7-highspeed", "M2.5", "M2.1", "M2"} {
+		profile := ResolveModelProfile(name)
+		if profile.Family != "minimax" || profile.ContextWindowLimit != 204_800 || profile.OutputTokenLimit != 204_800 {
+			t.Fatalf("%s profile = %+v", name, profile)
+		}
+	}
+}
+
+// IsDeprecatedParam reports whether name is a parameter the provider has
+// deprecated and MuhiyaCode must never emit (contracts/capability-profile.md
+// CP-2). Feature 010 T038: this predicate exists solely to verify the
+// DeprecatedParams data table below is populated correctly — the "never
+// emit" guarantee itself is structural (the request builder never emits
+// frequency_penalty/presence_penalty fields for DeepSeek by construction),
+// so no production code needs a runtime filter call, which is why this lives
+// in the test file that is its only caller rather than in model.go.
+func (p ModelProfile) IsDeprecatedParam(name string) bool {
+	for _, d := range p.DeprecatedParams {
+		if d == name {
+			return true
+		}
+	}
+	return false
 }
 
 // TestDeprecatedParamsNeverSupported asserts the deprecated DeepSeek sampling

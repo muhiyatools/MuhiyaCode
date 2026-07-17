@@ -27,7 +27,6 @@ func DefaultSettings() contract.Settings {
 	settings.RTL.Mode = "auto"
 	settings.RTL.Align = "auto"
 	settings.UI.BorderMode = "auto"
-	settings.UI.Density = "auto"
 	return settings
 }
 
@@ -118,7 +117,7 @@ func ValidateSettings(settings contract.Settings) error {
 	if !slices.Contains([]string{"auto", "right", "left"}, settings.RTL.Align) {
 		return fmt.Errorf("rtl.align is invalid")
 	}
-	if !slices.Contains([]string{"auto", "unicode", "ascii"}, settings.UI.BorderMode) || !slices.Contains([]string{"auto", "compact", "comfortable"}, settings.UI.Density) {
+	if !slices.Contains([]string{"auto", "unicode", "ascii"}, settings.UI.BorderMode) {
 		return fmt.Errorf("ui settings are invalid")
 	}
 	seen := make(map[string]bool)
@@ -181,6 +180,35 @@ func AutoAssignModels(settings *contract.Settings) {
 			}
 		}
 	}
+}
+
+// AssignFreshDefaultModels applies the explicit mixed-provider first-run pair.
+// It is intentionally separate from score-based AutoAssignModels: V4 Pro's
+// "pro" marker otherwise wins the main role, while M3's context score does not
+// reliably place it opposite V4 Pro. Existing role choices are never touched.
+func AssignFreshDefaultModels(settings *contract.Settings) bool {
+	if settings == nil || strings.TrimSpace(settings.Provider.ActiveModelID) != "" || strings.TrimSpace(settings.Provider.SubagentModelID) != "" {
+		return false
+	}
+	var minimaxM3, deepSeekV4Pro contract.Model
+	for _, model := range settings.Provider.Models {
+		name := strings.ToLower(model.ID + " " + model.Name)
+		// The M3 detector is shared with the capability profile (gateway
+		// package) so the pairing can never miss a catalog entry the profile
+		// resolver already treats as M3 (e.g. a bare "M3" name).
+		if contract.IsMiniMaxM3Name(name) {
+			minimaxM3 = model
+		}
+		if strings.Contains(name, "deepseek") && strings.Contains(name, "v4") && strings.Contains(name, "pro") {
+			deepSeekV4Pro = model
+		}
+	}
+	if minimaxM3.ID == "" || deepSeekV4Pro.ID == "" {
+		return false
+	}
+	settings.Provider.ActiveModelID = minimaxM3.ID
+	settings.Provider.SubagentModelID = deepSeekV4Pro.ID
+	return true
 }
 
 // firstModelMatching returns the first model in ranked order whose id or name
@@ -271,8 +299,6 @@ func SetConfig(key, value string, settings *contract.Settings, secrets *contract
 		settings.RTL.Align = value
 	case "uiBorderMode":
 		settings.UI.BorderMode = value
-	case "uiDensity":
-		settings.UI.Density = value
 	default:
 		return fmt.Errorf("unknown config key %q", key)
 	}

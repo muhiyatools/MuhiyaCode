@@ -19,9 +19,9 @@ func TestCompletionDisclosesIncompleteSteps(t *testing.T) {
 		{Title: "Add the migration", Status: contract.PlanInProgress},
 		{Title: "Write the tests", Status: contract.PlanPending},
 	}, UpdatedAt: time.Now().UTC()}
-	engine.SetPlanPhase(contract.PlanPhaseExecuting)
+	engine.SetLifecycleState(contract.LifecycleImplementing)
 	out := engine.finalize(context.Background(), "All set — the feature is complete.")
-	if !strings.Contains(out, "2 of 3 plan steps incomplete") {
+	if !strings.Contains(out, "2 of 3 to-dos incomplete") {
 		t.Fatalf("disclosure missing: %q", out)
 	}
 	if !strings.Contains(out, "Add the migration") || !strings.Contains(out, "Write the tests") {
@@ -34,7 +34,7 @@ func TestCompletionNoDiscloseWhenComplete(t *testing.T) {
 	engine.plan = contract.Plan{Steps: []contract.PlanStep{
 		{Title: "Only step", Status: contract.PlanCompleted},
 	}, UpdatedAt: time.Now().UTC()}
-	engine.SetPlanPhase(contract.PlanPhaseExecuting)
+	engine.SetLifecycleState(contract.LifecycleImplementing)
 	out := engine.finalize(context.Background(), "Done and verified.")
 	if strings.Contains(out, "incomplete") {
 		t.Fatalf("a completed plan must not disclose incompleteness: %q", out)

@@ -53,7 +53,7 @@ func (s *DB) migrate(ctx context.Context) error {
 	statements := []string{
 		`CREATE TABLE IF NOT EXISTS trusted_workspaces (path TEXT PRIMARY KEY, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, workspace_path TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
-		`CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, type TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE)`,
+		`CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, type TEXT NOT NULL, content TEXT NOT NULL, target TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE)`,
 		`CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, description TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated ON sessions(workspace_path, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id, id)`,
@@ -63,7 +63,47 @@ func (s *DB) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate state database: %w", err)
 		}
 	}
+	// Resume-fidelity: a session created before events.target existed keeps the
+	// column-less table (CREATE IF NOT EXISTS above is a no-op for it), so add the
+	// column in place. Idempotent: skipped when the column is already present.
+	if err := ensureEventsTargetColumn(ctx, tx); err != nil {
+		return fmt.Errorf("migrate events.target: %w", err)
+	}
 	return tx.Commit()
+}
+
+// ensureEventsTargetColumn adds the events.target column to a pre-existing DB
+// that lacks it. It inspects the table schema first (rather than catching the
+// "duplicate column name" error) so it never poisons the surrounding migration
+// transaction on the common already-present path.
+func ensureEventsTargetColumn(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(events)`)
+	if err != nil {
+		return err
+	}
+	present := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		if name == "target" {
+			present = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	if present {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `ALTER TABLE events ADD COLUMN target TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 func (s *DB) IsTrusted(ctx context.Context, path string) (bool, error) {
@@ -154,13 +194,13 @@ func (s *DB) UpdateSessionTitle(ctx context.Context, id, title string) error {
 	return err
 }
 
-func (s *DB) AddEvent(ctx context.Context, sessionID, role, kind, content string) error {
+func (s *DB) AddEvent(ctx context.Context, sessionID, role, kind, content, target string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO events(session_id, role, type, content, created_at) VALUES(?,?,?,?,?)`, sessionID, role, kind, content, nowText()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO events(session_id, role, type, content, target, created_at) VALUES(?,?,?,?,?,?)`, sessionID, role, kind, content, target, nowText()); err != nil {
 		return err
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE sessions SET updated_at=? WHERE id=?`, nowText(), sessionID); err != nil {
@@ -170,10 +210,10 @@ func (s *DB) AddEvent(ctx context.Context, sessionID, role, kind, content string
 }
 
 func (s *DB) Events(ctx context.Context, sessionID string, limit int) ([]contract.Event, error) {
-	query := `SELECT role, type, content, created_at FROM events WHERE session_id=? ORDER BY id ASC`
+	query := `SELECT role, type, content, target, created_at FROM events WHERE session_id=? ORDER BY id ASC`
 	args := []any{sessionID}
 	if limit > 0 {
-		query = `SELECT role, type, content, created_at FROM (SELECT id, role, type, content, created_at FROM events WHERE session_id=? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`
+		query = `SELECT role, type, content, target, created_at FROM (SELECT id, role, type, content, target, created_at FROM events WHERE session_id=? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`
 		args = append(args, limit)
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -185,7 +225,7 @@ func (s *DB) Events(ctx context.Context, sessionID string, limit int) ([]contrac
 	for rows.Next() {
 		var event contract.Event
 		var created string
-		if err := rows.Scan(&event.Role, &event.Type, &event.Content, &created); err != nil {
+		if err := rows.Scan(&event.Role, &event.Type, &event.Content, &event.Target, &created); err != nil {
 			return nil, err
 		}
 		event.CreatedAt, _ = parseTime(created)
@@ -215,13 +255,13 @@ func (s *DB) TranscriptPage(ctx context.Context, req contract.TranscriptPageRequ
 	var args []any
 	switch req.Direction {
 	case contract.PageBefore:
-		query = `SELECT id, session_id, role, type, content, created_at FROM (SELECT id, session_id, role, type, content, created_at FROM events WHERE session_id=? AND id<? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`
+		query = `SELECT id, session_id, role, type, content, target, created_at FROM (SELECT id, session_id, role, type, content, target, created_at FROM events WHERE session_id=? AND id<? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`
 		args = []any{req.SessionID, req.Cursor, limit + 1}
 	case contract.PageAfter:
-		query = `SELECT id, session_id, role, type, content, created_at FROM events WHERE session_id=? AND id>? ORDER BY id ASC LIMIT ?`
+		query = `SELECT id, session_id, role, type, content, target, created_at FROM events WHERE session_id=? AND id>? ORDER BY id ASC LIMIT ?`
 		args = []any{req.SessionID, req.Cursor, limit + 1}
 	default: // initial-tail
-		query = `SELECT id, session_id, role, type, content, created_at FROM (SELECT id, session_id, role, type, content, created_at FROM events WHERE session_id=? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`
+		query = `SELECT id, session_id, role, type, content, target, created_at FROM (SELECT id, session_id, role, type, content, target, created_at FROM events WHERE session_id=? ORDER BY id DESC LIMIT ?) ORDER BY id ASC`
 		args = []any{req.SessionID, limit + 1}
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
@@ -233,7 +273,7 @@ func (s *DB) TranscriptPage(ctx context.Context, req contract.TranscriptPageRequ
 	for rows.Next() {
 		var event contract.TranscriptEvent
 		var created string
-		if err := rows.Scan(&event.ID, &event.SessionID, &event.Role, &event.Kind, &event.Content, &created); err != nil {
+		if err := rows.Scan(&event.ID, &event.SessionID, &event.Role, &event.Kind, &event.Content, &event.Target, &created); err != nil {
 			return page, err
 		}
 		event.CreatedAt, _ = parseTime(created)

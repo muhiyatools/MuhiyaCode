@@ -8,10 +8,12 @@ package contract
 // exactly like MUHIYA.md — no ledger sequences, events, or item projections.
 
 // ProjectContextVersion is the current project_context.json sidecar schema
-// version. A sidecar written by an older schema (feature 005's ledger-based
-// memory) is discarded on read so the boot block is recomputed once for the
-// current file-based format.
-const ProjectContextVersion = 2
+// version. A sidecar written by an older schema is discarded on read so the boot
+// block is recomputed once for the current format. Bumped to 3 by the Experience
+// Overhaul (B1): memory now loads from the per-project store index (not the
+// workspace file) and a user-level ~/.muhiya/MUHIYA.md can contribute, so a v2
+// sidecar's boot block is stale and must be rebuilt once.
+const ProjectContextVersion = 3
 
 // ProjectContextSnapshot is the typed per-session project_context.json sidecar
 // (data-model §5.2). RenderedBootContext is restored verbatim on resume so the
@@ -27,6 +29,8 @@ type ProjectContextSnapshot struct {
 	InstructionsState      string   `json:"instructionsState"`
 	MemoryHash             string   `json:"memoryHash"`
 	MemoryState            string   `json:"memoryState"`
+	UserInstructionsHash   string   `json:"userInstructionsHash,omitempty"`
+	UserInstructionsState  string   `json:"userInstructionsState,omitempty"`
 	SkillsSnapshot         []string `json:"skillsSnapshot"`
 	AppliedInstructionHash string   `json:"appliedInstructionHash"`
 	AppliedMemoryHash      string   `json:"appliedMemoryHash"`

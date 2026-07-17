@@ -1,0 +1,4 @@
+{"at":"2026-07-14T15:37:08.1578606Z","model":"deepseek-v4-flash","payload":{"completion_tokens":99,"prompt_tokens":6324,"total_tokens":6423}}
+{"at":"2026-07-14T15:37:10.379478Z","model":"deepseek-v4-flash","payload":{"completion_tokens":210,"prompt_tokens":6517,"total_tokens":6727}}
+{"at":"2026-07-14T15:37:12.9800888Z","model":"deepseek-v4-flash","payload":{"completion_tokens":340,"prompt_tokens":6707,"total_tokens":7047}}
+{"at":"2026-07-14T15:37:19.0871936Z","model":"deepseek-v4-flash","payload":{"completion_tokens":901,"prompt_tokens":9040,"total_tokens":9941}}

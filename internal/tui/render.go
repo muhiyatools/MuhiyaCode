@@ -116,22 +116,33 @@ type glyphs struct {
 	spinner    []string
 	border     lipgloss.Border
 	ascii      bool
+	// To-do checklist markers (Experience Overhaul A3): completed / in-progress /
+	// pending. Kept in the glyph table so the ASCII fallback stays single-sourced.
+	todoDone    string
+	todoActive  string
+	todoPending string
 }
 
 func newGlyphs(ascii bool) glyphs {
 	if ascii {
 		return glyphs{
 			brand: "*", markerOK: "*", markerFail: "x", ruleH: "-", gutter: "|",
-			bullet: ".", ellipsis: "...", spinner: []string{"-", "\\", "|", "/"},
-			border: lipgloss.Border{Top: "-", Bottom: "-", Left: "|", Right: "|", TopLeft: "+", TopRight: "+", BottomLeft: "+", BottomRight: "+"},
-			ascii:  true,
+			bullet: ".", ellipsis: "...", spinner: []string{"*", "+", "x", "+"},
+			border:      lipgloss.Border{Top: "-", Bottom: "-", Left: "|", Right: "|", TopLeft: "+", TopRight: "+", BottomLeft: "+", BottomRight: "+"},
+			ascii:       true,
+			todoDone:    "[x]",
+			todoActive:  ">",
+			todoPending: "[ ]",
 		}
 	}
 	return glyphs{
 		brand: "◆", markerOK: "●", markerFail: "×", ruleH: "─", gutter: "▏",
-		bullet: "·", ellipsis: "…", spinner: []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"},
-		border: lipgloss.RoundedBorder(),
-		ascii:  false,
+		bullet: "·", ellipsis: "…", spinner: []string{"✶", "✻", "✽", "✻"},
+		border:      lipgloss.RoundedBorder(),
+		ascii:       false,
+		todoDone:    "☒",
+		todoActive:  "▸",
+		todoPending: "☐",
 	}
 }
 
@@ -433,17 +444,6 @@ func wrapPlain(value string, width int) []string {
 		lines = append(lines, line)
 	}
 	return lines
-}
-
-func formatTokens(value int) string {
-	switch {
-	case value >= 1_000_000:
-		return fmt.Sprintf("%.1fm", float64(value)/1_000_000)
-	case value >= 1_000:
-		return fmt.Sprintf("%.1fk", float64(value)/1_000)
-	default:
-		return fmt.Sprintf("%d", value)
-	}
 }
 
 func formatDuration(duration time.Duration) string {

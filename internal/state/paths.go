@@ -1,10 +1,13 @@
 package state
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 const HomeEnvironment = "MUHIYA_HOME"
@@ -21,6 +24,7 @@ type Paths struct {
 	StateDir       string
 	DBFile         string
 	SessionsDir    string
+	ProjectsDir    string
 	CacheDir       string
 	LogsDir        string
 	TmpDir         string
@@ -52,6 +56,7 @@ func DefaultPaths() (Paths, error) {
 		StateDir:       stateDir,
 		DBFile:         filepath.Join(stateDir, "muhiyacode.sqlite"),
 		SessionsDir:    filepath.Join(home, "sessions"),
+		ProjectsDir:    filepath.Join(home, "projects"),
 		CacheDir:       filepath.Join(home, "cache"),
 		LogsDir:        filepath.Join(home, "logs"),
 		TmpDir:         filepath.Join(home, "tmp"),
@@ -63,7 +68,7 @@ func EnsurePaths(paths ...Paths) (Paths, error) {
 	if err != nil {
 		return Paths{}, err
 	}
-	for _, dir := range []string{p.Home, p.StateDir, p.SessionsDir, p.CacheDir, p.LogsDir, p.TmpDir} {
+	for _, dir := range []string{p.Home, p.StateDir, p.SessionsDir, p.ProjectsDir, p.CacheDir, p.LogsDir, p.TmpDir} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return Paths{}, fmt.Errorf("create state directory %s: %w", dir, err)
 		}
@@ -93,13 +98,32 @@ func SessionDir(p Paths, sessionID string) (string, error) {
 	return filepath.Join(p.SessionsDir, sessionID), nil
 }
 
-func CheckpointPath(p Paths, sessionID, checkpointID string) (string, error) {
-	dir, err := SessionDir(p, sessionID)
-	if err != nil {
-		return "", err
+// projectSlug collapses any run of non-[a-z0-9] characters to a single dash.
+var projectSlug = regexp.MustCompile(`[^a-z0-9]+`)
+
+// ProjectID maps a canonical workspace key (an already-normalized absolute path —
+// see workspace.WorkspaceKey) to a deterministic, human-findable, collision-safe
+// directory name for that project's memory store (Experience Overhaul B1). It is
+// "<sanitized-basename>-<sha256[:8]>": the basename makes the directory legible,
+// the hash disambiguates two projects that share a basename. Because the input is
+// already case-normalized upstream, two casings of one path yield one ID.
+func ProjectID(workspaceKey string) string {
+	sum := sha256.Sum256([]byte(workspaceKey))
+	hash8 := hex.EncodeToString(sum[:])[:8]
+	base := projectSlug.ReplaceAllString(strings.ToLower(filepath.Base(workspaceKey)), "-")
+	base = strings.Trim(base, "-")
+	if len(base) > 32 {
+		base = strings.Trim(base[:32], "-")
 	}
-	if !safeID.MatchString(checkpointID) {
-		return "", fmt.Errorf("invalid checkpoint id: %s", checkpointID)
+	if base == "" {
+		base = "project"
 	}
-	return filepath.Join(dir, "checkpoints", checkpointID+".json"), nil
+	return base + "-" + hash8
+}
+
+// ProjectMemoryDir is the per-project memory store directory:
+// ~/.muhiya/projects/<project-id>/memory. It is not created here; the first write
+// (save_memory / migration) creates it.
+func ProjectMemoryDir(p Paths, workspaceKey string) string {
+	return filepath.Join(p.ProjectsDir, ProjectID(workspaceKey), "memory")
 }

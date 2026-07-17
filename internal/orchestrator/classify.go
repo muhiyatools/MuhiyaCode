@@ -26,6 +26,61 @@ type Assessment struct {
 	Risky      bool
 	Reason     string
 	ScopeGuard bool
+	// PlanRequest (P3b): the user explicitly asked the agent to CREATE a plan, so it
+	// enters the planning pipeline (proposes a plan, pauses for proceed-now/later)
+	// regardless of size — the natural-language replacement for the removed /plan.
+	PlanRequest bool
+	// PlanDoc (P3a): the user asked to EXECUTE an existing plan document (…the plan in
+	// X.md). The agent skips research/planning and mirrors that file into the to-dos.
+	PlanDoc     bool
+	PlanDocPath string // the referenced markdown path (best-effort extraction)
+}
+
+// PlanNeedVerdict is the explainable, user-visible routing decision for the
+// enforced orchestration pipeline. Task size selects depth; effort continues
+// to select only the unchanged per-phase agent allowance.
+type PlanNeedVerdict struct {
+	NeedsPlan bool
+	Depth     string
+	Reason    string
+}
+
+const (
+	PipelineDepthLight = "light"
+	PipelineDepthFull  = "full"
+)
+
+// NeedsPlan is deliberately a pure predicate over the existing classifier.
+// Conversational, tiny, and small work stays on the byte-identical direct
+// path. Standard work gets research+plan+approval; large and epic work get
+// the full pipeline. General questions are already classified as ClassChat.
+func NeedsPlan(assessment Assessment) PlanNeedVerdict {
+	verdict := PlanNeedVerdict{Reason: assessment.Reason}
+	// P3(a): executing an existing plan document never enters the research/planning
+	// pipeline — the plan already exists; the agent mirrors it into the to-dos and runs.
+	if assessment.PlanDoc {
+		return verdict
+	}
+	// P3(b): an explicit "create a plan" request always enters the pipeline (proposes
+	// a plan, pauses for proceed-now/later) regardless of size — the natural-language
+	// replacement for the removed /plan command.
+	if assessment.PlanRequest {
+		verdict.NeedsPlan = true
+		verdict.Depth = PipelineDepthLight
+		if assessment.Class == ClassLarge || assessment.Class == ClassEpic {
+			verdict.Depth = PipelineDepthFull
+		}
+		return verdict
+	}
+	switch assessment.Class {
+	case ClassStandard:
+		verdict.NeedsPlan = true
+		verdict.Depth = PipelineDepthLight
+	case ClassLarge, ClassEpic:
+		verdict.NeedsPlan = true
+		verdict.Depth = PipelineDepthFull
+	}
+	return verdict
 }
 
 type Budget struct {
@@ -50,6 +105,11 @@ var (
 	// guards it to fire only while a plan is pending/interrupted, and step-progress
 	// detection (T8) is the phrasing-independent backstop.
 	planProceedRE = regexp.MustCompile(`(?i)^(proceed|go ahead|continue|resume|carry on|execute|run|start|begin|do)\b.{0,30}\b(plan|it|now)\b[\s!.?]*$`)
+	// planDiscardRE (P2): a natural-language discard of a pending/interrupted plan —
+	// the replacement for /plan clear. End-anchored so "discard the plan and do X"
+	// falls through to normal handling; the caller guards it to fire only while a
+	// plan invites a proceed.
+	planDiscardRE = regexp.MustCompile(`(?i)^\s*(discard|drop|forget|abandon|scrap|throw away|get rid of|cancel)\b.{0,20}\b(plan|it)\b[\s!.?]*$`)
 	codeRE        = regexp.MustCompile("(?m)```|=>|;\\s*$|\\b(function|class|import|const|def|struct|interface|func|package)\\b")
 	pathRE        = regexp.MustCompile(`(?i)(^|[\s"'` + "`" + `(])([\w.-]+[/\\])*[\w.-]+\.(ts|tsx|js|jsx|json|go|py|rb|rs|java|kt|cs|cpp|c|h|css|html|vue|svelte|md|yml|yaml|toml|sql|sh|ps1|env)\b|[\w.-]+[/\\][\w.-]+[/\\][\w/\\.-]+`)
 	repoRE        = regexp.MustCompile(`(?i)\b(repo|repository|codebase|project|app|file|files|folder|directory|module|component|function|class|method|test|tests|bug|error|build|compile|lint|typecheck|api|database|schema|diff|package|dependency|ui|page|screen|button|form)\b`)
@@ -61,6 +121,15 @@ var (
 	agentRE       = regexp.MustCompile(`(?i)\b(sub-?agents?|delegate|parallel agents?)\b`)
 	qualityRE     = regexp.MustCompile(`(?i)\b(polish(ed)?|perfect(ly)?|flawless|bullet-?proof|production[- ]?(grade|ready)|100\s*%|make sure everything|fully working)\b`)
 	bulletRE      = regexp.MustCompile(`^\s*([-*]|[0-9]+[.)])\s`)
+	// planRequestRE (P3b): the user is asking the agent to CREATE a plan (not execute
+	// one). Matches "create/make/write/draft a plan", "plan out/first/before", "plan
+	// how to". Routes to the pipeline so the agent proposes a plan and pauses.
+	planRequestRE = regexp.MustCompile(`(?i)\b(create|make|write|draft|prepare|design|outline|come up with|need|want|give me)\b[^.!?\n]{0,30}\bplan\b|\bplan\b\s+(this\s+|the\s+|it\s+)?(out|first|before|how)\b|^\s*plan\s+(out|how|the|this)\b`)
+	// planDocRE (P3a): the user is asking to EXECUTE/USE an existing plan document.
+	// Requires a co-occurring .md path (planDocPathRE) so a plain "run the plan" does
+	// not steal a pipeline "proceed"; execution of a named file beats plan-creation.
+	planDocRE     = regexp.MustCompile(`(?i)\b(execute|run|follow|implement|apply|use|do|start|continue)\b[^.!?\n]{0,70}\bplan\b|\bplan\b[^.!?\n]{0,40}\.md\b`)
+	planDocPathRE = regexp.MustCompile(`(?i)([\w./\\-]+\.md)\b`)
 )
 
 func Classify(raw string, previous TaskClass) Assessment {
@@ -75,12 +144,23 @@ func Classify(raw string, previous TaskClass) Assessment {
 		}
 		return Assessment{Class: previous, Risky: risky, Reason: "continuation of previous task"}
 	}
+	// P3: detect plan-document execution vs plan-creation intent BEFORE the
+	// conversational shortcuts, so a short "plan the auth flow" or "run PLAN.md" is
+	// never misrouted to chat. A named .md file plus an execute verb means "run this
+	// existing plan"; that beats plan-creation intent.
+	mdPath := ""
+	if match := planDocPathRE.FindStringSubmatch(text); len(match) > 1 {
+		mdPath = match[1]
+	}
+	planDoc := mdPath != "" && planDocRE.MatchString(text)
+	// A planning QUESTION ("how do I write a plan?") is not a request to create one.
+	planRequest := !planDoc && planRequestRE.MatchString(text) && !questionRE.MatchString(text)
 	paths := len(pathRE.FindAllStringIndex(text, 21))
 	hasWorkspace := paths > 0 || codeRE.MatchString(text) || repoRE.MatchString(text)
-	if !hasWorkspace && !changeRE.MatchString(text) && len(text) < 400 && (questionRE.MatchString(text) || strings.HasSuffix(text, "?")) {
+	if !planRequest && !planDoc && !hasWorkspace && !changeRE.MatchString(text) && len(text) < 400 && (questionRE.MatchString(text) || strings.HasSuffix(text, "?")) {
 		return Assessment{Class: ClassChat, Reason: "general question, no workspace involvement"}
 	}
-	if !hasWorkspace && !changeRE.MatchString(text) && len(text) < 80 {
+	if !planRequest && !planDoc && !hasWorkspace && !changeRE.MatchString(text) && len(text) < 80 {
 		return Assessment{Class: ClassChat, Reason: "conversational message"}
 	}
 	lines := strings.Split(text, "\n")
@@ -108,6 +188,16 @@ func Classify(raw string, previous TaskClass) Assessment {
 	if agentRE.MatchString(text) && (assessment.Class == ClassChat || assessment.Class == ClassTiny || assessment.Class == ClassSmall) {
 		assessment.Class = ClassStandard
 		assessment.Reason += "; subagents explicitly requested"
+	}
+	// P3: attach the plan-intent flags. A plan request/doc is real work, never chat/tiny.
+	assessment.PlanRequest, assessment.PlanDoc, assessment.PlanDocPath = planRequest, planDoc, mdPath
+	if (planRequest || planDoc) && (assessment.Class == ClassChat || assessment.Class == ClassTiny) {
+		assessment.Class = ClassSmall
+	}
+	if planDoc {
+		assessment.Reason = "execute an existing plan document"
+	} else if planRequest {
+		assessment.Reason = "create a plan, then pause for approval"
 	}
 	return assessment
 }

@@ -1,0 +1,12 @@
+{
+  "id": "e0eaeaf140f9",
+  "description": "before editing billing/invoice.go",
+  "createdAt": "2026-07-14T20:21:18.8051465Z",
+  "files": [
+    {
+      "path": "C:\\Users\\mydwa\\AppData\\Local\\Temp\\delegationbench-workspace-933045577\\billing\\invoice.go",
+      "existed": true,
+      "content": "// Package billing computes invoices and sales tax for OrderDesk orders.\npackage billing\n\nimport \"fmt\"\n\n// Invoice is one billable order summary. Amounts are in cents.\ntype Invoice struct {\n\tID       string\n\tSubtotal int64\n\tTaxCents int64\n\tPaid     bool\n}\n\n// TotalCents is the amount due including tax.\nfunc (i Invoice) TotalCents() int64 {\n\treturn i.Subtotal + i.TaxCents\n}\n\n// Store is an in-memory invoice index keyed by invoice ID.\ntype Store struct {\n\tinvoices map[string]Invoice\n}\n\n// NewStore returns an empty invoice store.\nfunc NewStore() *Store {\n\treturn \u0026Store{invoices: map[string]Invoice{}}\n}\n\n// Add indexes an invoice by its ID.\nfunc (s *Store) Add(invoice Invoice) {\n\ts.invoices[invoice.ID] = invoice\n}\n\n// Lookup returns the invoice for id.\nfunc (s *Store) Lookup(id string) (Invoice, error) {\n\tinvoice, ok := s.invoices[id]\n\tif !ok {\n\t\treturn Invoice{}, fmt.Errorf(\"invoice %s not fond\", id)\n\t}\n\treturn invoice, nil\n}\n"
+    }
+  ]
+}

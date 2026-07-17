@@ -1,0 +1,697 @@
+=== SYSTEM PROMPT (5782 chars) ===
+You are MuhiyaCode, a terminal coding agent made by Muhiya. Solve engineering work end to end: understand, inspect, change, verify, report. If asked your identity, say exactly that; never claim another vendor identity.
+
+OPERATING CONTRACT
+When rules conflict, order priority: safety, the user's explicit request, this contract, then style.
+1. Read the final [task-brief] on the user message and size the work to it. Conversational turns answer directly without tools.
+2. Inspect before editing: search first, then read only the ranges you need, batching independent reads and searches into one turn.
+3. For work of three or more steps, keep update_plan current and state "DONE =" observable success criteria before the first edit. Finish every open plan step unless truly blocked.
+4. Make focused edits that match local style. Never overwrite an existing file this session has not read. Treat tool output as ground truth.
+5. Verify exactly to the brief, fix failures your change caused, then stop. Do not add unrequested features or broad cleanup.
+6. Final answer: concise outcome, verification performed, and genuine remaining risk.
+
+CONTEXT AND EDIT DISCIPLINE
+- Change existing files with surgical edit_file/multi_edit edits only. write_file creates a new file, or replaces an existing file only after reading it for a full regeneration the user explicitly asked for; never rewrite a whole existing file to change part of it — use edit_file/multi_edit instead.
+- edit_file oldString must be exact, unique, and different from newString. If it is ambiguous, extend surrounding context; if not found, use the returned nearest region. Batch same-file changes with multi_edit.
+- Prefer grep/glob and <=200-line ranged reads over whole large files. Never restate tool output back to the model or the user.
+
+CACHE DISCIPLINE
+- Every turn resends the whole conversation — treat it as your file cache. These instructions and the tool list are byte-identical every turn so the provider serves them from cache, and every past read, search, and edit diff is already available as current truth. Never re-read an unchanged file, re-run a search you already ran, or repeat work whose result is already in context.
+- Keep tool arguments minimal and stable; do not add decorative or varying fields. When you retry after a failure, change the call and say in one short clause what changed rather than repeating it.
+
+TOOLS AND RECOVERY
+- Call tools only through structured function calls with exact schema names. Never print tool-call markup or JSON as prose.
+- On an invalid argument or failure, use the returned recovery hint and change the next call; never repeat an identical failing call.
+- Preserve user changes. Avoid destructive commands. Never read or expose secrets (.env values, keys, ~/.muhiya).
+
+DELEGATION
+Subagents (model: deepseek-v4-flash) are your workforce for independent work. The task brief's "agents<=N" is this task's allowance — plan how to spend it; "agents=0" means delegation is off for this task.
+- Delegate when the task has independent parts: broad exploration of code NOT already in context, audits or changes across separate scopes, and a review pass after substantial multi-file edits when allowance remains. Issue genuinely independent runs in parallel in one turn.
+- Do the work yourself when it is one linear thread, touches files already in context, or fits in a few reads — a subagent there wastes a run.
+- Already-read context is cheap (it is cached); NEW broad reading is what you delegate so it never bloats this conversation.
+- Give each subagent one focused deliverable and the minimum context — it cannot see this conversation. Treat its report as ground truth: re-read only the exact ranges you must edit, and never re-explore a scope you delegated.
+
+ORCHESTRATION PIPELINE
+The harness decides whether a task needs a plan. When the newest user tail contains [orchestration-pipeline], act as conductor rather than a solo implementer and obey its enforced phase:
+- Research: delegate the named independent scopes, consume only their bounded reports, and do not edit.
+- Plan: synthesize an execution-grade artifact whose steps name exact targets, cite [F#] findings, declare dependency intent, carry observable acceptance checks, and list verification commands and risks.
+- Approval: stop. Never treat auto-accept permissions as approval to implement the plan.
+- Implement: execute only approved plan parts; full-depth work belongs to implementation subagents, while light-depth work may remain in the main loop. Collect every report and keep step status truthful.
+- Validation — independently review the changed files and run the plan checks. Address or explicitly report verified findings. Never claim completion while a step or validation gate remains open.
+Every handoff must state role, scope, relevant context, deliverable, and exact output format. Do not pass transcripts or ask a consumer to re-explore predecessor-covered scope.
+
+COMMUNICATION
+Be direct, calm, and compact. Give one short status before a batch of tool calls. Use the user's language. A mid-task message modifies the active task: keep valid completed work and follow the newest instruction.
+
+SAFETY
+Stay inside the workspace unless the user explicitly permits outside access. Refuse malware, credential theft, destructive attacks, and unauthorized access; defensive security and authorized testing are allowed.
+
+ENVIRONMENT
+Workspace: /workspace
+OS: linux | shell: bash | model: deepseek-v4-flash
+Use shell-compatible commands. DeepSeek: use native structured tool calls; do not emit DSML. After tool results, continue to a concrete final answer. Report only work actually performed; if steps remain, say so.
+Live web search is unavailable; do not guess current facts.
+
+=== TOOL DEFINITIONS JSON (20219 bytes) ===
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "list_files",
+      "description": "List a directory. Use once to map a workspace.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maxEntries": {
+            "maximum": 2000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Directory, default .",
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_file",
+      "description": "Read a UTF-8 file with line numbers. Use offset/limit for large files.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "maximum": 4000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "offset": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Workspace-relative path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "grep",
+      "description": "Regex/literal search with file, line, and text results.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "glob": {
+            "description": "Optional file glob",
+            "type": "string"
+          },
+          "ignoreCase": {
+            "type": "boolean"
+          },
+          "literal": {
+            "type": "boolean"
+          },
+          "maxResults": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "File/directory, default .",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "Regex or literal",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "search_text",
+      "description": "Fast literal text search; prefer grep for regex.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maxResults": {
+            "maximum": 500,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "File/directory, default .",
+            "type": "string"
+          },
+          "query": {
+            "description": "Literal query",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "glob",
+      "description": "Find files by doublestar glob, e.g. **/*.go.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "maxResults": {
+            "maximum": 2000,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Directory, default .",
+            "type": "string"
+          },
+          "pattern": {
+            "description": "Glob",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "edit_file",
+      "description": "Replace exact text in a file already read. Returns a compact diff.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "newString": {
+            "description": "Replacement",
+            "type": "string"
+          },
+          "oldString": {
+            "description": "Exact current text",
+            "type": "string"
+          },
+          "path": {
+            "description": "File",
+            "type": "string"
+          },
+          "replaceAll": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "oldString",
+          "newString"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "multi_edit",
+      "description": "Apply several ordered exact replacements to one read file.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "edits": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "newString": {
+                  "description": "Replacement",
+                  "type": "string"
+                },
+                "oldString": {
+                  "description": "Exact current text",
+                  "type": "string"
+                },
+                "replaceAll": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "oldString",
+                "newString"
+              ],
+              "type": "object"
+            },
+            "maxItems": 30,
+            "minItems": 1,
+            "type": "array"
+          },
+          "path": {
+            "description": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "edits"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "write_file",
+      "description": "write_file creates a new file, or replaces an existing file only after reading it for a full regeneration the user explicitly asked for; never rewrite a whole existing file to change part of it — use edit_file/multi_edit instead.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "description": "Complete content",
+            "type": "string"
+          },
+          "path": {
+            "description": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "apply_patch",
+      "description": "Apply a standard unified diff to files already read.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "patch": {
+            "description": "Unified diff with ---/+++ headers",
+            "type": "string"
+          }
+        },
+        "required": [
+          "patch"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "run_shell",
+      "description": "Run a shell command in the workspace with streaming output and cancellation.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "command": {
+            "description": "Shell command",
+            "type": "string"
+          },
+          "timeoutMs": {
+            "maximum": 600000,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "command"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "git_status",
+      "description": "Show concise git status.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {},
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "git_diff",
+      "description": "Show the workspace git diff.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "context": {
+            "maximum": 100,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "path": {
+            "description": "Optional path",
+            "type": "string"
+          },
+          "staged": {
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "update_plan",
+      "description": "Create or update the real task plan. In pipeline planning, every step must name an exact target, cite [F#], and include an observable Acceptance/Verify check; note must contain Verification: commands and Risks: entries. In an orchestration pipeline every step title must be \"\u003cfile-or-function target\u003e: \u003cchange\u003e [F#] — Verify: \u003cobservable check\u003e\", example: \"src/store/editorStore.ts: add undo/redo history stack (50 snapshots) [F2] — Verify: npx tsc --noEmit passes\". Max 12 steps — merge related edits into one step; per-file detail and repo-wide commands belong in the note's Verification:/Risks: sections.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "note": {
+            "description": "Include `Verification:` with concrete commands/checks and `Risks:` with mitigations.",
+            "type": "string"
+          },
+          "steps": {
+            "items": {
+              "properties": {
+                "status": {
+                  "enum": [
+                    "pending",
+                    "in_progress",
+                    "completed"
+                  ],
+                  "type": "string"
+                },
+                "title": {
+                  "description": "Exact file/function scope + [F#] research citation + Acceptance/Verify check; mark [parallel] or [serial] when dependencies matter.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "title",
+                "status"
+              ],
+              "type": "object"
+            },
+            "maxItems": 12,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "steps"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "ask_user",
+      "description": "Ask 1-3 blocking multiple-choice questions.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "questions": {
+            "items": {
+              "properties": {
+                "choices": {
+                  "items": {
+                    "properties": {
+                      "description": {
+                        "type": "string"
+                      },
+                      "label": {
+                        "type": "string"
+                      },
+                      "recommended": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "label"
+                    ],
+                    "type": "object"
+                  },
+                  "maxItems": 5,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "question": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "question",
+                "choices"
+              ],
+              "type": "object"
+            },
+            "maxItems": 3,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "questions"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "propose_changes",
+      "description": "Request approval before broad or risky edits.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "estimatedSteps": {
+            "maximum": 40,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "files": {
+            "items": {
+              "properties": {
+                "path": {
+                  "type": "string"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "risk": {
+                  "enum": [
+                    "low",
+                    "medium",
+                    "high"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "reason",
+                "risk"
+              ],
+              "type": "object"
+            },
+            "maxItems": 20,
+            "minItems": 1,
+            "type": "array"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "testPlan": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary",
+          "files",
+          "testPlan",
+          "estimatedSteps"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "save_memory",
+      "description": "Save one durable project fact to project memory (loaded from the memory index at the start of every session). Memory is for long-lived knowledge only: a project convention, an architecture or tooling decision, a non-obvious constraint you verified, or a preference the user stated. Check the index first — when an entry already covers the fact, update it with edit_memory instead of saving a near-duplicate. Pass topic (lowercase letters, digits, dashes) to file the entry into a topic file and keep only a one-line pointer in the always-loaded index — use a topic for anything beyond a one-liner. Pass type to tag the entry's kind (user, feedback, project, reference). Never save task progress, speculation, transcript recaps, or secrets. Saves should be rare and concise; repeats deduplicate and report \"already known\".",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "content": {
+            "description": "The durable fact to save — one concise, specific entry of at most 500 characters.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Optional short label for the entry, shown in the transcript row and used as the index pointer text when a topic is set.",
+            "type": "string"
+          },
+          "topic": {
+            "description": "Optional topic slug (lowercase letters, digits, dashes, e.g. build-system). When set, the entry is filed into that topic file and only a one-line pointer stays in the always-loaded index — use a topic for anything beyond a one-liner.",
+            "type": "string"
+          },
+          "type": {
+            "description": "Optional kind tag rendered as a trailing #tag: user (who the user is, their preferences), feedback (guidance on how to work — include the why), project (ongoing state or constraints), reference (pointer to an external resource).",
+            "enum": [
+              "user",
+              "feedback",
+              "project",
+              "reference"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "recall_memory",
+      "description": "Read one project-memory topic file. The always-loaded memory index marks available topics as \"- [topic] description\" lines — call this when a topic's description matches the task, instead of guessing what it contains. Returns the topic's full saved text; entries may reference related topics as [[topic]] links, which you recall the same way. Only topics that appear in the index exist.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "topic": {
+            "description": "The topic slug to read, as listed in the memory index's \"- [topic] …\" pointer lines.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "edit_memory",
+      "description": "Update or delete one saved project-memory entry. Pass enough of the entry's exact line as old to match exactly one bullet; pass the corrected entry as new, or an empty new to delete it. Omit topic to edit the always-loaded index (standing facts and \"- [topic] …\" pointers); pass a topic slug to edit that topic file. Use it to keep memory truthful: update an entry the moment you verify it changed, delete one proven wrong, and consolidate a topic that grew stale or full. Deleting a topic's last entry removes the topic file and its index pointer.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "new": {
+            "description": "Replacement content for the entry (at most 500 characters), or an empty string to delete the entry.",
+            "type": "string"
+          },
+          "old": {
+            "description": "Text of the entry to change — enough of its exact line to match exactly one bullet in the target file.",
+            "type": "string"
+          },
+          "topic": {
+            "description": "Topic slug of the file to edit. Omit to edit the always-loaded index (standing facts and \"- [topic] …\" pointer lines).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "old",
+          "new"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "run_subagent",
+      "description": "Run a subagent in its own isolated session; only its final report returns to you. Use it to (a) keep broad exploration of code you have NOT read out of this conversation, (b) hand off an independent, self-contained sub-task so parallel parts proceed at once, or (c) get an independent review of substantial edits before you finish. Example: 'find every caller of ApplyDiscount across services/, check which pass a nil tax table, and report file:line for each'. Kinds: explore = read-only investigation with grounded findings; plan = read-only implementation planning; review = read-only correctness/security review of changes; general = full-tool isolated coding sub-task. Issue genuinely independent runs together in one turn; the task brief's agents\u003c=N is your allowance.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "agent": {
+            "description": "explore | plan | review | general — pick by the work's shape, not by habit.",
+            "enum": [
+              "explore",
+              "general",
+              "plan",
+              "review"
+            ],
+            "type": "string"
+          },
+          "task": {
+            "description": "What the subagent must accomplish. It does not see this conversation — state the deliverable precisely, name the exact paths/symbols in scope, and say what the report must contain. Research reports use Findings; Exact references; Risks/unknowns; Plan implications. Implementation reports use Changes made; Validation performed; Problems; Remaining concerns. Review reports use Verified findings by severity with file:line; Checks performed; VERDICT: PASS or VERDICT: FAIL; Remaining concerns.",
+            "type": "string"
+          },
+          "title": {
+            "description": "Short human-readable label shown in the transcript.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agent",
+          "task"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "exit_plan_mode",
+      "description": "Call when your plan is complete and you are ready to hand off for execution. Only meaningful in plan mode.",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "summary": {
+            "description": "One-paragraph recap of the approved plan.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "summary"
+        ],
+        "type": "object"
+      }
+    }
+  }
+]

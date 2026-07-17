@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/mattn/go-runewidth"
 )
 
 // Mouse interaction (005 US4). The TUI builds an immutable InteractionMap during
@@ -334,16 +333,19 @@ func (m *Model) placeInputCaret(x, y int, box rect) {
 }
 
 // cellToRuneColumn returns the rune index in s at the given terminal-cell offset,
-// snapping to the boundary before a glyph the offset lands inside.
+// snapping to the boundary before a glyph the offset lands inside. Measured by
+// grapheme cluster (feature 010 T036: the one uniseg width family), not
+// per-rune go-runewidth, so a combining-mark cluster's cell offset resolves to
+// the index right after its whole cluster rather than mid-cluster.
 func cellToRuneColumn(s string, cell int) int {
 	width, runes := 0, 0
-	for _, r := range s {
-		w := runewidth.RuneWidth(r)
+	clusters, widths := graphemeClusters(s)
+	for i, w := range widths {
 		if width+w > cell {
 			break
 		}
 		width += w
-		runes++
+		runes += len([]rune(clusters[i]))
 	}
 	return runes
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -69,6 +70,36 @@ func TestApproveShellBlocksSensitiveRootReferences(t *testing.T) {
 	}
 }
 
+// TestMemoryStoreUnreachableByFileTools (Experience Overhaul B1 T065, INV-9): the
+// per-project memory store lives under ~/.muhiya, a hard-blocked sensitive root, so
+// the model's file tools (read_file/list_files/grep) can never reach it — only
+// save_memory/recall_memory, which are engine-mediated and bypass this guard by
+// construction, read and write the store.
+func TestMemoryStoreUnreachableByFileTools(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	muhiyaHome := t.TempDir() // stands in for ~/.muhiya
+	storeFile := filepath.Join(muhiyaHome, "projects", "repo-abc12345", "memory", "auth.md")
+	if err := os.MkdirAll(filepath.Dir(storeFile), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storeFile, []byte("- a saved memory fact"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := NewGuard(root, GuardOptions{
+		Mode:           contract.PermissionAutoAccept,
+		Trust:          NewMemoryTrustStore(),
+		Approver:       ApproverFunc(func(context.Context, ApprovalRequest) (bool, error) { return true, nil }),
+		SensitiveRoots: []string{muhiyaHome},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guard.ApprovePath(ctx, ActionRead, storeFile); !errors.Is(err, ErrSensitivePath) {
+		t.Fatalf("a memory-store path must be blocked for the file tools, got %v", err)
+	}
+}
+
 func TestReadEditPatchAndCheckpoint(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
@@ -113,6 +144,142 @@ func TestReadEditPatchAndCheckpoint(t *testing.T) {
 	if !strings.Contains(string(content), "func current") {
 		t.Fatalf("latest checkpoint was not restored: %s", content)
 	}
+}
+
+// TestGrepInvalidPatternGuidance pins WI-7: an invalid RE2 pattern (a live
+// recurring model mistake — literal emoji range endpoints in a character
+// class) does not just fail, it teaches the fix. This exercises
+// Workspace.Grep directly (the same call w.execGrep/formatSearch make from
+// the grep tool) rather than only through a full orchestrator Run, so the
+// exact wording is pinned at its source.
+func TestGrepInvalidPatternGuidance(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	trust := NewMemoryTrustStore()
+	_ = trust.Trust(ctx, root)
+	w, err := New(root, Options{PermissionMode: contract.PermissionAutoAccept, Trust: trust})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = w.Grep(ctx, GrepOptions{Pattern: "[😀-🇿]"})
+	if err == nil {
+		t.Fatal("expected an error for an invalid RE2 pattern, got nil")
+	}
+	for _, want := range []string{"RE2 syntax", "\\x{", "literal=true"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("invalid-pattern error %q does not teach the fix — missing %q", err.Error(), want)
+		}
+	}
+	// A literal search over the exact same text succeeds — the escape hatch
+	// the guidance names actually works.
+	if _, err := w.Grep(ctx, GrepOptions{Pattern: "package", Literal: true}); err != nil {
+		t.Fatalf("literal=true search failed: %v", err)
+	}
+}
+
+// TestListGlobWriteAndGitToolBehaviors (feature 010 US5, T042) closes a real
+// gap the wiring-inventory pass found: list_files, glob, write_file,
+// git_status, and git_diff had schema-level golden coverage (they appear in
+// the prefix wire golden) but no test anywhere actually called
+// Workspace.List/Glob/Write/GitStatus/GitDiff — the methods
+// internal/workspace/registry.go's execList/execGlob/execWrite/
+// execGitStatus/execGitDiff wrap. This drives each directly against a real
+// (git-initialized) workspace so their advertised behavior has a real
+// exercising test, not just a schema-text golden.
+func TestListGlobWriteAndGitToolBehaviors(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available on PATH")
+	}
+	ctx := context.Background()
+	root := t.TempDir()
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init")
+	if err := os.WriteFile(filepath.Join(root, "committed.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "committed.go")
+	runGit("commit", "-m", "initial")
+	if err := os.MkdirAll(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "sub", "nested.go"), []byte("package sub\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	trust := NewMemoryTrustStore()
+	_ = trust.Trust(ctx, root)
+	w, err := New(root, Options{PermissionMode: contract.PermissionAutoAccept, Trust: trust})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// list_files: recursive listing finds the nested file.
+	listed, err := w.List(ctx, ListOptions{Path: ".", Recursive: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if !containsPath(listed.Entries, "sub/nested.go") {
+		t.Fatalf("List(recursive) did not find sub/nested.go: %+v", listed.Entries)
+	}
+
+	// glob: doublestar pattern finds files across directories.
+	matched, err := w.Glob(ctx, GlobOptions{Pattern: "**/*.go"})
+	if err != nil {
+		t.Fatalf("Glob: %v", err)
+	}
+	if len(matched) != 2 {
+		t.Fatalf("Glob(**/*.go) = %d matches, want 2: %+v", len(matched), matched)
+	}
+
+	// write_file: creates a new file (no prior read required for a new path).
+	written, err := w.Write(ctx, "created.go", "package main\n\nfunc main() {}\n")
+	if err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if !written.Created || !written.Changed {
+		t.Fatalf("Write(new file) = %+v, want Created=true Changed=true", written)
+	}
+
+	// git_status: the untracked/new files show up.
+	status, err := w.GitStatus(ctx)
+	if err != nil {
+		t.Fatalf("GitStatus: %v", err)
+	}
+	if !strings.Contains(status.Output, "created.go") || !strings.Contains(status.Output, "sub/") {
+		t.Fatalf("GitStatus output missing expected untracked entries: %q", status.Output)
+	}
+
+	// git_diff: modifying the committed file produces a diff naming it.
+	if err := os.WriteFile(filepath.Join(root, "committed.go"), []byte("package main\n\n// changed\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	diff, err := w.GitDiff(ctx, GitDiffOptions{})
+	if err != nil {
+		t.Fatalf("GitDiff: %v", err)
+	}
+	if !strings.Contains(diff.Output, "committed.go") || !strings.Contains(diff.Output, "changed") {
+		t.Fatalf("GitDiff output missing the expected change: %q", diff.Output)
+	}
+}
+
+func containsPath(entries []ListEntry, path string) bool {
+	for _, entry := range entries {
+		if entry.Path == path {
+			return true
+		}
+	}
+	return false
 }
 
 func TestShellStreamingAndCancellation(t *testing.T) {

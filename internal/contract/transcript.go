@@ -9,11 +9,15 @@ import "time"
 
 // TranscriptEvent is one durable transcript entry with its stable SQLite ID.
 type TranscriptEvent struct {
-	ID        int64     `json:"id"`
-	SessionID string    `json:"sessionId"`
-	Role      string    `json:"role"`
-	Kind      string    `json:"kind"`
-	Content   string    `json:"content"`
+	ID        int64  `json:"id"`
+	SessionID string `json:"sessionId"`
+	Role      string `json:"role"`
+	Kind      string `json:"kind"`
+	Content   string `json:"content"`
+	// Target is the tool call's display target (file/command/query), persisted so
+	// a paged-in tool row names WHAT it acted on as it did live. Empty for
+	// non-tool events and pre-column sessions.
+	Target    string    `json:"target"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 

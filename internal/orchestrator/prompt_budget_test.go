@@ -7,13 +7,19 @@ import (
 	"github.com/muhiya/muhiyacode/internal/gateway"
 )
 
-// 004 US4 (T041/FR-018): the tightened system prompt must not exceed its
-// pre-change size. promptBaselineChars is the composed DeepSeek-context prompt
-// length recorded before the 004 tightening pass (priority rule + completion
-// addendum added, re-read duplication removed). Any future growth past this
-// ceiling fails the build so the "do not bloat the prompt" contract holds. The
-// baseline is well under the ~1,900-token prompt ceiling asserted in meta_test.go.
-const promptBaselineChars = 3642
+// 004 US4 (T041/FR-018): the system prompt must not exceed its recorded
+// baseline; any growth past this ceiling fails the build so the "do not bloat
+// the prompt" contract holds. Re-baselined ONCE for feature 010 US3's recorded
+// cache epoch (contracts/instruction-system.md IS-9/IS-11): incoherence fix
+// (d) aligned the write_file permission sentence between the tool description
+// and this system prompt's CONTEXT AND EDIT DISCIPLINE section (they
+// previously stated different rules for when write_file may replace an
+// existing file) — +80 chars. This is the ONE sanctioned prefix delta for the
+// whole instruction-consolidation feature; every other moved text is
+// byte-identical (internal/instructions/dump_test.go's Prefix-bytes golden
+// pins the exact rendered result). Prior baselines: 3642 (feature 004), 4522
+// (feature 008), 5709 (feature 009).
+const promptBaselineChars = 5789
 
 func TestSystemPromptSizeWithinBudget(t *testing.T) {
 	ctx := PromptContext{

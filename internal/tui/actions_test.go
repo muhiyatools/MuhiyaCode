@@ -10,17 +10,12 @@ import (
 )
 
 func TestDisplayHonestyUnavailableAndReportedZero(t *testing.T) {
+	// The headline cache-tag honesty cases (reported zero vs. absent metrics)
+	// moved to TestHeadlineTokens in usage_display_test.go when 008 T019
+	// replaced cacheTag's read/new split with the percentage-only headline tag.
 	unavailable := formatContextReport(orchestrator.ContextReport{ContextLimit: 128000, UsageAggregate: contract.SessionUsageAggregate{Requests: 1, UnavailableRequests: 1}})
 	if !strings.Contains(unavailable, "Cache read / uncached: unavailable") || strings.Contains(unavailable, "Cache read / uncached: 0 / 0") {
 		t.Fatalf("unavailable report=%s", unavailable)
-	}
-	zero := 0
-	tag := cacheTag(contract.Usage{CacheReadTokens: &zero, CacheMissTokens: &zero, MissDerived: true})
-	if !strings.Contains(tag, "0 read") || !strings.Contains(tag, "0 new derived") || strings.Contains(tag, "unavailable") {
-		t.Fatalf("zero tag=%q", tag)
-	}
-	if tag := cacheTag(contract.Usage{}); tag != "" {
-		t.Fatalf("cache-less endpoint fabricated tag %q", tag)
 	}
 }
 

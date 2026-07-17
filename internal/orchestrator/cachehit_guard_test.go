@@ -117,6 +117,12 @@ func TestSubagentMultiTurnRunDoesNotFalselyTripGuard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// This regression isolates the subagent's own multi-turn prefix. Feature
+	// 009 normally routes a large request through research first, which would
+	// intentionally consume the scripted responses before this scenario. Start
+	// from an already-approved light implementation phase to exercise only the
+	// original guard under test.
+	engine.lifecycle = Lifecycle{State: contract.LifecycleImplementing, Depth: PipelineDepthLight, ResearchCompleted: true, PlanWritten: true, Approved: true}
 	// A "large"-class prompt so the task grants a subagent budget (agents>0).
 	if _, _, err := engine.Run(context.Background(), "Implement a new config loader module with validation across the package and verify it"); err != nil {
 		t.Fatal(err)

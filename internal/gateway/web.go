@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
 type WebSearch struct {
@@ -33,7 +34,7 @@ type WebSearchTool struct{ Searcher WebSearch }
 func (t WebSearchTool) Definition() contract.ToolDefinition {
 	return contract.ToolDefinition{Type: "function", Function: contract.FunctionDefinition{
 		Name:        "web_search",
-		Description: "Search the live web for current or niche facts and return citable sources.",
+		Description: instructions.ToolWebSearchDescription,
 		Parameters: map[string]any{
 			"type": "object", "additionalProperties": false,
 			"properties": map[string]any{

@@ -16,7 +16,7 @@ func seedEventsForPaging(t *testing.T, db *DB, ctx context.Context, contents []s
 		t.Fatalf("create session: %v", err)
 	}
 	for _, content := range contents {
-		if err := db.AddEvent(ctx, session.ID, "user", "message", content); err != nil {
+		if err := db.AddEvent(ctx, session.ID, "user", "message", content, ""); err != nil {
 			t.Fatalf("add event: %v", err)
 		}
 	}

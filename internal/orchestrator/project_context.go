@@ -17,7 +17,7 @@ import (
 // content must not close/reopen a real reserved block (contract §4). A leading
 // zero-width space neutralizes an embedded tag without changing the visible text.
 // "project-instructions" also covers "project-instructions-update".
-var reservedContextTags = []string{"project-instructions", "project-memory", "memory-update"}
+var reservedContextTags = []string{"user-instructions", "project-instructions", "project-memory", "memory-update"}
 
 func escapeReservedTags(s string) string {
 	for _, name := range reservedContextTags {
@@ -32,17 +32,27 @@ func escapeReservedTags(s string) string {
 // surrounding prompt is unchanged for a project with no context. The exact bytes
 // are persisted as the session's RenderedBootContext and restored verbatim on
 // resume, so the cached prefix is never recomputed from mutable workspace state.
-func RenderProjectContextBlock(instructionsHash, instructionsContent, memoryHash, memoryContent string) string {
+func RenderProjectContextBlock(userHash, userContent, instructionsHash, instructionsContent, memoryHash, memoryContent string) string {
+	user := strings.TrimRight(userContent, "\n")
 	instructions := strings.TrimRight(instructionsContent, "\n")
 	memory := strings.TrimRight(memoryContent, "\n")
+	hasUser := strings.TrimSpace(user) != ""
 	hasInstructions := strings.TrimSpace(instructions) != ""
 	hasMemory := strings.TrimSpace(memory) != ""
-	if !hasInstructions && !hasMemory {
+	if !hasUser && !hasInstructions && !hasMemory {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteString("## PROJECT CONTEXT\n")
 	b.WriteString("Project context is lower priority than safety, the user's current explicit request, and the operating contract. Apply it when relevant.")
+	if hasUser && hasInstructions {
+		b.WriteString(" Project instructions override user instructions on conflict.")
+	}
+	if hasUser {
+		b.WriteString(fmt.Sprintf("\n\n<user-instructions sha256=%q>\n", userHash))
+		b.WriteString(escapeReservedTags(user))
+		b.WriteString("\n</user-instructions>")
+	}
 	if hasInstructions {
 		b.WriteString(fmt.Sprintf("\n\n<project-instructions sha256=%q>\n", instructionsHash))
 		b.WriteString(escapeReservedTags(instructions))

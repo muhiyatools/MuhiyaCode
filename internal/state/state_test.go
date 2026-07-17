@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"os"
@@ -9,6 +10,45 @@ import (
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
+
+// PrunedRecords (T041) reads back the archived originals for recovery. This
+// is the read-half of a persisted write/read pair (feature 010 T038): the
+// write half, AppendPruned, is wired in production (command/runtime_build.go);
+// this read half has no production consumer today, so it lives here as the
+// round-trip proof that what gets archived can be read back byte-correctly,
+// rather than in session.go where it would be the write-only twin.
+func (s *Sessions) PrunedRecords(sessionID string) ([]contract.PrunedRecord, error) {
+	return readSessionJSONLines[contract.PrunedRecord](s.DB.paths, sessionID, "pruned.jsonl")
+}
+
+// Transcript reads back the durable per-session transcript.jsonl for
+// round-trip verification (feature 010 T038: no production reader exists —
+// the live TUI/orchestrator paths reconstruct history from the SQLite event
+// log, not this file — so this stays test-only alongside PrunedRecords).
+func (s *Sessions) Transcript(sessionID string) ([]map[string]any, error) {
+	dir, err := SessionDir(s.DB.paths, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	file, err := os.Open(filepath.Join(dir, "transcript.jsonl"))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var result []map[string]any
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
+	for scanner.Scan() {
+		var value map[string]any
+		if json.Unmarshal(scanner.Bytes(), &value) == nil {
+			result = append(result, value)
+		}
+	}
+	return result, scanner.Err()
+}
 
 func TestLegacySettingsAndSecrets(t *testing.T) {
 	paths := testPaths(t)
@@ -83,7 +123,7 @@ func TestDatabaseCompatibilityAndSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.AddEvent(ctx, session.ID, "user", "message", "hello"); err != nil {
+	if err := db.AddEvent(ctx, session.ID, "user", "message", "hello", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := sessions.AppendTranscript(session.ID, map[string]any{"role": "tool", "content": "Bearer abcdefghijklmnop"}); err != nil {

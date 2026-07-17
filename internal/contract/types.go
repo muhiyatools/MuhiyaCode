@@ -68,7 +68,6 @@ type Settings struct {
 	} `json:"rtl"`
 	UI struct {
 		BorderMode string `json:"borderMode"`
-		Density    string `json:"density"`
 	} `json:"ui"`
 }
 
@@ -85,9 +84,14 @@ type Session struct {
 }
 
 type Event struct {
-	Role      string
-	Type      string
-	Content   string
+	Role    string
+	Type    string
+	Content string
+	// Target is the tool call's display target (file/command/query) for tool
+	// events, persisted so a resumed transcript row names WHAT the call acted on
+	// exactly as it did live. Empty for non-tool events and for tool events from
+	// sessions predating the events.target column.
+	Target    string
 	CreatedAt time.Time
 }
 
@@ -101,11 +105,12 @@ const (
 )
 
 type Message struct {
-	Role             Role       `json:"role"`
-	Content          string     `json:"content"`
-	ToolCallID       string     `json:"tool_call_id,omitempty"`
-	ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-	ReasoningContent *string    `json:"reasoning_content,omitempty"`
+	Role             Role            `json:"role"`
+	Content          string          `json:"content"`
+	ToolCallID       string          `json:"tool_call_id,omitempty"`
+	ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
+	ReasoningContent *string         `json:"reasoning_content,omitempty"`
+	ReasoningDetails json.RawMessage `json:"reasoning_details,omitempty"`
 }
 
 type ToolCall struct {
@@ -246,10 +251,11 @@ type ChatRequest struct {
 }
 
 type ChatResponse struct {
-	Content   string
-	Reasoning string
-	ToolCalls []ToolCall
-	Usage     Usage
+	Content          string
+	Reasoning        string
+	ReasoningDetails json.RawMessage
+	ToolCalls        []ToolCall
+	Usage            Usage
 }
 
 type Provider interface {
@@ -307,6 +313,81 @@ func (p PlanPhase) IsTerminal() bool {
 	return p == PlanPhaseFinished || p == PlanPhaseSuperseded || p == PlanPhaseDiscarded
 }
 
+// PipelinePhase is the harness-enforced orchestration phase for one task. It
+// intentionally stays distinct from PlanPhase: the pipeline drives the
+// existing plan lifecycle while also sequencing research and validation.
+// The empty value is legacy-compatible and is interpreted as direct work.
+type PipelinePhase string
+
+const (
+	PipelinePhaseDirect    PipelinePhase = "direct"
+	PipelinePhaseResearch  PipelinePhase = "research"
+	PipelinePhasePlan      PipelinePhase = "plan"
+	PipelinePhaseApprove   PipelinePhase = "approve"
+	PipelinePhaseImplement PipelinePhase = "implement"
+	PipelinePhaseValidate  PipelinePhase = "validate"
+	PipelinePhaseDone      PipelinePhase = "done"
+)
+
+// LifecycleState is the feature-010 unified task lifecycle: the SINGLE source
+// of truth that replaces the legacy plan-mode flags (planMode/pendingPlan) and
+// the two phase enums (PlanPhase drives affordances, PipelinePhase drives
+// orchestration). The 11 states are the disjoint union of both machines; every
+// consumer reads them through the pure predicates below rather than comparing
+// raw states, so the two-truth desync class becomes unrepresentable.
+// PlanPhase/PipelinePhase remain ONLY as legacy sidecar-migration inputs.
+type LifecycleState string
+
+const (
+	LifecycleDirect       LifecycleState = ""                  // no plan; direct work (also the zero value / legacy-absent)
+	LifecycleResearch     LifecycleState = "research"          // pipeline research; read-only
+	LifecyclePlanning     LifecycleState = "planning"          // plan being written; read-only
+	LifecycleApproval     LifecycleState = "awaiting-approval" // plan written; awaiting the user's go-ahead; read-only
+	LifecyclePending      LifecycleState = "pending"           // saved for later; a bare "proceed" executes it
+	LifecycleImplementing LifecycleState = "implementing"      // executing the approved plan's steps
+	LifecycleValidating   LifecycleState = "validating"        // reviewing changes before completion
+	LifecycleInterrupted  LifecycleState = "interrupted"       // execution ended with open steps; resumable
+	LifecycleFinished     LifecycleState = "finished"          // all steps done; terminal
+	LifecycleSuperseded   LifecycleState = "superseded"        // replaced by a newer plan; terminal
+	LifecycleDiscarded    LifecycleState = "discarded"         // explicitly cleared by the user; terminal
+)
+
+// IsReadOnly reports whether the state blocks every mutating tool — the
+// research/planning/approval investigation window. It is identical to
+// BlocksMutation by design: the feature-009 audit proved the two separate
+// mutation gates guarded the same set, so they collapse into one predicate.
+func (s LifecycleState) IsReadOnly() bool {
+	return s == LifecycleResearch || s == LifecyclePlanning || s == LifecycleApproval
+}
+
+// BlocksMutation is the gate predicate; identical set to IsReadOnly.
+func (s LifecycleState) BlocksMutation() bool { return s.IsReadOnly() }
+
+// InvitesProceed reports whether a bare "proceed" should execute a saved plan.
+func (s LifecycleState) InvitesProceed() bool {
+	return s == LifecyclePending || s == LifecycleInterrupted
+}
+
+// IsApprovalPause reports the one state where the approval flow gate is shown.
+func (s LifecycleState) IsApprovalPause() bool { return s == LifecycleApproval }
+
+// IsPipelineResumable reports whether a restart resumes an in-flight pipeline
+// phase (as opposed to a proceed-hint state, which resumes via InvitesProceed).
+func (s LifecycleState) IsPipelineResumable() bool {
+	return s == LifecycleResearch || s == LifecyclePlanning ||
+		s == LifecycleImplementing || s == LifecycleValidating
+}
+
+// IsTerminal reports an end state a plan never leaves except by starting a
+// fresh lifecycle (a new plan re-enters planning/research).
+func (s LifecycleState) IsTerminal() bool {
+	return s == LifecycleFinished || s == LifecycleSuperseded || s == LifecycleDiscarded
+}
+
+// IsActive reports whether the task is inside the orchestration pipeline (any
+// non-direct state) — replaces the old pipelineActive() flag check.
+func (s LifecycleState) IsActive() bool { return s != LifecycleDirect }
+
 // GoalSnapshot (G4) is the persisted shape of a goal stored in the per-session
 // goal.json sidecar next to the session files. Only goals with Status "active"
 // are restored on resume; completed/blocked goals are not persisted (the G2
@@ -334,6 +415,19 @@ type PlanStateSnapshot struct {
 	// PendingPlan stay authoritative for their existing consumers and remain
 	// consistent with Phase.
 	Phase PlanPhase `json:"phase,omitempty"`
+	// PipelinePhase is an additive feature-009 sidecar field. Legacy snapshots
+	// omit it and therefore resume through the existing direct/plan lifecycle.
+	PipelinePhase PipelinePhase `json:"pipeline_phase,omitempty"`
+	// PipelineDepth persists alongside PipelinePhase so a light pipeline
+	// resumes light. Additive: legacy snapshots omit it and restore as full
+	// (the pre-existing behavior).
+	PipelineDepth string `json:"pipeline_depth,omitempty"`
+	// State (feature 010) is the unified lifecycle — the canonical field going
+	// forward. When present it is authoritative and the migration loader
+	// ignores the legacy fields above; when absent (older sidecars) the loader
+	// derives it from PipelinePhase/Phase/PlanMode/PendingPlan. Depth rides
+	// alongside via the existing PipelineDepth field.
+	State LifecycleState `json:"state,omitempty"`
 }
 
 type QuestionChoice struct {
@@ -359,21 +453,23 @@ type Answer struct {
 var ErrPlanModeExited = errors.New("plan ready: awaiting user choice")
 
 type AgentEvent struct {
-	Kind      string
-	RunID     string
-	Agent     string
-	Title     string
-	Task      string
+	Kind  string
+	RunID string
+	Agent string
+	Phase string
+	Role  string
+	Title string
+	Task  string
+	// Handoff carries the rendered launch contract for audit consumers (the
+	// delegation benchmark's SC-004 handoff audit); the TUI does not render it.
+	Handoff   string
 	Model     string
-	CallID    string
 	Tool      string
 	Arguments string
 	Output    string
 	Content   string
 	Status    string
 	Report    string
-	Turns     int
-	ToolCalls int
 	Usage     Usage
 }
 
@@ -440,6 +536,15 @@ type TaskStats struct {
 	// CreditsEstimated is true when any priced member of the task's record range
 	// was cost-estimated; the summary prefixes credits with "~".
 	CreditsEstimated bool `json:"creditsEstimated,omitempty"`
+	// LinesAdded/LinesRemoved sum the diff adds/removes of applied (successful)
+	// file-changing calls in this task, counted by the shared contract.DiffCounts
+	// parser (feature 008 UD-6) — the same counts the TUI shows per tool row.
+	LinesAdded   int `json:"linesAdded,omitempty"`
+	LinesRemoved int `json:"linesRemoved,omitempty"`
+	// HarnessEvents (Stability Overhaul T013) is the count of user-visible harness
+	// friction (gate/tool/ui classes) recorded during THIS task. >0 appends a
+	// dimmed "⚠ N harness" marker to the task summary; 0 adds no noise.
+	HarnessEvents int `json:"harnessEvents,omitempty"`
 }
 
 // StopCause values for TaskStats.StopCause (003, FR-013a).

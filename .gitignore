@@ -14,3 +14,8 @@ Thumbs.db
 .idea/
 .vscode/
 tmp/
+
+# npm wrapper artifacts
+/node_modules/
+/build/
+.env*

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
@@ -82,6 +83,27 @@ func TestDeepSeekSettledReplayIsIndependentOfLiveEffort(t *testing.T) {
 	}
 	if string(low) != string(high) {
 		t.Fatalf("effort rewrote settled bytes\nlow: %s\nhigh: %s", low, high)
+	}
+}
+
+func TestMiniMaxSettledReplayPrefixIsStableAcrossTurns(t *testing.T) {
+	details := json.RawMessage(`[{"type":"text","text":"settled"}]`)
+	settled := []contract.Message{
+		{Role: contract.RoleSystem, Content: "system"},
+		{Role: contract.RoleUser, Content: "inspect"},
+		{Role: contract.RoleAssistant, ToolCalls: []contract.ToolCall{contract.NewToolCall("call-1", "read_file", `{}`)}, ReasoningDetails: details},
+		{Role: contract.RoleTool, ToolCallID: "call-1", Content: "result"},
+	}
+	profile := ResolveModelProfile("MiniMax-M3")
+	first := replayMessages(settled, profile, contract.ReasoningLow)
+	second := replayMessages(append(append([]contract.Message(nil), settled...), contract.Message{Role: contract.RoleUser, Content: "continue"}), profile, contract.ReasoningMax)
+	firstBytes, _ := json.Marshal(first)
+	secondPrefixBytes, _ := json.Marshal(second[:len(first)])
+	if string(firstBytes) != string(secondPrefixBytes) {
+		t.Fatalf("MiniMax settled prefix changed across turns\nfirst: %s\nnext:  %s", firstBytes, secondPrefixBytes)
+	}
+	if !strings.Contains(string(firstBytes), `"reasoning_details":[{"type":"text","text":"settled"}]`) {
+		t.Fatalf("MiniMax stable prefix dropped reasoning_details: %s", firstBytes)
 	}
 }
 

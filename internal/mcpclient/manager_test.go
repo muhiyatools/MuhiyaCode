@@ -18,6 +18,22 @@ import (
 
 const mcpTestServerEnvironment = "MUHIYA_RUN_MCP_TEST_SERVER"
 
+// connectionForTest returns the live connection pointer for `serverName` so
+// tests can prove that EnsureLive/replay paths do not merge or replace an
+// existing connection. Not intended for production callers — lives here
+// (feature 010 T038) rather than in manager.go since every caller is a test
+// in this same file.
+func (m *Manager) connectionForTest(serverName string) *connection {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, connection := range m.connections {
+		if connection.server.Name == serverName {
+			return connection
+		}
+	}
+	return nil
+}
+
 type greetArguments struct {
 	Name string `json:"name"`
 }

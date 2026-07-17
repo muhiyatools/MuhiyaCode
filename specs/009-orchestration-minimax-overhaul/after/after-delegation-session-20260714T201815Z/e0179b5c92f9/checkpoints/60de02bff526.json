@@ -1,0 +1,12 @@
+{
+  "id": "60de02bff526",
+  "description": "before editing notify/email.go",
+  "createdAt": "2026-07-14T20:22:04.3403842Z",
+  "files": [
+    {
+      "path": "C:\\Users\\mydwa\\AppData\\Local\\Temp\\delegationbench-workspace-933045577\\notify\\email.go",
+      "existed": true,
+      "content": "// Package notify delivers order notifications to customers.\npackage notify\n\nimport \"fmt\"\n\n// EmailSender delivers a rendered message to one recipient address.\ntype EmailSender interface {\n\tSend(address, subject, body string) error\n}\n\n// SendReceipt emails an order receipt and wraps delivery failures.\nfunc SendReceipt(sender EmailSender, address, orderID string) error {\n\tsubject := \"Your OrderDesk receipt for \" + orderID\n\tbody := \"Thanks for your order \" + orderID + \".\"\n\tif err := sender.Send(address, subject, body); err != nil {\n\t\treturn fmt.Errorf(\"faild to send email to %s: %w\", address, err)\n\t}\n\treturn nil\n}\n"
+    }
+  ]
+}

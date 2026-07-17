@@ -122,3 +122,107 @@ func TestInspectionLoadsTypeScriptV3Fixture(t *testing.T) {
 		t.Fatalf("TypeScript fixture did not deduplicate: %+v", ledger.Snapshot())
 	}
 }
+
+// The read-only shell gate is permissive-by-default (a denylist): it allows any
+// inspection/build/test command in any shell syntax (cd anywhere, &&, ||, ;, &,
+// pipes, substitution) and refuses ONLY genuinely destructive operations — a
+// file-mutating command word, an in-place/writing flag, or a redirect that writes
+// a file. This keeps a read-only agent from ever seeing a false "blocked" on a
+// harmless command while still stopping an rm/overwrite.
+func TestIsReadOnlyShellAllowsChainedReadOnlyCommands(t *testing.T) {
+	allowed := []string{
+		`cd "F:\x" && grep -rn "aria-" --include=*.tsx src/ | head -30`,
+		`cd F:\proj && grep -rn pat src/`,
+		`grep -c hex src/App.tsx`,
+		`git log --oneline -10 2>/dev/null || echo none`,
+		`git status --short`,
+		`git grep -n TODO -- internal/`,
+		`git ls-files internal | wc -l`,
+		`go test ./internal/orchestrator`,
+		`go vet ./... && go test ./... 2>/dev/null`,
+		`go env GOOS; go version`,
+		`npm test`,
+		`npx tsc --noEmit`,
+		`rg "IsReadOnlyShell" internal | sort | uniq -c`,
+		`find . -name "*.go" | head -5`,
+		`cat internal/orchestrator/engine.go | tail -20`,
+		`ls -la internal/orchestrator`,
+		`grep -rn "rm -rf" docs/`, // "rm -rf" is quoted data, not a command
+		// Windows stderr silencer, merge-stderr, and the broadened build/test/inspect
+		// tools a research subagent runs on a real project.
+		`cd F:\Programs\Warp && dir /s /b 2>nul | head -50`,
+		`dir /s /b *.go 2>nul && dir /s /b go.mod 2>nul`,
+		`npm run build 2>&1 | head -40`,
+		`npx eslint . 2>nul`,
+		`go build ./...`,
+		`python -m pytest -q`,
+		`cargo check 2>&1 | tail`,
+		`pnpm test && yarn lint`,
+		// Exact live failures from the screenshots: `cd <path> ;` (semicolon, not
+		// &&), Windows `&` command separator, `go env`/`go version`, and the
+		// PowerShell null device `2>$null`. The old allowlist parser blocked them;
+		// the denylist allows every one.
+		`cd "F:\Programs\Warp" ; go env GOROOT GOPATH GOMOD`,
+		`dir "F:\Programs\Warp\cmd" 2>nul & dir "F:\Programs\Warp\taskflow" 2>nul & where go`,
+		`cd "F:\Programs\Warp" ; go version`,
+		`dir . /s /b 2>$null`,
+		`Get-ChildItem -Recurse 2>$null | Select-Object -First 50`,
+		`go build ./... 2>$null`,
+		// Harmless commands the old allowlist walled off but which mutate nothing:
+		// a bare cd, an input (read) redirect, and a read-only command substitution.
+		`cd src`,
+		`sort < input.txt`,
+		"cat `ls`",
+		`git fetch --dry-run`, // fetch does not touch the working tree
+		// D1 fix (T031): a destructive word as an ARGUMENT is harmless — only
+		// command-position words are commands.
+		`grep format main.go`,
+		`rg kill internal/ | head -5`,
+		`echo copy`,
+		`git log --grep "rm -rf"`,
+		`findstr /s format *.go`,
+		`cat kill.txt; grep mv notes.md`,
+	}
+	for _, command := range allowed {
+		if !IsReadOnlyShell(command) {
+			t.Errorf("read-only command was walled off: %q", command)
+		}
+	}
+}
+
+func TestIsReadOnlyShellBlocksWritesRedirectsAndSubstitution(t *testing.T) {
+	blocked := []string{
+		``,
+		`cd x && rm -rf src`,
+		`grep a > out.txt`,
+		`cat a >> b`,
+		`Remove-Item important.go`,
+		`go test ./...; Remove-Item important.go`,
+		`git checkout -- .`,
+		`git add -A && git commit -m x`,
+		`git commit -m "wip"`,
+		`git reset --hard`,
+		`git log $(rm -rf x)`, // destructive word inside a substitution is still caught
+		"echo `rm -rf x`",     // destructive word inside backticks is still caught
+		`find . -name "*.go" -delete`,
+		`find . -name "*.go" -exec rm {} +`,
+		`cat a | tee b`,
+		`echo hi | sed -i s/a/b/ file.go`,
+		`grep pat src & rm x`,
+		`git diff --output=evil.txt`,
+		`npx tsc --noEmit --fix`, // --fix is a mutating flag
+		`cp secrets.txt backup.txt`,
+		`mkdir newdir && cd newdir`,
+		`dd if=/dev/zero of=disk.img`,
+		// D1 fix (T031): the SAME words at command position are still blocked.
+		`format c:`,
+		`kill -9 123`,
+		`git status; rm x`,
+		`dir | rm x`,
+	}
+	for _, command := range blocked {
+		if IsReadOnlyShell(command) {
+			t.Errorf("mutating or unsafe command escaped the gate: %q", command)
+		}
+	}
+}

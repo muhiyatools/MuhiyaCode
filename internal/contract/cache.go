@@ -51,6 +51,11 @@ type UsageRecord struct {
 	// LogID is the gateway request_logs.id from muhiya_log.log_id, for the
 	// benchmark credits cross-check. Empty when the chunk was absent.
 	LogID string `json:"log_id,omitempty"`
+	// DurationMS is the wall-clock time of the provider request (start of the call
+	// to end of the stream), for the session usage panel's API-time figure
+	// (feature 008 UD-6). nil = unknown (older persisted records, pre-send
+	// failures). Nullable JSON keeps usage.jsonl backward/forward compatible.
+	DurationMS *int64 `json:"duration_ms,omitempty"`
 }
 
 // HitRate returns a provider-derived rate without clamping or smoothing.
@@ -116,6 +121,77 @@ func SumCreditsUSD(records []UsageRecord) CreditsResult {
 	}
 	result.USD = &sum
 	return result
+}
+
+// ModelUsageRow is one model's aggregated usage across all streams of a session
+// (feature 008 UD-7): the per-model breakdown behind the usage panel. Cost follows
+// the same member-set honesty rules as SumCreditsUSD, applied per model: a
+// priced-eligible record without a cost collapses that MODEL's cost to nil
+// (unavailable), never a partial sum.
+type ModelUsageRow struct {
+	Model          string
+	Requests       int
+	UncachedIn     int  // Σ cache-miss tokens (provider-reported); the billed input
+	Output         int  // Σ completion tokens
+	CacheRead      int  // Σ cache-read tokens
+	CacheAvailable bool // true only when every provider-usage member reports read + miss
+	CostUSD        *float64
+	Estimated      int // count of cost-estimated requests in this row
+}
+
+// AggregateUsageByModel groups records by their recorded model ID, in first-seen
+// order (deterministic for a given record log). Records without provider usage are
+// skipped entirely (same exclusion as credits). The caller renders a Total row by
+// summing; costs sum only when every row has one.
+func AggregateUsageByModel(records []UsageRecord) []ModelUsageRow {
+	index := map[string]int{}
+	var rows []ModelUsageRow
+	costNil := map[string]bool{}
+	cacheUnavailable := map[string]bool{}
+	for _, record := range records {
+		if !record.hasProviderUsage() {
+			continue
+		}
+		i, ok := index[record.Model]
+		if !ok {
+			i = len(rows)
+			index[record.Model] = i
+			rows = append(rows, ModelUsageRow{Model: record.Model})
+		}
+		row := &rows[i]
+		row.Requests++
+		if record.CacheMissTokens != nil {
+			row.UncachedIn += *record.CacheMissTokens
+		}
+		if record.CacheReadTokens == nil || record.CacheMissTokens == nil {
+			cacheUnavailable[record.Model] = true
+		}
+		if record.CompletionTokens != nil {
+			row.Output += *record.CompletionTokens
+		}
+		if record.CacheReadTokens != nil {
+			row.CacheRead += *record.CacheReadTokens
+		}
+		if record.CostEstimated {
+			row.Estimated++
+		}
+		switch {
+		case record.CostUSD == nil:
+			costNil[record.Model] = true
+		case !costNil[record.Model]:
+			if row.CostUSD == nil {
+				row.CostUSD = new(float64)
+			}
+			*row.CostUSD += *record.CostUSD
+		}
+	}
+	for i := range rows {
+		if costNil[rows[i].Model] {
+			rows[i].CostUSD = nil
+		}
+		rows[i].CacheAvailable = !cacheUnavailable[rows[i].Model]
+	}
+	return rows
 }
 
 // SessionUsageAggregate is derived from UsageRecords on every session load.
@@ -243,8 +319,23 @@ const (
 	InvalidationModelSwitch   InvalidationCause = "model-switch"
 	InvalidationPromptRebuild InvalidationCause = "prompt-rebuild"
 	InvalidationUserCompact   InvalidationCause = "user-compact"
-	InvalidationProbeChange   InvalidationCause = "probe-change"
 )
+
+// PrefixShapeSnapshot is the per-session prefix_shape.json sidecar (Ultimate Polish
+// C3): the session-stable prefix components (system message, tool set, model) hashed
+// after the first request, restored on resume so the first request of the resumed
+// session can attribute a skills/tools/model change instead of cold-starting
+// silently. Only session-stable regions are stored — history is not (it legitimately
+// grows and its replay determinism is guarded separately).
+type PrefixShapeSnapshot struct {
+	Version    int    `json:"version"`
+	SystemHash string `json:"systemHash"`
+	ToolsHash  string `json:"toolsHash"`
+	ModelID    string `json:"modelId"`
+}
+
+// PrefixShapeSnapshotVersion is the current prefix_shape.json schema version.
+const PrefixShapeSnapshotVersion = 1
 
 type InvalidationTrigger string
 
@@ -264,4 +355,28 @@ type InvalidationEvent struct {
 	Scope      string              `json:"scope"`
 	Pressure   *float64            `json:"pressure"`
 	RequestSeq int                 `json:"request_seq"`
+}
+
+// HarnessEventClass groups harness-CAUSED friction events for telemetry (Stability
+// Overhaul T010) — a gate rejection, a tool failure, a provider error/retry, a
+// bounded recovery/breaker, or a UI-layer anomaly. This is the harness's own
+// self-report of where it made the user's work harder, so those events stop being
+// discovered only via screenshots.
+type HarnessEventClass string
+
+const (
+	HarnessGate     HarnessEventClass = "gate"     // a harness gate rejected a call
+	HarnessTool     HarnessEventClass = "tool"     // a tool call failed
+	HarnessProvider HarnessEventClass = "provider" // provider/network error or retry
+	HarnessRecovery HarnessEventClass = "recovery" // a bounded fallback / breaker fired
+	HarnessUI       HarnessEventClass = "ui"       // a UI-layer anomaly (e.g. recovered panic)
+)
+
+// HarnessEvent is one recorded friction event. Detail is already redacted and
+// length-bounded by the recorder.
+type HarnessEvent struct {
+	At     time.Time         `json:"at"`
+	Class  HarnessEventClass `json:"class"`
+	Code   string            `json:"code"`
+	Detail string            `json:"detail"`
 }

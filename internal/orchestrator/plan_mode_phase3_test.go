@@ -21,7 +21,7 @@ func TestPlanModeBlocksGeneralSubagent(t *testing.T) {
 		Provider: provider, Registry: NewRegistry(&recordingTool{name: "run_subagent"}),
 		Prompt: PromptContext{},
 	})
-	engine.SetPlanMode(true)
+	engine.SetLifecycleState(contract.LifecyclePlanning)
 	if _, _, err := engine.Run(context.Background(), "plan it"); err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +55,7 @@ func TestPlanModeAllowsReadOnlyShell(t *testing.T) {
 		Provider: provider, Registry: NewRegistry(shell),
 		Prompt: PromptContext{},
 	})
-	engine.SetPlanMode(true)
+	engine.SetLifecycleState(contract.LifecyclePlanning)
 	if _, _, err := engine.Run(context.Background(), "plan it"); err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestPlanModeBlocksMutatingShellAndEscalates(t *testing.T) {
 		Provider: provider, Registry: NewRegistry(shell, &recordingTool{name: "edit_file"}, &recordingTool{name: "write_file"}),
 		Prompt: PromptContext{},
 	})
-	engine.SetPlanMode(true)
+	engine.SetLifecycleState(contract.LifecyclePlanning)
 	if _, _, err := engine.Run(context.Background(), "plan it"); err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestExitPlanModeFinalizesPlanTask(t *testing.T) {
 		Provider: provider, Registry: NewRegistry(),
 		Prompt: PromptContext{},
 	})
-	engine.SetPlanMode(true)
+	engine.SetLifecycleState(contract.LifecyclePlanning)
 	if !engine.PlanMode() {
 		t.Fatal("plan mode did not engage")
 	}
@@ -176,7 +176,11 @@ func TestPendingPlanContinuationInjectsPlan(t *testing.T) {
 
 // TestPlanStateRestoredOnRestart (P2 step 6) verifies that the plan-mode and
 // pending-plan flags survive a restart via InitialPlanState, with a one-shot
-// TUI notice for each.
+// TUI notice for each. Feature 010: the engine's restoreLifecycle only reads
+// the canonical (state, depth) pair, so a legacy (pre-010) sidecar shape is
+// resolved through state.MigrateLifecycle first — exactly the production
+// restore path in internal/command/application.go — via the migratedPlanState
+// helper (plan_lifecycle_test.go).
 func TestPlanStateRestoredOnRestart(t *testing.T) {
 	settings := engineSettings()
 	// planMode on → restored + notice.
@@ -185,7 +189,7 @@ func TestPlanStateRestoredOnRestart(t *testing.T) {
 		Settings: &settings, Session: contract.Session{ID: "p2-restore", WorkspacePath: t.TempDir()},
 		Provider: &scriptedProvider{responses: []contract.ChatResponse{{Content: "ok"}}},
 		Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{},
-		InitialPlanState: &planModeOn,
+		InitialPlanState: migratedPlanState(planModeOn, contract.Plan{}),
 	})
 	if !engine.PlanMode() {
 		t.Fatal("plan mode not restored from sidecar")
@@ -200,7 +204,7 @@ func TestPlanStateRestoredOnRestart(t *testing.T) {
 		Settings: &settings, Session: contract.Session{ID: "p2-restore-pending", WorkspacePath: t.TempDir()},
 		Provider: &scriptedProvider{responses: []contract.ChatResponse{{Content: "ok"}}},
 		Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{},
-		InitialPlanState: &pending,
+		InitialPlanState: migratedPlanState(pending, contract.Plan{}),
 	})
 	if !engine2.PendingPlan() {
 		t.Fatal("pending plan not restored from sidecar")
@@ -228,7 +232,7 @@ func TestExitPlanModeSetsPlanReadyAndPendingPlan(t *testing.T) {
 		Settings: &settings, Session: contract.Session{ID: "p2-ready", WorkspacePath: t.TempDir()},
 		Provider: provider, Registry: NewRegistry(), Prompt: PromptContext{},
 	})
-	engine.SetPlanMode(true)
+	engine.SetLifecycleState(contract.LifecyclePlanning)
 	_, stats, err := engine.Run(context.Background(), "plan it")
 	if err != nil {
 		t.Fatal(err)
@@ -261,7 +265,7 @@ func TestExitPlanModeInBatchPairsAllToolResults(t *testing.T) {
 		Settings: &settings, Session: contract.Session{ID: "b2b", WorkspacePath: t.TempDir()},
 		Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}, &recordingTool{name: "write_file"}), Prompt: PromptContext{},
 	})
-	engine.SetPlanMode(true)
+	engine.SetLifecycleState(contract.LifecyclePlanning)
 	_, stats, err := engine.Run(context.Background(), "plan it")
 	if err != nil {
 		t.Fatal(err)
@@ -330,7 +334,7 @@ func TestFreeTextPlanFinishSignalsPlanReady(t *testing.T) {
 		Settings: &settings, Session: contract.Session{ID: "p2-freetext", WorkspacePath: t.TempDir()},
 		Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{},
 	})
-	engine.SetPlanMode(true)
+	engine.SetLifecycleState(contract.LifecyclePlanning)
 	// 004 US2: a freshly proposed plan has at least one incomplete step (planning
 	// does not complete steps — execution does). This also satisfies the new
 	// plan-ready rule that requires an incomplete step, closing the stale-hint bug.

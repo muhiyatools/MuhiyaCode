@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
 type functionTool struct {
@@ -22,18 +23,18 @@ func (t functionTool) Execute(ctx context.Context, input json.RawMessage) (strin
 
 func (w *Workspace) Tools() []contract.Tool {
 	return []contract.Tool{
-		w.tool("list_files", "List a directory. Use once to map a workspace.", object(map[string]any{"path": stringProp("Directory, default ."), "recursive": boolProp(), "maxEntries": intProp(1, 2000)}, nil), w.execList),
-		w.tool("read_file", "Read a UTF-8 file with line numbers. Use offset/limit for large files.", object(map[string]any{"path": stringProp("Workspace-relative path"), "offset": intProp(1, 0), "limit": intProp(1, MaxReadLines)}, []string{"path"}), w.execRead),
-		w.tool("grep", "Regex/literal search with file, line, and text results.", object(map[string]any{"pattern": stringProp("Regex or literal"), "path": stringProp("File/directory, default ."), "glob": stringProp("Optional file glob"), "ignoreCase": boolProp(), "literal": boolProp(), "maxResults": intProp(1, 500)}, []string{"pattern"}), w.execGrep),
-		w.tool("search_text", "Fast literal text search; prefer grep for regex.", object(map[string]any{"query": stringProp("Literal query"), "path": stringProp("File/directory, default ."), "maxResults": intProp(1, 500)}, []string{"query"}), w.execSearch),
-		w.tool("glob", "Find files by doublestar glob, e.g. **/*.go.", object(map[string]any{"pattern": stringProp("Glob"), "path": stringProp("Directory, default ."), "maxResults": intProp(1, 2000)}, []string{"pattern"}), w.execGlob),
-		w.tool("edit_file", "Replace exact text in a file already read. Returns a compact diff.", object(map[string]any{"path": stringProp("File"), "oldString": stringProp("Exact current text"), "newString": stringProp("Replacement"), "replaceAll": boolProp()}, []string{"path", "oldString", "newString"}), w.execEdit),
-		w.tool("multi_edit", "Apply several ordered exact replacements to one read file.", object(map[string]any{"path": stringProp("File"), "edits": map[string]any{"type": "array", "minItems": 1, "maxItems": 30, "items": object(map[string]any{"oldString": stringProp("Exact current text"), "newString": stringProp("Replacement"), "replaceAll": boolProp()}, []string{"oldString", "newString"})}}, []string{"path", "edits"}), w.execMultiEdit),
-		w.tool("write_file", "Create a UTF-8 file, or replace an existing file only after reading it.", object(map[string]any{"path": stringProp("File"), "content": stringProp("Complete content")}, []string{"path", "content"}), w.execWrite),
-		w.tool("apply_patch", "Apply a standard unified diff to files already read.", object(map[string]any{"patch": stringProp("Unified diff with ---/+++ headers")}, []string{"patch"}), w.execPatch),
-		w.tool("run_shell", "Run a shell command in the workspace with streaming output and cancellation.", object(map[string]any{"command": stringProp("Shell command"), "timeoutMs": intProp(1, 600000)}, []string{"command"}), w.execShell),
-		w.tool("git_status", "Show concise git status.", object(map[string]any{}, nil), w.execGitStatus),
-		w.tool("git_diff", "Show the workspace git diff.", object(map[string]any{"staged": boolProp(), "path": stringProp("Optional path"), "context": intProp(1, 100)}, nil), w.execGitDiff),
+		w.tool("list_files", instructions.ToolListFilesDescription, object(map[string]any{"path": stringProp("Directory, default ."), "recursive": boolProp(), "maxEntries": intProp(1, 2000)}, nil), w.execList),
+		w.tool("read_file", instructions.ToolReadFileDescription, object(map[string]any{"path": stringProp("Workspace-relative path"), "offset": intProp(1, 0), "limit": intProp(1, MaxReadLines)}, []string{"path"}), w.execRead),
+		w.tool("grep", instructions.ToolGrepDescription, object(map[string]any{"pattern": stringProp("Regex or literal"), "path": stringProp("File/directory, default ."), "glob": stringProp("Optional file glob"), "ignoreCase": boolProp(), "literal": boolProp(), "maxResults": intProp(1, 500)}, []string{"pattern"}), w.execGrep),
+		w.tool("search_text", instructions.ToolSearchTextDescription, object(map[string]any{"query": stringProp("Literal query"), "path": stringProp("File/directory, default ."), "maxResults": intProp(1, 500)}, []string{"query"}), w.execSearch),
+		w.tool("glob", instructions.ToolGlobDescription, object(map[string]any{"pattern": stringProp("Glob"), "path": stringProp("Directory, default ."), "maxResults": intProp(1, 2000)}, []string{"pattern"}), w.execGlob),
+		w.tool("edit_file", instructions.ToolEditFileDescription, object(map[string]any{"path": stringProp("File"), "oldString": stringProp("Exact current text"), "newString": stringProp("Replacement"), "replaceAll": boolProp()}, []string{"path", "oldString", "newString"}), w.execEdit),
+		w.tool("multi_edit", instructions.ToolMultiEditDescription, object(map[string]any{"path": stringProp("File"), "edits": map[string]any{"type": "array", "minItems": 1, "maxItems": 30, "items": object(map[string]any{"oldString": stringProp("Exact current text"), "newString": stringProp("Replacement"), "replaceAll": boolProp()}, []string{"oldString", "newString"})}}, []string{"path", "edits"}), w.execMultiEdit),
+		w.tool("write_file", instructions.ToolWriteFileDescription, object(map[string]any{"path": stringProp("File"), "content": stringProp("Complete content")}, []string{"path", "content"}), w.execWrite),
+		w.tool("apply_patch", instructions.ToolApplyPatchDescription, object(map[string]any{"patch": stringProp("Unified diff with ---/+++ headers")}, []string{"patch"}), w.execPatch),
+		w.tool("run_shell", instructions.ToolRunShellDescription, object(map[string]any{"command": stringProp("Shell command"), "timeoutMs": intProp(1, 600000)}, []string{"command"}), w.execShell),
+		w.tool("git_status", instructions.ToolGitStatusDescription, object(map[string]any{}, nil), w.execGitStatus),
+		w.tool("git_diff", instructions.ToolGitDiffDescription, object(map[string]any{"staged": boolProp(), "path": stringProp("Optional path"), "context": intProp(1, 100)}, nil), w.execGitDiff),
 	}
 }
 
@@ -168,7 +169,10 @@ func (w *Workspace) execEdit(ctx context.Context, raw json.RawMessage) (string, 
 		return "", fmt.Errorf("path and oldString are required")
 	}
 	result, err := w.Edit(ctx, input.Path, Edit{Old: input.OldString, New: input.NewString, ReplaceAll: input.ReplaceAll})
-	return formatEdit(result), err
+	if err != nil {
+		return formatEdit(result), err
+	}
+	return formatEdit(result), editMismatchError(result)
 }
 
 func (w *Workspace) execMultiEdit(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -183,7 +187,10 @@ func (w *Workspace) execMultiEdit(ctx context.Context, raw json.RawMessage) (str
 		return "", fmt.Errorf("path and edits are required")
 	}
 	result, err := w.MultiEdit(ctx, input.Path, input.Edits)
-	return formatEdit(result), err
+	if err != nil {
+		return formatEdit(result), err
+	}
+	return formatEdit(result), editMismatchError(result)
 }
 
 func formatEdit(result EditResult) string {
@@ -194,6 +201,33 @@ func formatEdit(result EditResult) string {
 		lines = append(lines, "--- diff ---", result.Diff)
 	}
 	return strings.Join(lines, "\n")
+}
+
+// editMismatchError reclassifies a NO-OP edit whose notes report a near-miss
+// (oldString not found, or ambiguous multi-match) as a tool FAILURE, so the
+// orchestrator's loop guards — failure terminator, consecutive-failure nudges,
+// failed-call cache — finally cover the edit-fumble loop (feature 008 DG-9/D4;
+// previously these outcomes returned err=nil and the loop never tripped).
+// Two deliberate boundaries:
+//   - A result that changed the file (Diff != "") stays a SUCCESS even when one
+//     batched edit missed: the file really changed, and reporting failure would
+//     invite a damaging re-apply of the whole batch.
+//   - Idempotent skips ("newString is already present", "identical; skipped")
+//     stay successes (DG-10) — they are correct outcomes, not fumbles.
+//
+// The error text carries the full note — including the "closest region" recovery
+// hint — so the model keeps its guidance; the "edit failed:" prefix also matches
+// the orchestrator's failure-prefix classification as belt-and-suspenders.
+func editMismatchError(result EditResult) error {
+	if result.Diff != "" {
+		return nil
+	}
+	joined := strings.Join(append(append([]string{result.Summary}, result.Notes...), result.Skipped...), "\n")
+	if strings.Contains(joined, "oldString not found") ||
+		(strings.Contains(joined, "oldString appears ") && strings.Contains(joined, " times")) {
+		return fmt.Errorf("edit failed: %s", joined)
+	}
+	return nil
 }
 
 func (w *Workspace) execWrite(ctx context.Context, raw json.RawMessage) (string, error) {

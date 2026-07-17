@@ -47,13 +47,18 @@ func NewRootCommand() *cobra.Command {
 			return runInteractive(cmd, interactiveOptions{Workspace: cwd, Prompt: prompt, Fresh: fresh, NoMCP: noMCP, Simple: simple})
 		},
 	}
-	root.SetVersionTemplate("MuhiyaCode {{.Version}}\n")
+	// Commit/Date are set by the release build's ldflags (.goreleaser.yaml);
+	// source builds show "unknown" for both, same as buildinfo.Version's default
+	// (feature 010 T037: these were ldflags-injected but had no reader anywhere —
+	// wiring them into --version is the fix, since the alternative was deleting
+	// working release metadata for no reason).
+	root.SetVersionTemplate(fmt.Sprintf("MuhiyaCode {{.Version}} (commit %s, built %s)\n", buildinfo.Commit, buildinfo.Date))
 	root.PersistentFlags().StringVarP(&cwd, "cwd", "C", "", "workspace directory")
 	root.Flags().StringVarP(&printPrompt, "print", "p", "", "run one-shot prompt and exit")
 	root.Flags().BoolVar(&simple, "simple", false, "use the line interface instead of the full TUI")
 	root.Flags().BoolVar(&fresh, "new", false, "start a new session instead of reopening the latest workspace session")
 	root.Flags().BoolVar(&noMCP, "no-mcp", false, "start without connecting MCP servers")
-	root.AddCommand(newResumeCommand(), newSessionsCommand(), newConfigCommand(), newMCPCommand(), newDoctorCommand())
+	root.AddCommand(newLoginCommand(), newLogoutCommand(), newResumeCommand(), newSessionsCommand(), newConfigCommand(), newMCPCommand(), newDoctorCommand())
 	return root
 }
 
@@ -406,13 +411,23 @@ func newDoctorCommand() *cobra.Command {
 }
 
 func doctor(cmd *cobra.Command, offline bool) error {
-	paths, settings, secrets, err := loadConfig()
-	if err != nil {
-		return err
-	}
 	out := cmd.OutOrStdout()
 	fmt.Fprintln(out, "MuhiyaCode diagnostics")
+	// T005: the always-useful checks print FIRST, before any config load can fail
+	// out — a misconfigured user is exactly who runs `doctor`, and they still need
+	// the build identity, launch-shadow warning, and workspace state.
+	printBuildDiagnostic(out)
+	printShadowDiagnostic(out)
+	for _, line := range workspaceDiagnostics(inheritedWorkspace(cmd)) {
+		fmt.Fprintln(out, line)
+	}
+	paths, settings, secrets, err := loadConfig()
+	if err != nil {
+		fmt.Fprintln(out, "fail config:", err)
+		return err
+	}
 	fmt.Fprintln(out, "ok  home:", paths.Home)
+	fmt.Fprintln(out, "ok  apiKey:", maskAPIKey(secrets.ProviderAPIKey))
 	shell, shellErr := workspace.ChooseShell(settings.Shell.Preferred)
 	if shellErr != nil {
 		fmt.Fprintln(out, "fail shell:", shellErr)
@@ -525,7 +540,7 @@ func mcpSecretValues(paths state.Paths) []string {
 
 func configurationNotice(settings contract.Settings, secrets contract.Secrets) string {
 	if strings.TrimSpace(secrets.ProviderAPIKey) == "" {
-		return "Setup required: run `/login` or `muhiyacode config set apiKey <key>`."
+		return "Setup required: run `muhiyacode login` (browser sign-in) or `muhiyacode config set apiKey <key>`."
 	}
 	model, ok := state.ActiveModel(settings)
 	if !ok {

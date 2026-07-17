@@ -2,16 +2,22 @@ package orchestrator
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 	"unicode/utf16"
+
+	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
 type KnowledgeFact struct {
 	Kind  string `json:"kind"`
 	Key   string `json:"key"`
+	Phase string `json:"phase,omitempty"`
+	Role  string `json:"role,omitempty"`
+	Scope string `json:"scope,omitempty"`
 	Title string `json:"title"`
 	Text  string `json:"text"`
 	Full  string `json:"full"`
@@ -45,6 +51,10 @@ func NewKnowledge(snapshot KnowledgeSnapshot, persist func(KnowledgeSnapshot) er
 }
 
 func (k *Knowledge) AddReport(agent, title, task, report string) {
+	k.AddPhaseReport(agent, "", agent, title, task, report)
+}
+
+func (k *Knowledge) AddPhaseReport(agent, phase, role, title, task, report string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	key := TaskKey(agent, task)
@@ -54,7 +64,7 @@ func (k *Knowledge) AddReport(agent, title, task, report string) {
 			filtered = append(filtered, fact)
 		}
 	}
-	k.facts = append(filtered, KnowledgeFact{Kind: "agent_report", Key: key, Title: title, Text: digest(report, 500), Full: truncateEllipsis(report, 4000), Epoch: k.epoch, At: time.Now().UTC().Format(time.RFC3339Nano)})
+	k.facts = append(filtered, KnowledgeFact{Kind: "agent_report", Key: key, Phase: phase, Role: role, Scope: contract.TruncateEllipsis(strings.TrimSpace(task), 1000), Title: title, Text: contract.Digest(report, 500), Full: contract.TruncateEllipsis(report, 4000), Epoch: k.epoch, At: time.Now().UTC().Format(time.RFC3339Nano)})
 	if len(k.facts) > 40 {
 		k.facts = k.facts[len(k.facts)-40:]
 	}
@@ -110,7 +120,7 @@ func (k *Knowledge) Briefing(maxChars int) string {
 	if start < len(k.facts) {
 		lines = append(lines, "Earlier session findings (trust unless contradicted):")
 		for _, fact := range k.facts[start:] {
-			lines = append(lines, fmt.Sprintf("- [%s] %s", fact.Title, digest(fact.Text, 260)))
+			lines = append(lines, fmt.Sprintf("- [%s] %s", fact.Title, contract.Digest(fact.Text, 260)))
 		}
 	}
 	if len(k.files) > 0 {
@@ -123,7 +133,75 @@ func (k *Knowledge) Briefing(maxChars int) string {
 		}
 		lines = append(lines, "Files already inspected: "+strings.Join(entries, ", "))
 	}
-	return truncateEllipsis(strings.Join(lines, "\n"), maxChars)
+	return contract.TruncateEllipsis(strings.Join(lines, "\n"), maxChars)
+}
+
+// BriefingForScope passes only facts/files that overlap the requested scope.
+// It is the handoff seam between phases: bounded digests, never transcripts or
+// predecessor full reports.
+func (k *Knowledge) BriefingForScope(scope string, maxChars int) string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if maxChars <= 0 {
+		maxChars = 1500
+	}
+	terms := scopeTerms(scope)
+	var lines []string
+	for i := len(k.facts) - 1; i >= 0 && len(lines) < 6; i-- {
+		fact := k.facts[i]
+		candidate := strings.ToLower(fact.Title + " " + fact.Scope + " " + fact.Text)
+		if !termsOverlap(terms, candidate) {
+			continue
+		}
+		if len(lines) == 0 {
+			lines = append(lines, "Relevant banked findings:")
+		}
+		label := strings.Trim(strings.Join([]string{fact.Phase, fact.Role}, "/"), "/")
+		if label == "" {
+			label = fact.Title
+		} else {
+			label += ": " + fact.Title
+		}
+		lines = append(lines, fmt.Sprintf("- [%s] %s", label, contract.Digest(fact.Text, 320)))
+	}
+	var files []string
+	for path, note := range k.files {
+		if termsOverlap(terms, strings.ToLower(path)) {
+			files = append(files, fmt.Sprintf("%s (%s)", path, note))
+		}
+	}
+	sort.Strings(files)
+	if len(files) > 12 {
+		files = files[:12]
+	}
+	if len(files) > 0 {
+		lines = append(lines, "Relevant files already inspected: "+strings.Join(files, ", "))
+	}
+	return contract.TruncateEllipsis(strings.Join(lines, "\n"), maxChars)
+}
+
+func scopeTerms(value string) map[string]bool {
+	terms := make(map[string]bool)
+	for _, field := range strings.FieldsFunc(strings.ToLower(value), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '_' && r != '.' && r != '/' && r != '\\'
+	}) {
+		if len(field) >= 4 {
+			terms[field] = true
+		}
+	}
+	return terms
+}
+
+func termsOverlap(terms map[string]bool, candidate string) bool {
+	if len(terms) == 0 {
+		return false
+	}
+	for term := range terms {
+		if strings.Contains(candidate, term) {
+			return true
+		}
+	}
+	return false
 }
 
 func (k *Knowledge) CompactionFacts() []string {
@@ -132,7 +210,55 @@ func (k *Knowledge) CompactionFacts() []string {
 	start := max(0, len(k.facts)-8)
 	result := make([]string, 0, len(k.facts)-start)
 	for _, fact := range k.facts[start:] {
-		result = append(result, fmt.Sprintf("- agent finding [%s]: %s", fact.Title, digest(fact.Text, 240)))
+		result = append(result, fmt.Sprintf("- agent finding [%s]: %s", fact.Title, contract.Digest(fact.Text, 240)))
+	}
+	return result
+}
+
+// Findings returns a bounded copy of the newest banked agent reports for the
+// durable execution-plan artifact. Full reports remain out of the main prompt;
+// the artifact receives only their digested, cited summaries.
+func (k *Knowledge) Findings(limit int) []KnowledgeFact {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if limit <= 0 {
+		limit = 8
+	}
+	start := max(0, len(k.facts)-limit)
+	result := make([]KnowledgeFact, 0, len(k.facts)-start)
+	for _, fact := range k.facts[start:] {
+		if fact.Kind == "agent_report" {
+			fact.Full = ""
+			result = append(result, fact)
+		}
+	}
+	return result
+}
+
+// ResearchFindings returns only current-epoch facts with research PROVENANCE
+// (role "research-scope" — the explore/plan read-only kinds), regardless of
+// which pipeline phase banked them: an investigation subagent launched from
+// the PLAN phase is research evidence too (live fix — a phase-tagged filter
+// rejected plan-phase findings, making the grounding gap unsatisfiable).
+// Implementation/review reports (role implement-step/review) and any stale
+// pre-edit facts still never satisfy the research-grounding requirement.
+func (k *Knowledge) ResearchFindings(limit int) []KnowledgeFact {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if limit <= 0 {
+		limit = 8
+	}
+	result := make([]KnowledgeFact, 0, limit)
+	for i := len(k.facts) - 1; i >= 0 && len(result) < limit; i-- {
+		fact := k.facts[i]
+		if fact.Kind == "agent_report" && fact.Role == "research-scope" && fact.Epoch == k.epoch {
+			fact.Full = ""
+			result = append(result, fact)
+		}
+	}
+	// Restore chronological order (the scan above walks newest-first).
+	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
+		result[left], result[right] = result[right], result[left]
 	}
 	return result
 }
@@ -169,19 +295,4 @@ func TaskKey(agent, task string) string {
 		prefix = prefix[:400]
 	}
 	return fmt.Sprintf("%s:%s#%s", agent, string(utf16.Decode(prefix)), strconv.FormatUint(uint64(hash), 36))
-}
-
-func digest(value string, maxChars int) string {
-	return truncateEllipsis(strings.Join(strings.Fields(value), " "), maxChars)
-}
-
-func truncateEllipsis(value string, maxChars int) string {
-	runes := []rune(value)
-	if maxChars <= 0 || len(runes) <= maxChars {
-		return value
-	}
-	if maxChars == 1 {
-		return "…"
-	}
-	return string(runes[:maxChars-1]) + "…"
 }

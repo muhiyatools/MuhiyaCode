@@ -1,0 +1,263 @@
+{
+  "workload": "delegation",
+  "build": "before",
+  "git_commit": "72c7d510fe2072b05d2f38b5fcc6687500d9c555",
+  "model": "deepseek-v4-flash",
+  "effort": "max",
+  "started_at": "2026-07-14T15:37:05.141137Z",
+  "duration_ms": 104476,
+  "prompt": "This project has four independent modules: auth/, billing/, reports/, and notify/. They share no code and must each be audited in isolation. Audit EACH of the four modules independently: read every file in the module and check every user-facing string (log messages and error messages) for misspelled English words — each module is believed to contain at least one misspelling. Fix each misspelling by correcting only the misspelled word inside the string literal; do not rename identifiers, change behavior, reformat code, or rewrite files wholesale. When all four audits are complete, report per module what you found and fixed.",
+  "error": "provider request failed (429): {\"error\":{\"message\":\"Limit exceeded: budget limit of $0.10 exceeded for window 'Burst (5 Hours)' (current spending: $0.1002)\",\"type\":\"rate_limit_error\"}}",
+  "expect": "notify",
+  "expect_met": false,
+  "agentRuns": 0,
+  "agentRunsReused": 0,
+  "turns": 5,
+  "toolCalls": 16,
+  "mainToolCalls": 16,
+  "subagentToolCalls": 0,
+  "finalMainPromptTokens": 9040,
+  "billedTokens": 10810,
+  "billedTokensFallbackRecords": 0,
+  "billedTokensEstimated": false,
+  "steadyStateHitRate": 0.8681279195113187,
+  "filesChanged": [
+    "MUHIYA.md",
+    "auth/token.go",
+    "billing/invoice.go",
+    "notify/email.go",
+    "reports/export.go"
+  ],
+  "engineFilesChanged": [
+    "auth/token.go",
+    "billing/invoice.go",
+    "notify/email.go",
+    "reports/export.go"
+  ],
+  "checklistResults": {
+    "auth absent \"exipred\"": true,
+    "auth contains \"token has expired\"": true,
+    "billing absent \"not fond\"": true,
+    "billing contains \"not found\"": true,
+    "notify absent \"faild\"": true,
+    "notify contains \"failed to send email\"": true,
+    "reports absent \"expot\"": true,
+    "reports contains \"export complete\"": true
+  },
+  "checklistFailures": 0,
+  "writeFileAudit": {
+    "totalCalls": 0,
+    "overwritesOfExistingFiles": 0,
+    "mechanism": "read-only callbacks (Callbacks.ToolStart + AgentEvent tool_start) fired by the shared dispatch gate before execution; target existence stat'd in the benchmark workspace at call time; counts attempted calls in both scopes"
+  },
+  "duplicateReads": {
+    "total": 0,
+    "main": 0,
+    "subagent": 0
+  },
+  "taskStats": {
+    "durationMs": 103277,
+    "effort": "max",
+    "taskClass": "epic",
+    "usage": {
+      "promptTokens": 28588,
+      "completionTokens": 1550,
+      "totalTokens": 30138,
+      "cachedTokens": 19328,
+      "cacheReadTokens": 19328,
+      "cacheMissTokens": 9260
+    },
+    "agentUsage": {},
+    "sessionHitRate": 0.6760878690359592,
+    "peakContextPercent": 0.9563,
+    "toolCalls": 16,
+    "agentRuns": 0,
+    "agentRunsReused": 0,
+    "filesChanged": [
+      "auth/token.go",
+      "billing/invoice.go",
+      "notify/email.go",
+      "reports/export.go"
+    ],
+    "turns": 5,
+    "checksRun": 0,
+    "foldedTokens": 0,
+    "disciplineScore": 100,
+    "doneCriteria": "** each module's one misspelled word in a user-facing string has been corrected in-place with no other changes.",
+    "invalidations": [
+      {
+        "at": "2026-07-14T15:37:06.3426843Z",
+        "cause": "toolset-change",
+        "trigger": "boundary",
+        "scope": "first handshake added MCP server supabase",
+        "pressure": null,
+        "request_seq": 1
+      }
+    ],
+    "stopCause": "error",
+    "creditsUsd": 0.0017845184
+  },
+  "usage_records": [
+    {
+      "seq": 1,
+      "at": "2026-07-14T15:37:08.1578606Z",
+      "model": "deepseek-v4-flash",
+      "stream": "main",
+      "prompt_tokens": 6324,
+      "completion_tokens": 99,
+      "cache_read_tokens": 0,
+      "cache_miss_tokens": 6324,
+      "miss_derived": false,
+      "hit_rate": 0,
+      "prefix_changed": false,
+      "change_reasons": [],
+      "attribution": "cold-start",
+      "cost_usd": 0.00091308,
+      "log_id": "f6f6f67d-ca63-4839-9d94-ed8e31c67e82"
+    },
+    {
+      "seq": 2,
+      "at": "2026-07-14T15:37:10.379478Z",
+      "model": "deepseek-v4-flash",
+      "stream": "main",
+      "prompt_tokens": 6517,
+      "completion_tokens": 210,
+      "cache_read_tokens": 6272,
+      "cache_miss_tokens": 245,
+      "new_tail_tokens": 193,
+      "miss_derived": false,
+      "hit_rate": 0.9624060150375939,
+      "prefix_changed": false,
+      "change_reasons": [],
+      "attribution": "provider",
+      "cost_usd": 0.0001106616,
+      "log_id": "74e15f79-a625-4687-91e7-8e4df1c01f52"
+    },
+    {
+      "seq": 3,
+      "at": "2026-07-14T15:37:12.9800888Z",
+      "model": "deepseek-v4-flash",
+      "stream": "main",
+      "prompt_tokens": 6707,
+      "completion_tokens": 340,
+      "cache_read_tokens": 6400,
+      "cache_miss_tokens": 307,
+      "new_tail_tokens": 190,
+      "miss_derived": false,
+      "hit_rate": 0.9542269270910988,
+      "prefix_changed": false,
+      "change_reasons": [],
+      "attribution": "provider",
+      "cost_usd": 0.0001561,
+      "log_id": "76d9d038-3376-4e2b-adbd-0c27322d1401"
+    },
+    {
+      "seq": 4,
+      "at": "2026-07-14T15:37:19.0871936Z",
+      "model": "deepseek-v4-flash",
+      "stream": "main",
+      "prompt_tokens": 9040,
+      "completion_tokens": 901,
+      "cache_read_tokens": 6656,
+      "cache_miss_tokens": 2384,
+      "new_tail_tokens": 2333,
+      "miss_derived": false,
+      "hit_rate": 0.736283185840708,
+      "prefix_changed": false,
+      "change_reasons": [],
+      "attribution": "provider",
+      "cost_usd": 0.0006046768,
+      "log_id": "ec8d471d-7b3f-455b-acf3-bf8c027d97b2"
+    }
+  ],
+  "aggregate": {
+    "requests": 4,
+    "main_requests": 4,
+    "aux_requests": 0,
+    "subagent_requests": 0,
+    "sum_prompt": 28588,
+    "sum_completion": 1550,
+    "sum_cache_read": 19328,
+    "sum_cache_miss": 9260,
+    "paired_cache_read": 19328,
+    "paired_cache_miss": 9260,
+    "session_hit_rate": 0.6760878690359592,
+    "steady_state_hit_rate": 0.8681279195113187,
+    "prefix_stability_rate": 0.9887456517290771,
+    "unavailable_requests": 0,
+    "prompt_available_requests": 4,
+    "completion_available_requests": 4,
+    "cache_available_requests": 4,
+    "steady_state_cache_read": 19328,
+    "steady_state_cache_miss": 2936,
+    "prefix_stable_read": 19328,
+    "prefix_stable_eligible": 19548
+  },
+  "raw_provider_log": "before-delegation-raw-usage.jsonl",
+  "toolEvents": [
+    {
+      "scope": "main",
+      "tool": "list_files"
+    },
+    {
+      "scope": "main",
+      "tool": "update_plan"
+    },
+    {
+      "scope": "main",
+      "tool": "read_file"
+    },
+    {
+      "scope": "main",
+      "tool": "read_file"
+    },
+    {
+      "scope": "main",
+      "tool": "read_file"
+    },
+    {
+      "scope": "main",
+      "tool": "read_file"
+    },
+    {
+      "scope": "main",
+      "tool": "read_file"
+    },
+    {
+      "scope": "main",
+      "tool": "read_file"
+    },
+    {
+      "scope": "main",
+      "tool": "read_file"
+    },
+    {
+      "scope": "main",
+      "tool": "read_file"
+    },
+    {
+      "scope": "main",
+      "tool": "read_file"
+    },
+    {
+      "scope": "main",
+      "tool": "update_plan"
+    },
+    {
+      "scope": "main",
+      "tool": "edit_file"
+    },
+    {
+      "scope": "main",
+      "tool": "edit_file"
+    },
+    {
+      "scope": "main",
+      "tool": "edit_file"
+    },
+    {
+      "scope": "main",
+      "tool": "edit_file"
+    }
+  ]
+}

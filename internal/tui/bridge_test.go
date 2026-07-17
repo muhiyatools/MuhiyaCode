@@ -2,24 +2,31 @@ package tui
 
 import "testing"
 
-// TestBridgeCoalescesAssistantChunks (US2 T029/T031): multiple assistant/reasoning
-// tokens accumulate behind a single outstanding flush rather than one send each.
+// TestBridgeCoalescesAssistantChunks (US2 T029/T031): multiple assistant tokens
+// accumulate behind a single outstanding flush rather than one send each.
 func TestBridgeCoalescesAssistantChunks(t *testing.T) {
 	b := NewBridge()
 	cb := b.Callbacks()
 	cb.Token("Hel")
 	cb.Token("lo")
-	cb.ReasoningToken("think")
-	cb.ReasoningToken("ing")
 
 	b.mu.Lock()
-	pending, reasoning, scheduled := b.pending, b.reasoning, b.scheduled
+	pending, scheduled := b.pending, b.scheduled
 	b.mu.Unlock()
-	if pending != "Hello" || reasoning != "thinking" {
-		t.Fatalf("assistant chunks not coalesced: pending=%q reasoning=%q", pending, reasoning)
+	if pending != "Hello" {
+		t.Fatalf("assistant chunks not coalesced: pending=%q", pending)
 	}
 	if !scheduled {
 		t.Fatal("expected exactly one outstanding flush to be scheduled")
+	}
+}
+
+// TestBridgeNeverStreamsThinking pins Fix R3: the bridge deliberately does not
+// wire ReasoningToken, so raw model thinking is switched off at the source (the
+// SSE accumulator skips its nil onReasoning hook) and can never render.
+func TestBridgeNeverStreamsThinking(t *testing.T) {
+	if cb := NewBridge().Callbacks(); cb.ReasoningToken != nil {
+		t.Fatal("ReasoningToken must stay unwired — raw thinking text must never stream into the UI")
 	}
 }
 
@@ -63,7 +70,7 @@ func TestBridgeFlushClearsBuffers(t *testing.T) {
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if b.pending != "" || b.reasoning != "" || len(b.toolOrder) != 0 || len(b.toolBuf) != 0 || b.scheduled {
+	if b.pending != "" || len(b.toolOrder) != 0 || len(b.toolBuf) != 0 || b.scheduled {
 		t.Fatalf("flush did not clear buffers: pending=%q tools=%v scheduled=%v", b.pending, b.toolOrder, b.scheduled)
 	}
 }

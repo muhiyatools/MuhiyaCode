@@ -18,7 +18,6 @@ func TestRTLRobustness(t *testing.T) {
 		for _, s := range rtlCorpus {
 			for _, align := range []string{"auto", "right", "left"} {
 				dl := renderForDisplay(s, mode, align)
-				_ = dl.AlignedTo(40)
 				_ = recoverLogical(dl.Visual)
 			}
 			_ = displayWidth(s)
@@ -41,7 +40,6 @@ func FuzzRenderForDisplay(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, s string) {
 		dl := renderForDisplay(s, "visual", "auto")
-		_ = dl.AlignedTo(20)
 		got := recoverLogical(dl.Visual)
 		// The presentation forms MY shaping introduces all decompose via NFKC, so
 		// recovery of CLEAN logical text never leaks them. If the input itself carried

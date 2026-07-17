@@ -64,8 +64,8 @@ func TestRestartDeterminism(t *testing.T) {
 // block (after a memory change) would not.
 func TestProjectContextResumeMustReusePersistedBootBytes(t *testing.T) {
 	base := PromptContext{Workspace: "/w", OS: "linux", Shell: "bash", Model: "m", ProjectMemory: true}
-	persisted := RenderProjectContextBlock("H", "notes", "M1", "- one")          // captured at the original session start
-	recomputed := RenderProjectContextBlock("H", "notes", "M2", "- one\n- two") // what a live recompute after a MEMORY.md edit would produce
+	persisted := RenderProjectContextBlock("", "", "H", "notes", "M1", "- one")         // captured at the original session start
+	recomputed := RenderProjectContextBlock("", "", "H", "notes", "M2", "- one\n- two") // what a live recompute after a memory-index edit would produce
 	if persisted == recomputed {
 		t.Fatal("test setup: blocks should differ after a memory change")
 	}

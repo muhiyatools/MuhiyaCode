@@ -94,11 +94,6 @@ func (s *Sessions) AppendPruned(sessionID string, record contract.PrunedRecord) 
 	return s.appendJSONLine(sessionID, "pruned.jsonl", record)
 }
 
-// PrunedRecords (T041) reads back the archived originals for recovery.
-func (s *Sessions) PrunedRecords(sessionID string) ([]contract.PrunedRecord, error) {
-	return readSessionJSONLines[contract.PrunedRecord](s.DB.paths, sessionID, "pruned.jsonl")
-}
-
 func (s *Sessions) InvalidationEvents(sessionID string) ([]contract.InvalidationEvent, error) {
 	return readSessionJSONLines[contract.InvalidationEvent](s.DB.paths, sessionID, "invalidations.jsonl")
 }
@@ -277,6 +272,39 @@ func (s *Sessions) ClearPlanState(sessionID string) error {
 	return nil
 }
 
+// WritePrefixShape persists the session-stable prefix shape (Ultimate Polish C3),
+// so a resumed session can compare its would-be first request against the last one
+// and attribute a skills/tools/model change. Same atomic-write path as plan_state.
+func (s *Sessions) WritePrefixShape(sessionID string, snapshot contract.PrefixShapeSnapshot) error {
+	dir, err := SessionDir(s.DB.paths, sessionID)
+	if err != nil {
+		return err
+	}
+	return writeJSON(filepath.Join(dir, "prefix_shape.json"), snapshot, false)
+}
+
+// ReadPrefixShape loads the prefix-shape sidecar. The bool is false when none
+// exists (a fresh session); a malformed file is treated as absent so it never
+// blocks resume.
+func (s *Sessions) ReadPrefixShape(sessionID string) (contract.PrefixShapeSnapshot, bool, error) {
+	dir, err := SessionDir(s.DB.paths, sessionID)
+	if err != nil {
+		return contract.PrefixShapeSnapshot{}, false, err
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "prefix_shape.json"))
+	if os.IsNotExist(err) {
+		return contract.PrefixShapeSnapshot{}, false, nil
+	}
+	if err != nil {
+		return contract.PrefixShapeSnapshot{}, false, err
+	}
+	var snapshot contract.PrefixShapeSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return contract.PrefixShapeSnapshot{}, false, nil
+	}
+	return snapshot, true, nil
+}
+
 var sessionJSONName = regexp.MustCompile(`^(history|knowledge|inspection)\.json$`)
 
 func (s *Sessions) ReadJSON(sessionID, name string, fallback any, output any) error {
@@ -314,31 +342,6 @@ func (s *Sessions) WriteJSON(sessionID, name string, value any) error {
 		return err
 	}
 	return writeJSON(filepath.Join(dir, name), value, false)
-}
-
-func (s *Sessions) Transcript(sessionID string) ([]map[string]any, error) {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	file, err := os.Open(filepath.Join(dir, "transcript.jsonl"))
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer file.Close()
-	var result []map[string]any
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
-	for scanner.Scan() {
-		var value map[string]any
-		if json.Unmarshal(scanner.Bytes(), &value) == nil {
-			result = append(result, value)
-		}
-	}
-	return result, scanner.Err()
 }
 
 var secretPatterns = []*regexp.Regexp{

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
 const (
@@ -28,7 +29,7 @@ var (
 	ErrPermissionDenied = errors.New("workspace: permission denied")
 	ErrSensitivePath    = errors.New("workspace: protected credential path")
 	ErrOutsideWorkspace = errors.New("workspace: path is outside the workspace")
-	ErrUnreadOverwrite  = errors.New("workspace: refusing to overwrite an unread file")
+	ErrUnreadOverwrite  = errors.New(instructions.WorkspaceUnreadOverwriteBody)
 	ErrInvalidArguments = errors.New("workspace: invalid tool arguments")
 )
 
@@ -251,8 +252,6 @@ func New(root string, options Options) (*Workspace, error) {
 		},
 	}, nil
 }
-
-func (w *Workspace) Root() string { return w.root }
 
 // SetPermissionMode applies a permission change immediately to subsequent tool
 // calls. Persisting the setting remains the caller's responsibility.

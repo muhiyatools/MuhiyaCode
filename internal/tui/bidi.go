@@ -86,9 +86,6 @@ type DisplayLine struct {
 	Align   string // "left" | "right"
 }
 
-// AlignedTo pads the visual string to width per the resolved alignment.
-func (d DisplayLine) AlignedTo(width int) string { return padToWidth(d.Visual, width, d.Align) }
-
 // resolveAlign maps the RTL.Align setting to a concrete side for this line.
 func resolveAlign(logical, align string) string {
 	switch strings.ToLower(strings.TrimSpace(align)) {

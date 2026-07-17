@@ -147,7 +147,7 @@ func TestToolsArrayStableAcrossModeToggles(t *testing.T) {
 	if _, _, err := engine.Run(context.Background(), "first task"); err != nil {
 		t.Fatal(err)
 	}
-	engine.SetPlanMode(true)
+	engine.SetLifecycleState(contract.LifecyclePlanning)
 	if _, _, err := engine.Run(context.Background(), "second task in plan mode"); err != nil {
 		t.Fatal(err)
 	}

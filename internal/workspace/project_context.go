@@ -31,6 +31,19 @@ const ProjectMemoryFile = "MEMORY.md"
 const MaxProjectInstructionsBytes = 32 * 1024
 const MaxProjectMemoryBytes = 32 * 1024
 
+// The project-memory index (Experience Overhaul B1) lives in the store, not the
+// workspace, and is loaded with a bounded HEAD so it stays cheap in the cached
+// prefix even if it grows: only the first MemoryIndexHeadLines lines or
+// MemoryIndexHeadBytes bytes (whichever comes first) are injected; a larger file
+// still loads its head and surfaces one consolidate-into-topics notice. A file
+// beyond MaxMemoryIndexBytes is treated as oversized (read is capped, not injected)
+// so a pathological index can never be slurped whole.
+const (
+	MemoryIndexHeadLines = 200
+	MemoryIndexHeadBytes = 24 * 1024
+	MaxMemoryIndexBytes  = 256 * 1024
+)
+
 // InstructionState is the resolved outcome of a project-instructions load. Only
 // InstructionLoaded contributes a prompt block; every other state keeps the
 // session fully usable and, except missing/empty, exposes one safe diagnostic
@@ -61,9 +74,6 @@ type ProjectInstructions struct {
 	ContentHash      string
 	Diagnostic       string
 }
-
-// Loaded reports whether the instructions produced an injectable prompt block.
-func (p ProjectInstructions) Loaded() bool { return p.State == InstructionLoaded }
 
 // instructionSecretPatterns mirrors internal/state.secretPatterns. It is kept
 // local so this loader stays free of a workspace→state import (state is a
@@ -96,12 +106,120 @@ func LoadProjectInstructions(workspaceRoot string, secretValues ...string) Proje
 	return loadRootDoc(workspaceRoot, ProjectInstructionsFile, MaxProjectInstructionsBytes, secretValues)
 }
 
-// LoadProjectMemory reads the root MEMORY.md — the agent-managed durable project
-// memory — with the same containment, UTF-8/size, and secret-screening rules as
-// MUHIYA.md. Like instructions it is non-fatal on every failure and never blocks
-// agent work; an unreadable or secret-bearing memory file simply is not injected.
-func LoadProjectMemory(workspaceRoot string, secretValues ...string) ProjectInstructions {
-	return loadRootDoc(workspaceRoot, ProjectMemoryFile, MaxProjectMemoryBytes, secretValues)
+// LoadMemoryIndex reads the project-memory index (MEMORY.md) from the per-project
+// store directory (Experience Overhaul B1). The store dir is itself trusted
+// (~/.muhiya/projects/<id>/memory, unreachable by the model's file tools), so there
+// is no workspace-containment check; the same UTF-8/size/secret/hash validation
+// applies, plus a bounded head so the always-loaded index stays cheap. HTML
+// comments are stripped from the injected form (Memory Parity N1): the index
+// template's guidance comment — and any future comment — is for humans reading the
+// file, never the model, so it costs zero prefix tokens. The content hash is over
+// the injected (stripped) head, so a change within the head re-fires the one-shot
+// memory-update; comment-only edits and edits beyond the head do not.
+func LoadMemoryIndex(memoryDir string, secretValues ...string) ProjectInstructions {
+	return loadTrustedDoc(filepath.Join(memoryDir, ProjectMemoryFile), MaxMemoryIndexBytes, secretValues, MemoryIndexHeadLines, MemoryIndexHeadBytes, true)
+}
+
+// LoadUserInstructions reads an explicit, already-trusted instructions file — the
+// user-level ~/.muhiya/MUHIYA.md that applies across every project (Experience
+// Overhaul B1). Same validation as the project files, no bounded head, 32 KiB cap.
+func LoadUserInstructions(path string, secretValues ...string) ProjectInstructions {
+	return loadTrustedDoc(path, MaxProjectInstructionsBytes, secretValues, 0, 0, false)
+}
+
+// loadTrustedDoc validates and loads a document at an already-trusted absolute path
+// (the memory store or ~/.muhiya) — like loadRootDoc but WITHOUT the workspace
+// real-path containment check, and with an optional bounded head. It reuses the
+// same UTF-8/NUL/secret/normalization/hash core so the two paths behave
+// identically. stripComments removes HTML comments from the injected form (after
+// secret screening, which always runs over the full content); it is a mid-pipeline
+// variant, so it rides as a parameter rather than a wrapper — if a third variant
+// ever appears, fold these knobs into an options struct. Every failure is a
+// non-fatal state; nothing blocks the session.
+func loadTrustedDoc(target string, maxBytes int64, secretValues []string, headLines, headBytes int, stripComments bool) ProjectInstructions {
+	result := ProjectInstructions{State: InstructionMissing, SourcePath: target}
+	info, err := os.Stat(target)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return result // missing: silent empty
+		}
+		result.State = InstructionUnreadable
+		result.Diagnostic = filepath.Base(target) + " could not be read"
+		return result
+	}
+	if !info.Mode().IsRegular() {
+		result.State = InstructionUnreadable
+		result.Diagnostic = filepath.Base(target) + " is not a regular file; it was not loaded"
+		return result
+	}
+	result.RawSize = int(info.Size())
+	if info.Size() > maxBytes {
+		result.State = InstructionOversized
+		result.Diagnostic = fmt.Sprintf("%s is %d bytes; the %d KiB limit was exceeded, so it was not loaded", filepath.Base(target), info.Size(), maxBytes/1024)
+		return result
+	}
+	data, err := os.ReadFile(target)
+	if err != nil {
+		result.State = InstructionUnreadable
+		result.Diagnostic = filepath.Base(target) + " could not be read"
+		return result
+	}
+	result.RawSize = len(data)
+	data = stripUTF8BOM(data)
+	if !utf8.Valid(data) || containsNUL(data) {
+		result.State = InstructionInvalid
+		result.Diagnostic = filepath.Base(target) + " is not valid UTF-8 text; it was not loaded"
+		return result
+	}
+	canonical := normalizeNewlines(string(data))
+	if !hasMeaningfulDocContent(canonical) {
+		result.State = InstructionEmpty
+		return result
+	}
+	// Secret screening runs over the FULL content (a credential anywhere — even
+	// inside a comment — rejects the whole file), before any comment-stripping or
+	// head-bounding.
+	if containsSecret(canonical, secretValues) {
+		result.State = InstructionSecretRejected
+		result.Diagnostic = filepath.Base(target) + " appears to contain a credential; it was not loaded"
+		return result
+	}
+	if stripComments {
+		// The meaningful-content check above already ignores comments, so the
+		// stripped form is guaranteed non-empty here.
+		canonical = strings.TrimSpace(htmlCommentRE.ReplaceAllString(canonical, "")) + "\n"
+	}
+	injected, bounded := boundDocHead(canonical, headLines, headBytes)
+	sum := sha256.Sum256([]byte(injected))
+	result.State = InstructionLoaded
+	result.CanonicalContent = injected
+	result.ContentHash = hex.EncodeToString(sum[:])
+	if bounded {
+		result.Diagnostic = "the project memory index is over its auto-load bound — consolidate entries into topics"
+	}
+	return result
+}
+
+// boundDocHead returns the first maxLines lines or maxBytes bytes of s (whichever
+// binds first), reporting whether it truncated. A zero max disables that bound.
+// Byte truncation backs up to a valid UTF-8 boundary so a multi-byte rune is never
+// split.
+func boundDocHead(s string, maxLines, maxBytes int) (string, bool) {
+	bounded := false
+	if maxLines > 0 {
+		if lines := strings.Split(s, "\n"); len(lines) > maxLines {
+			s = strings.Join(lines[:maxLines], "\n")
+			bounded = true
+		}
+	}
+	if maxBytes > 0 && len(s) > maxBytes {
+		s = s[:maxBytes]
+		for len(s) > 0 && !utf8.ValidString(s) {
+			s = s[:len(s)-1]
+		}
+		bounded = true
+	}
+	return s, bounded
 }
 
 // loadRootDoc is the shared, contained loader behind MUHIYA.md and MEMORY.md.
@@ -246,6 +364,14 @@ func hasMeaningfulDocContent(s string) bool {
 	return strings.TrimSpace(htmlCommentRE.ReplaceAllString(s, "")) != ""
 }
 
+// HasMeaningfulDocContent is the exported form of the template-emptiness check,
+// for callers that must distinguish a pristine comment-only template from a doc
+// with real content (e.g. the legacy-memory migration, which may replace a
+// pristine store index but never a real one).
+func HasMeaningfulDocContent(s string) bool {
+	return hasMeaningfulDocContent(s)
+}
+
 // muhiyaTemplate is the starter MUHIYA.md written into a workspace that has none.
 // It is a single comment block, so while it stays pristine hasMeaningfulDocContent
 // reports it empty and it is never injected.
@@ -267,9 +393,9 @@ Suggested sections:
 // EnsureProjectInstructionsTemplate writes the starter MUHIYA.md at the workspace
 // root when it is absent. It never overwrites an existing file and treats a write
 // failure as non-fatal (returned for logging only) so a read-only workspace still
-// runs. MEMORY.md is intentionally NOT created here — it is agent-managed and the
-// model creates it with its file tools on the first durable fact, so an untouched
-// project stays clean. Called once per session at startup.
+// runs. The workspace stays clean of MEMORY.md — durable memory lives in the
+// per-project store, created by EnsureMemoryIndexTemplate. Called once per session
+// at startup.
 func EnsureProjectInstructionsTemplate(workspaceRoot string) error {
 	root, err := CanonicalPath(workspaceRoot)
 	if err != nil {
@@ -282,4 +408,42 @@ func EnsureProjectInstructionsTemplate(workspaceRoot string) error {
 		return err
 	}
 	return os.WriteFile(target, []byte(muhiyaTemplate), 0o644)
+}
+
+// memoryIndexTemplate is the starter MEMORY.md written into a project's memory
+// store that has none (Memory Parity N1). It is a single comment block: while
+// pristine the index reads as empty (never injected), and once real entries exist
+// LoadMemoryIndex strips comments from the injected form — so this guidance is for
+// humans opening the file and costs zero prefix tokens forever.
+const memoryIndexTemplate = `<!--
+MEMORY.md — MuhiyaCode project memory (agent-managed).
+
+This is the always-loaded index of durable knowledge for this project. The agent
+maintains it with its memory tools (save_memory / edit_memory): standing facts
+live here as single bullets, and larger clusters live in sibling <topic>.md files,
+each marked by a "- [topic] description" pointer line read on demand with
+recall_memory. Comments are never shown to the agent.
+-->
+`
+
+// EnsureMemoryIndexTemplate creates the per-project memory store directory and its
+// starter MEMORY.md when absent (Memory Parity N1): every project has its memory
+// file from the first session, so the memory habit does not depend on the model
+// choosing to save first. It never overwrites an existing index and a failure is
+// non-fatal (returned for logging only). Called once per session at startup, after
+// any legacy-workspace migration.
+func EnsureMemoryIndexTemplate(memoryDir string) error {
+	if memoryDir == "" {
+		return nil
+	}
+	target := filepath.Join(memoryDir, ProjectMemoryFile)
+	if _, err := os.Stat(target); err == nil {
+		return nil // already present: never overwrite
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.MkdirAll(memoryDir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(target, []byte(memoryIndexTemplate), 0o644)
 }

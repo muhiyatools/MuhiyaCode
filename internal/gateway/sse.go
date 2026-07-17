@@ -12,11 +12,12 @@ import (
 )
 
 type StreamResult struct {
-	Content      string
-	Reasoning    string
-	ToolCalls    []contract.ToolCall
-	Usage        contract.Usage
-	FinishReason string
+	Content          string
+	Reasoning        string
+	ReasoningDetails json.RawMessage
+	ToolCalls        []contract.ToolCall
+	Usage            contract.Usage
+	FinishReason     string
 }
 
 type partialCall struct {
@@ -39,6 +40,7 @@ type usageNumber struct {
 
 type StreamAccumulator struct {
 	content, reasoning, finish string
+	reasoningDetails           []json.RawMessage
 	calls                      map[int]*partialCall
 	usage                      contract.Usage
 	promptTokens               usageNumber
@@ -50,11 +52,12 @@ type StreamAccumulator struct {
 	usageDiagnostics           []string
 	malformed                  int
 	received                   bool
+	profile                    ModelProfile
 	onToken, onReasoning       func(string)
 }
 
-func NewStreamAccumulator(onToken, onReasoning func(string)) *StreamAccumulator {
-	return &StreamAccumulator{calls: make(map[int]*partialCall), onToken: onToken, onReasoning: onReasoning}
+func NewStreamAccumulatorForProfile(profile ModelProfile, onToken, onReasoning func(string)) *StreamAccumulator {
+	return &StreamAccumulator{calls: make(map[int]*partialCall), profile: profile, onToken: onToken, onReasoning: onReasoning}
 }
 
 func (a *StreamAccumulator) ConsumeLine(raw string) error {
@@ -99,9 +102,20 @@ func (a *StreamAccumulator) ConsumeLine(raw string) error {
 		}
 		delta, _ := choice["delta"].(map[string]any)
 		message, _ := choice["message"].(map[string]any)
+		detailValue := delta["reasoning_details"]
+		if detailValue == nil {
+			detailValue = message["reasoning_details"]
+		}
+		detailText, details := parseReasoningDetails(detailValue)
+		if a.profile.ParsesReasoning {
+			a.reasoningDetails = append(a.reasoningDetails, details...)
+		}
 		reasoning := stringValue(delta["reasoning_content"])
 		if reasoning == "" {
 			reasoning = stringValue(message["reasoning_content"])
+		}
+		if reasoning == "" && a.profile.ParsesReasoning {
+			reasoning = detailText
 		}
 		if reasoning != "" {
 			a.reasoning += reasoning
@@ -147,17 +161,36 @@ func (a *StreamAccumulator) Result() StreamResult {
 			calls = append(calls, contract.NewToolCall(id, call.name, call.arguments))
 		}
 	}
-	return StreamResult{Content: a.content, Reasoning: a.reasoning, ToolCalls: calls, Usage: a.usage, FinishReason: a.finish}
+	var reasoningDetails json.RawMessage
+	if len(a.reasoningDetails) > 0 {
+		reasoningDetails, _ = json.Marshal(a.reasoningDetails)
+	}
+	return StreamResult{Content: a.content, Reasoning: a.reasoning, ReasoningDetails: reasoningDetails, ToolCalls: calls, Usage: a.usage, FinishReason: a.finish}
 }
 
-func ParseOpenAIStream(text string) (StreamResult, error) {
-	a := NewStreamAccumulator(nil, nil)
-	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
-		if err := a.ConsumeLine(line); err != nil {
-			return StreamResult{}, err
+func parseReasoningDetails(value any) (string, []json.RawMessage) {
+	values, ok := value.([]any)
+	if !ok {
+		if value == nil {
+			return "", nil
+		}
+		values = []any{value}
+	}
+	var textParts []string
+	var raw []json.RawMessage
+	for _, item := range values {
+		if detail, ok := item.(map[string]any); ok {
+			if text := stringValue(detail["text"]); text != "" {
+				textParts = append(textParts, text)
+			} else if text := stringValue(detail["content"]); text != "" {
+				textParts = append(textParts, text)
+			}
+		}
+		if encoded, err := json.Marshal(item); err == nil {
+			raw = append(raw, encoded)
 		}
 	}
-	return a.Result(), nil
+	return strings.Join(textParts, ""), raw
 }
 
 func (a *StreamAccumulator) ingestCalls(value any) {
@@ -253,6 +286,10 @@ func (a *StreamAccumulator) rebuildUsage() {
 	}
 	if usage.CacheReadTokens == nil && !readBlocked && a.openAICacheRead.state == usageNumberValid {
 		setCacheRead(&usage, a.openAICacheRead.value)
+	}
+	if a.profile.CacheMinPromptTokens > 0 && a.promptTokens.state == usageNumberValid && a.promptTokens.value < a.profile.CacheMinPromptTokens && a.deepSeekCacheRead.state != usageNumberValid {
+		usage.CacheReadTokens = nil
+		usage.CachedTokens = 0
 	}
 
 	switch a.deepSeekCacheMiss.state {

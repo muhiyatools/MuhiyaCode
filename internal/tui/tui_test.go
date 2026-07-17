@@ -10,7 +10,6 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/mattn/go-runewidth"
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/orchestrator"
 )
@@ -22,7 +21,7 @@ func (inertProvider) Chat(context.Context, contract.ChatRequest) (contract.ChatR
 }
 func (inertProvider) ListModels(context.Context) ([]contract.Model, error) { return nil, nil }
 
-func testRuntime(t *testing.T) Runtime {
+func testRuntime(t testing.TB) Runtime {
 	t.Helper()
 	settings := &contract.Settings{Version: 1, PermissionMode: contract.PermissionNormal, Effort: contract.EffortMedium}
 	settings.Provider.Type = "openai-compatible"
@@ -281,7 +280,9 @@ func TestHeaderShowsBothModelsAndNoticeStaysOutOfTranscript(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "1.0.0", Notice: "Set an API key with /login."})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 90, Height: 30})
 	view := m.View().Content
-	for _, want := range []string{"Main", "Fast", "mode", "normal", "Set an API key"} {
+	// The header shows both model names; the footer shows the key hints (the
+	// quiet "normal" permission mode intentionally has no badge now — A1 T012).
+	for _, want := range []string{"Main", "Fast", "Esc stop", "Set an API key"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q", want)
 		}
@@ -372,9 +373,10 @@ func TestMarkdownTableRendersAligned(t *testing.T) {
 }
 
 func ansiWidth(line string) int {
-	// Strip SGR sequences, then measure.
+	// Strip SGR sequences, then measure via the one uniseg width family
+	// (feature 010 T036) — the same displayWidth production code uses.
 	stripped := regexp.MustCompile("\x1b\\[[0-9;]*m").ReplaceAllString(line, "")
-	return runewidth.StringWidth(stripped)
+	return displayWidth(stripped)
 }
 
 func TestPromptStyleActivityAndPaste(t *testing.T) {
@@ -400,12 +402,17 @@ func TestPromptStyleActivityAndPaste(t *testing.T) {
 	if strings.Contains(m.View().Content, "Ready") {
 		t.Fatal("idle view still shows the Ready line")
 	}
-	// Busy: the unified activity line shows status and plan progress.
-	m.busy, m.status = true, "Thinking"
-	m.reasoning = "checking the parser"
+	// Busy: the activity line shows the status; the to-do panel (a separate View
+	// section) shows the checklist with the in-progress step highlighted (A3,
+	// replacing the old "plan N/M" activity bar).
+	m.busy, m.status = true, "Working…"
 	activity := m.renderActivity()
-	if !strings.Contains(activity, "Thinking") || !strings.Contains(activity, "plan 1/2") {
-		t.Fatalf("activity component incomplete:\n%s", activity)
+	if !strings.Contains(activity, "Working…") {
+		t.Fatalf("activity component missing status:\n%s", activity)
+	}
+	todos := m.renderTodos()
+	if todos == "" || !strings.Contains(todos, m.glyphs.todoActive) {
+		t.Fatalf("to-do panel missing the in-progress checklist row:\n%s", todos)
 	}
 	m.busy = false
 
@@ -663,67 +670,50 @@ func TestTaskSummaryOmitsUnavailableAndMarksInterrupted(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	m.busy = true
-	// No credits, no cache fields → only tokens; interrupted marker present.
+	// No credits → credits omitted; no cache fields → TotalTokens fallback with
+	// the explicit "cache unavailable" tag (008 UD-3); interrupted marker present.
 	stats := contract.TaskStats{Usage: contract.Usage{TotalTokens: 1200}, StopCause: contract.StopCauseUserStop}
 	updated, _ := m.Update(statsMsg(stats))
 	m = updated.(*Model)
 	updated, _ = m.Update(resultMsg{answer: "partial"})
 	m = updated.(*Model)
 	view := m.View().Content
-	if strings.Contains(view, "credits") || strings.Contains(view, "cache ") {
-		t.Fatalf("summary showed unavailable credits/cache:\n%s", view)
+	if strings.Contains(view, "credits") {
+		t.Fatalf("summary showed unavailable credits:\n%s", view)
+	}
+	// 008 T019 (UD-3/UD-8): a task without cache metrics renders the explicit
+	// "cache unavailable" state — never an omitted tag or a synthesized rate.
+	if !strings.Contains(view, "cache unavailable") || strings.Contains(view, "cache 0%") {
+		t.Fatalf("summary lost the explicit cache-unavailable state:\n%s", view)
 	}
 	if !strings.Contains(view, "interrupted") {
 		t.Fatalf("interrupted task not marked:\n%s", view)
 	}
 }
 
-// TestReasoningTailRuneSafe verifies the live reasoning tail stays valid UTF-8
-// with Arabic/emoji input (rune-safe truncation never splits a multi-byte rune)
-// and is bounded to the collapsed ~300-rune tail shown while a task runs.
-func TestReasoningTailRuneSafe(t *testing.T) {
+// TestThinkingTextNeverRenders pins Fix R3: raw model thinking never appears on
+// screen. The bridge leaves ReasoningToken unwired (TestBridgeNeverStreamsThinking)
+// and streamMsg carries answer text only, so a busy frame is spinner + status —
+// with no reasoning tail line and none of the removed thinking language.
+func TestThinkingTextNeverRenders(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
-	m.busy = true
-	for i := 0; i < 50; i++ {
-		updated, _ := m.Update(streamMsg{reasoning: "مرحبا 🌍 reasoning " + strings.Repeat("x", 20) + "\n"})
-		m = updated.(*Model)
-	}
-	if !utf8.ValidString(m.reasoning) {
-		t.Fatal("reasoning contains invalid UTF-8 — a multi-byte rune was split")
-	}
-	if len([]rune(m.reasoning)) > 300 {
-		t.Fatalf("reasoning tail should stay bounded to ~300 runes, got %d", len([]rune(m.reasoning)))
-	}
-	if !m.busy {
-		t.Fatal("test setup: model should be busy")
-	}
-	if view := m.View().Content; !strings.Contains(view, "thinking…") {
-		t.Fatalf("busy model should show the live thinking line:\n%s", view)
-	}
-}
-
-// TestThinkingIsEphemeralAfterCompletion (003 T019/FR-009) verifies the thinking
-// indicator disappears entirely on completion — no "thought for Ns" residue and
-// no leftover "thinking…" line.
-func TestThinkingIsEphemeralAfterCompletion(t *testing.T) {
-	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
-	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
-	m.busy = true
-	updated, _ := m.Update(streamMsg{text: "Hello", reasoning: "thinking about X"})
-	m = updated.(*Model)
-	if m.thoughtStart.IsZero() {
-		t.Fatal("first reasoning token did not set thoughtStart")
-	}
-	time.Sleep(20 * time.Millisecond)
-	updated, _ = m.Update(resultMsg{answer: "Hello"})
-	m = updated.(*Model)
+	m.busy, m.status = true, "Working…"
 	view := m.View().Content
-	if strings.Contains(view, "thought for ") {
-		t.Fatalf("post-task 'thought for Ns' residue leaked into the view:\n%s", view)
+	if !strings.Contains(view, "Working…") {
+		t.Fatalf("busy frame missing the status verb:\n%s", view)
 	}
-	if strings.Contains(m.renderActivity(), "thinking") {
-		t.Fatal("activity kept a thinking line after completion")
+	for _, banned := range []string{"thinking…", "Thinking…", "thought for "} {
+		if strings.Contains(view, banned) {
+			t.Fatalf("removed thinking language %q re-rendered:\n%s", banned, view)
+		}
+	}
+	// Completion stays clean too: no thinking residue, no idle "Ready" line.
+	updated, _ := m.Update(resultMsg{answer: "Hello"})
+	m = updated.(*Model)
+	view = m.View().Content
+	if strings.Contains(view, "thought for ") {
+		t.Fatalf("post-task thinking residue leaked into the view:\n%s", view)
 	}
 	if strings.Contains(view, "Ready") {
 		t.Fatal("idle 'Ready' line leaked into the view")
@@ -736,7 +726,7 @@ func TestThinkingIsEphemeralAfterCompletion(t *testing.T) {
 // pending-plan flag and clears plan mode.
 func TestPlanReadyModalOpensOnStatsMsg(t *testing.T) {
 	rt := testRuntime(t)
-	rt.Engine.SetPlanMode(true)
+	rt.Engine.SetLifecycleState(contract.LifecyclePlanning)
 	m := NewModel(Options{Runtime: rt, Version: "test"})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	updated, _ := m.Update(statsMsg(contract.TaskStats{PlanReady: true, TaskClass: "plan"}))
@@ -799,7 +789,7 @@ func TestRTLAndWrappingAreStable(t *testing.T) {
 		t.Fatalf("Arabic was not shaped: %q", visual)
 	}
 	for _, line := range wrapPlain("alpha beta gamma delta epsilon", 10) {
-		if runewidth.StringWidth(line) > 10 {
+		if displayWidth(line) > 10 {
 			t.Fatalf("wrapped line exceeds width: %q", line)
 		}
 	}

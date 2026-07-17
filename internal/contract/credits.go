@@ -11,6 +11,3 @@ const (
 
 // USDToCredits converts a gateway USD amount into display credits.
 func USDToCredits(usd float64) float64 { return usd * CreditsPerUSD }
-
-// CreditsToUSD converts credits back into gateway USD.
-func CreditsToUSD(credits float64) float64 { return credits / CreditsPerUSD }

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
 // Goal is a durable objective the agent works toward across multiple turns,
@@ -52,31 +53,44 @@ var goalMarkerRE = regexp.MustCompile(`(?i)\[goal:(continue|complete|blocked)(?:
 func (e *Engine) SetGoal(text string) string {
 	text = strings.TrimSpace(text)
 	e.modeMu.Lock()
-	previous := e.snapshotPlanLocked()
 	notice := ""
 	active := false
+	planCleared := false
 	if text == "" {
 		notice = e.clearGoalLocked("")
 		e.goal = nil
+	} else if st := e.lifecycle.State; st.IsActive() && !st.IsReadOnly() && !st.IsTerminal() {
+		// DG2: a goal must not fight an in-flight plan. When the lifecycle is
+		// pipeline-active or awaiting a proceed (pending / implementing / validating /
+		// interrupted — anything active that is neither the read-only planning phase
+		// G3 takes over, nor a terminal state), refuse and tell the user to resolve
+		// the plan first. Read-only planning is handled by the G3 takeover below.
+		e.modeMu.Unlock()
+		return "Finish, proceed, or discard the current plan before setting a goal."
 	} else {
 		// G6: a replaced-active-goal notice shows before/after.
 		notice = e.setGoalLocked(text)
 		active = true
-		// G3: enforcing plan⇄goal mutual exclusion. Plan wins on tie-breaks,
-		// but a goal activation is the user's intent — switch plan off.
-		if e.planMode {
-			e.planMode = false
+		// G3: enforcing plan⇄goal mutual exclusion. Plan wins on tie-breaks, but a
+		// goal activation is the user's intent — it takes over from a read-only
+		// plan-mode lifecycle, abandoning the draft to direct work so the read-only
+		// gate and the plan block are released (UL-13).
+		if e.lifecycle.State.IsReadOnly() {
+			e.lifecycle = Lifecycle{State: contract.LifecycleDirect}
+			planCleared = true
 			notice += " (Plan mode disabled — goal mode is now active.)"
 		}
 	}
 	e.modeMu.Unlock()
-	_ = previous
 	if active {
 		e.persistGoalState()
 	} else {
 		// Clearing via SetGoal("") drops the sidecar so the goal does not
 		// resurrect on resume.
 		e.clearGoalSidecar()
+	}
+	if planCleared {
+		e.persistPlanState()
 	}
 	return notice
 }
@@ -85,6 +99,25 @@ func (e *Engine) SetGoal(text string) string {
 func (e *Engine) ClearGoal() {
 	e.modeMu.Lock()
 	e.clearGoalLocked("")
+	e.goal = nil
+	e.modeMu.Unlock()
+	e.clearGoalSidecar()
+}
+
+// reconcileGoalOnTaskEnd (Ultimate Polish DG1) blocks a goal that is still active
+// when a task ends — the H5 failure terminator, the hard turn ceiling, or any exit
+// that bypasses the marker-based resolution — and drops its sidecar, so an abandoned
+// goal can never resurrect as active on the next task or on resume. A goal that
+// already resolved (e.goal == nil) is a no-op, so a normal completion is untouched.
+func (e *Engine) reconcileGoalOnTaskEnd() {
+	e.modeMu.Lock()
+	if e.goal == nil {
+		e.modeMu.Unlock()
+		return
+	}
+	e.goal.Status = GoalBlocked
+	e.goal.Blocked = "the task ended before the goal reported completion"
+	e.lastGoal = &Goal{Text: e.goal.Text, Status: GoalBlocked, Blocked: e.goal.Blocked}
 	e.goal = nil
 	e.modeMu.Unlock()
 	e.clearGoalSidecar()
@@ -115,15 +148,11 @@ func (e *Engine) LastGoalResult() (Goal, bool) {
 	return *e.lastGoal, true
 }
 
-// snapshotPlanLocked returns the plan state. Used by SetGoal only; readers
-// elsewhere should continue using PlanMode().
-func (e *Engine) snapshotPlanLocked() bool { return e.planMode }
-
 // setGoalLocked carries the previous-goal-before-replacement logic.
 func (e *Engine) setGoalLocked(text string) string {
 	notice := ""
 	if e.goal != nil && e.goal.Status == GoalActive {
-		notice = fmt.Sprintf("Replaced active goal: %s \u2192 %s", oneLineGoal(e.goal.Text), oneLineGoal(text))
+		notice = fmt.Sprintf("Replaced active goal: %s \u2192 %s", contract.Digest(e.goal.Text, 200), contract.Digest(text, 200))
 	}
 	e.goal = &Goal{Text: text, Status: GoalActive}
 	return notice
@@ -142,7 +171,7 @@ func (e *Engine) clearGoalLocked(reason string) string {
 		return "Goal cleared."
 	}
 	if status == GoalComplete {
-		return "Goal complete: " + oneLineGoal(text)
+		return "Goal complete: " + contract.Digest(text, 200)
 	}
 	if status == GoalBlocked {
 		if reason != "" {
@@ -151,63 +180,27 @@ func (e *Engine) clearGoalLocked(reason string) string {
 		if blocked != "" {
 			blocked = " " + blocked + reason
 		}
-		return "Goal blocked: " + oneLineGoal(text) + blocked
+		return "Goal blocked: " + contract.Digest(text, 200) + blocked
 	}
 	return ""
 }
 
-// PlanMode reports whether plan mode is currently on. Plan⇄goal exclusion
-// (G3) toggles this off when a goal is set.
+// PlanMode reports whether the lifecycle is in a read-only (plan-mode) state —
+// research, planning, or awaiting-approval. It is derived from the single
+// lifecycle state, so it can never disagree with the gate. Plan⇄goal exclusion
+// (G3) moves the lifecycle out of read-only when a goal is set.
 func (e *Engine) PlanMode() bool {
 	e.modeMu.Lock()
 	defer e.modeMu.Unlock()
-	return e.planMode
+	return e.lifecycle.State.IsReadOnly()
 }
 
-// SetPlanMode toggles plan mode. Activating it while a goal is active clears
-// the goal via the tombstone path (G2) and surfaces a notice (G3). G4: when G3
-// clears an active goal, the sidecar is dropped after the mode lock releases so
-// the cleared goal does not resurrect on resume. P2: the plan-state sidecar is
-// persisted after unlock so the plan-mode flag survives a restart.
-func (e *Engine) SetPlanMode(on bool) string {
-	e.modeMu.Lock()
-	notice := ""
-	goalCleared := false
-	wasPlanMode := e.planMode
-	if on && !e.planMode {
-		notice = e.clearGoalLocked("entering plan mode")
-		if notice != "" {
-			goalCleared = true
-			notice += " (Goal cleared — plan mode is read-only.)"
-		}
-	}
-	if !on {
-		cleared := e.clearGoalLocked("leaving plan mode")
-		if cleared != "" {
-			goalCleared = true
-		}
-		notice = cleared
-	}
-	e.planMode = on
-	// 004 US2 (T1/T9): entering plan mode starts a drafting lifecycle. If a saved
-	// plan was still pending or interrupted, drafting a new one supersedes it —
-	// the old executable affordance is withdrawn (superseded is terminal; the
-	// first update_plan in plan mode moves it on to drafting). Leaving plan mode
-	// does not force a phase here; the modal / plan-ready paths own that.
-	if on && !wasPlanMode {
-		if e.planPhase == contract.PlanPhasePending || e.planPhase == contract.PlanPhaseInterrupted {
-			e.planPhase = contract.PlanPhaseSuperseded
-		} else {
-			e.planPhase = contract.PlanPhaseDrafting
-		}
-	}
-	e.modeMu.Unlock()
-	if goalCleared {
-		e.clearGoalSidecar()
-	}
-	e.persistPlanState()
-	return notice
-}
+// Ultimate Polish P1: SetPlanMode is removed. Planning is entered ONLY through the
+// classifier pipeline (beginPipeline → transitionLifecycle); there is no manual
+// plan toggle. The plan⇄goal exclusion survives via SetGoal (a goal takes over a
+// read-only planning phase) and the DG2 brief backstop (a plan/pipeline block drops
+// the goal block). PlanMode() below still reports the read-only planning phase for
+// the footer badge and the plan-mode instruction gating.
 
 // goalBlock is the per-turn instruction block appended to the task brief while
 // a goal is active. It rides on the user message so toggling it does not
@@ -218,10 +211,7 @@ func (e *Engine) goalBlock() string {
 	if e.goal == nil || e.goal.Status != GoalActive {
 		return ""
 	}
-	return "[active-goal: " + oneLineGoal(e.goal.Text) + "]\n" +
-		"Work autonomously toward this goal. End every reply with exactly one marker: " +
-		"[goal:continue] if more work remains, [goal:complete] once the goal is fully met and verified, " +
-		"or [goal:blocked: <reason>] if you cannot proceed."
+	return "[active-goal: " + contract.Digest(e.goal.Text, 200) + "]\n" + instructions.GoalBlockInstructionBody
 }
 
 // scanGoalMarker parses a single goal control marker and, if it is a terminal
@@ -335,7 +325,7 @@ func (e *Engine) advanceGoal(finalText string, madeToolCall bool) string {
 		e.goal = nil
 		return ""
 	}
-	prompt := fmt.Sprintf("[goal] Continue toward the active goal: %s\nKeep going without asking; end with a goal marker.", oneLineGoal(e.goal.Text))
+	prompt := fmt.Sprintf("[goal] Continue toward the active goal: %s\nKeep going without asking; end with a goal marker.", contract.Digest(e.goal.Text, 200))
 	if !hadMarker {
 		// B4: nudge on the first missing-marker reply (streak == 1).
 		prompt += "\nEnd your reply with exactly one goal marker."
@@ -353,10 +343,6 @@ func (e *Engine) markGoalToolProgress() {
 	if e.goal != nil && e.goal.Status == GoalActive {
 		e.goal.IdleTurns = 0
 	}
-}
-
-func oneLineGoal(text string) string {
-	return truncate(strings.Join(strings.Fields(text), " "), 200)
 }
 
 // RestoredGoalNotice (G4) returns the one-shot notice surfaced when an active

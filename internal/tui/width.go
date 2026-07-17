@@ -71,6 +71,20 @@ func truncateToWidthRight(s string, width int) string {
 	return strings.Join(clusters[start:], "")
 }
 
+// graphemeClusters splits s into its grapheme clusters and their display
+// widths, in order — the shared building block for cluster-safe truncation
+// from either end (feature 010 T036: the one uniseg width family; used by
+// format.go's truncateMiddle/truncateLeft so no caller measures width by
+// per-rune go-runewidth loops, which over-measure combining marks).
+func graphemeClusters(s string) (clusters []string, widths []int) {
+	g := uniseg.NewGraphemes(s)
+	for g.Next() {
+		clusters = append(clusters, string(g.Runes()))
+		widths = append(widths, g.Width())
+	}
+	return clusters, widths
+}
+
 // reverseGraphemes reverses the order of grapheme clusters in s while keeping each
 // cluster's internal order intact — so an Arabic base letter stays with its
 // combining marks (harakat). This replaces bidi.ReverseString, which mis-
@@ -86,19 +100,4 @@ func reverseGraphemes(s string) string {
 		b.WriteString(clusters[i])
 	}
 	return b.String()
-}
-
-// padToWidth left- or right-aligns visual to width by adding plain spaces,
-// measuring with grapheme-cluster width. A visual already at/over width is
-// returned unchanged (callers truncate separately when needed).
-func padToWidth(visual string, width int, align string) string {
-	pad := width - displayWidth(visual)
-	if pad <= 0 || width <= 0 {
-		return visual
-	}
-	spaces := strings.Repeat(" ", pad)
-	if align == "right" {
-		return spaces + visual
-	}
-	return visual
 }

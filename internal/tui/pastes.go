@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/muhiya/muhiyacode/internal/contract"
@@ -139,4 +140,59 @@ func pastePreview(raw string, maxLines int) string {
 		out += "\n…"
 	}
 	return out
+}
+
+// pastePlaceholderRE matches the compact stand-in inserted for a stashed paste.
+var pastePlaceholderRE = regexp.MustCompile(`\[#paste(\d+) \d+ lines\]`)
+
+// isLargePaste classifies a paste as large (US5 / input-draft contract §2): 1024+
+// code points OR 6+ logical lines.
+func isLargePaste(content string) bool {
+	return utf8.RuneCountInString(content) >= 1024 || logicalLineCount(content) >= 6
+}
+
+// logicalLineCount counts logical lines: CRLF is one break, a lone CR or LF is
+// one break, and non-empty content with no break is one line.
+func logicalLineCount(content string) int {
+	if content == "" {
+		return 0
+	}
+	lines := 1
+	for i := 0; i < len(content); i++ {
+		switch content[i] {
+		case '\n':
+			lines++
+		case '\r':
+			lines++
+			if i+1 < len(content) && content[i+1] == '\n' {
+				i++ // CRLF counts as a single break
+			}
+		}
+	}
+	return lines
+}
+
+// expandPastes reconstructs the exact raw content of every stashed paste in place
+// of its placeholder, so the sent message equals the concatenation of typed text
+// and raw paste bytes. An unknown/edited placeholder is left as literal text.
+func (m *Model) expandPastes(text string) string {
+	if len(m.pastes) == 0 {
+		return text
+	}
+	return pastePlaceholderRE.ReplaceAllStringFunc(text, func(match string) string {
+		sub := pastePlaceholderRE.FindStringSubmatch(match)
+		if len(sub) < 2 {
+			return match
+		}
+		id, _ := strconv.Atoi(sub[1])
+		if raw, ok := m.pastes[id]; ok {
+			return raw
+		}
+		return match
+	})
+}
+
+func (m *Model) releasePastes() {
+	m.pastes = nil
+	m.pasteSeq = 0
 }

@@ -1,0 +1,40 @@
+package orchestrator
+
+// Gate policy (Stability Overhaul Phase 3, T030). Every harness gate — anything
+// that can refuse or redirect a model tool call — MUST satisfy all five clauses:
+//
+//	(a) STATED IN ADVANCE. The rule the gate enforces is disclosed to the model
+//	    before it can be violated (the instructions registry's StatesRule /
+//	    EnforcesRule audit links the advance-notice text to the enforcing gate).
+//	(b) ONE-STEP-FIXABLE OR NON-BLOCKING. A rejection either names the single
+//	    mechanical fix, or the gate is non-blocking (records a degradation and
+//	    proceeds). It never demands an open-ended fix.
+//	(c) BOUNDED. A gate may reject at most twice for the SAME cause within one
+//	    task; then it must accept-with-recorded-degradation or hard-stop into a
+//	    user decision. A gate can NEVER loop. (assertRecoveryInvariant is the
+//	    machine check: no identical rejection more than 3×.)
+//	(d) TELEMETERED. Every rejection records a harness event (Phase 1,
+//	    recordHarnessEvent) so friction is visible in /errors and the summary.
+//	(e) SYNC-TESTED. The prose the model reads and the code that enforces are
+//	    locked together by a test, so they cannot drift (e.g. T034 for the shell
+//	    gate).
+//
+// Compliance inventory (audited T030; deviations were fixed by the cited task):
+//
+//	Gate                         a  b  c  d  e   notes
+//	read-only shell gate         ✓  ✓  ✓  ✓  ✓   arg-position false positives fixed (D1/T031); sync test T034
+//	plan content bar             ✓  ✓  ✓  ✓  ✓   NON-BLOCKING (planbar.go): accepts first call, records gaps
+//	empty-plan structural gate   ✓  ✓  ✓  ✓  ✓   the one hard stop; fix is always mechanical (call update_plan)
+//	update_plan step-cap         ✓  ✓  ✓  ✓  ✓   guide ≤12, accept ≤24 w/ degradation, >24 bounded (D5/T032)
+//	repeat limiter               ✓  ✓  ✓  ✓  ✓   blocks a specific repeated call, never the task (T033)
+//	duplicate-read dedupe        ✓  ✓  ✓  n/a ✓   benign optimization (Failed:false), NOT telemetered as friction (T033)
+//	dispatch arg-validation      ✓  ✓  ✓  ✓  ✓   H1: re-emit with well-formed args
+//	failed-call short-circuit    ✓  ✓  ✓  ✓  ✓   H2: change approach; telemetered as gate/repeat-failed-call
+//	plan-mode / pipeline mutation✓  ✓  ✓  ✓  ✓   names the allowed alternative; escalates then holds
+//	subagent turn-cap            ✓  ✓  ✓  ✓  ✓   forced wrap-up, never a fatal error (INV-3/T035)
+//	H5 failure terminator        ✓  ✓  ✓  ✓  ✓   windowed breaker; clean terminate reason, stats stamped
+//
+// The duplicate-read guard is deliberately NOT counted as friction (clause d
+// "n/a"): it is the cache working correctly (the model is handed the result it
+// already has), not a rejection of intended work, so surfacing it in the
+// friction marker would mislead. See T033.

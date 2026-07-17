@@ -1,0 +1,6 @@
+internal\command\application.go:196:23: unreachable func: Application.Paths
+internal\contract\credits.go:16:6: unreachable func: CreditsToUSD
+internal\mcpclient\manager.go:725:19: unreachable func: Manager.uniqueName
+internal\orchestrator\history.go:506:6: unreachable func: assembleRequest
+internal\state\paths.go:96:6: unreachable func: CheckpointPath
+internal\workspace\types.go:255:21: unreachable func: Workspace.Root
