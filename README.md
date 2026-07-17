@@ -4,8 +4,8 @@
 
 **An interactive terminal coding agent.**
 
-[![Release](https://img.shields.io/badge/release-latest-blue)](https://github.com/muhiya/muhiyacode/releases)
-[![Go build](https://img.shields.io/badge/go-build-brightgreen)](https://github.com/muhiya/muhiyacode/actions)
+[![Release](https://img.shields.io/badge/release-latest-blue)](https://github.com/muhiyatools/MuhiyaCode/releases)
+[![Go build](https://img.shields.io/badge/go-build-brightgreen)](https://github.com/muhiyatools/MuhiyaCode/actions)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
 
 Agentic coding in your terminal — DeepSeek-tuned, cache-efficient, and self-contained in one Go binary.
@@ -18,23 +18,34 @@ Agentic coding in your terminal — DeepSeek-tuned, cache-efficient, and self-co
 npm i -g muhiyacode
 ```
 
-Prebuilt binaries are also on the [GitHub releases page](https://github.com/muhiya/muhiyacode/releases). Runs in Windows, macOS, and Linux terminals.
+Prebuilt binaries are also on the [GitHub releases page](https://github.com/muhiyatools/MuhiyaCode/releases). Runs in Windows, macOS, and Linux terminals.
 
 ## Quick start
 
-1. Install: `npm i -g muhiyacode`
-2. `cd` into your project.
-3. Run `muhiyacode`, then `/login` to store your API key.
+1. **Install** — `npm i -g muhiyacode`
+2. **Sign in** — `muhiyacode login` opens your browser; approve the request and you're set. No API key to copy.
+3. **Build** — `cd` into your project and run `muhiyacode`.
+
+## Sign in
+
+MuhiyaCode signs you in through your browser — there's nothing to copy or paste. Approving the request provisions your access automatically and stores it locally under `~/.muhiya` with user-only permissions.
+
+```sh
+muhiyacode login     # opens your browser — approve, and you're in
+muhiyacode logout    # remove the stored credential
+```
+
+You can also sign in from inside the app with `/login`.
 
 ## Features
 
-- Agentic coding with guarded tools — read, search, exact edits, patches, and shell.
-- DeepSeek prefix-cache optimized: byte-stable prompts keep the cache warm across a session.
-- Plan mode researches and proposes before any mutating tool runs.
-- Autonomous goals the agent works toward across bounded, self-continuing turns.
-- Built-in subagents (`explore`, `plan`, `review`, `general`) that can run concurrently.
-- MCP servers over stdio and Streamable HTTP, with OAuth and per-tool permissions.
-- Persistent project context via root-local `MEMORY.md` and `MUHIYA.md`.
+- **Browser sign-in** — one command, no API keys or endpoints to manage.
+- **Guarded agentic tools** — read, search, exact edits, patches, and shell, with a permission mode you control.
+- **DeepSeek prefix-cache optimized** — byte-stable prompts keep the cache warm across a whole session.
+- **Autonomous goals** — the agent works toward a goal across bounded, self-continuing turns.
+- **Concurrent subagents** — `explore`, `plan`, `review`, and `general` run in parallel for research, planning, and review.
+- **MCP servers** — stdio and Streamable HTTP, with OAuth and per-tool permissions.
+- **Persistent project memory** — root-local `MEMORY.md` and `MUHIYA.md` travel with your repo.
 
 ## Commands
 
@@ -42,35 +53,34 @@ Commands are typed inside MuhiyaCode (not your shell).
 
 | Command | Description |
 |---|---|
-| `/reasoning` (`/effort`) | Set reasoning effort (low–max) |
-| `/goal` | Set an autonomous goal |
-| `/plan` | Plan before editing |
-| `/resume` | Resume a workspace session |
-| `/new` | Start a new session |
-| `/context` | Inspect context & provider capability |
-| `/compact` | Compact the conversation |
-| `/model` | Choose or refresh models |
-| `/login` | Store your API key |
-| `/logout` | Clear your API key |
+| `/login` | Sign in through your browser |
+| `/logout` | Sign out and clear the credential |
 | `/usage` | View account usage |
+| `/model` | Choose or refresh models |
+| `/reasoning` (`/effort`) | Set reasoning effort (low–max) |
 | `/permissions` (`/mode`) | Change permission mode |
+| `/goal` | Set an autonomous goal |
+| `/context` | Inspect context usage & model capability |
+| `/compact` | Compact the conversation |
 | `/skills` | Assign skills to the next prompt |
 | `/mcp` | Manage MCP servers |
 | `/paste` | Inspect or remove pasted blocks |
 | `/diff` | Summarize the git diff |
+| `/resume` | Resume a workspace session |
+| `/new` | Start a new session |
 | `/rewind` | Restore the latest checkpoint |
+| `/errors` | Inspect recent harness events |
 
 ## Configuration
 
-Settings live under `~/.muhiya` (or `$MUHIYA_HOME`) and can be set with `muhiyacode config set <key> <value>`. Point at any OpenAI-compatible gateway and pick a concrete model and effort level:
+Signing in sets up your endpoint and credential for you — there's nothing to wire up by hand. Beyond that, tune the agent with `muhiyacode config set <key> <value>` or the matching in-app command:
 
 ```sh
-muhiyacode config set baseUrl https://api.muhiya.com/v1
-muhiyacode config set model deepseek-v4-pro
-muhiyacode config set effort high
+muhiyacode config set model deepseek-v4-pro    # or /model
+muhiyacode config set effort high              # or /reasoning
 ```
 
-See [docs/](docs/) for the full configuration reference.
+Settings live under `~/.muhiya` (or `$MUHIYA_HOME`). See [docs/](docs/) for the full reference, including advanced overrides.
 
 ## Documentation
 
