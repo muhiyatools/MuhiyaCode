@@ -2,6 +2,10 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
+## 1.0.6
+
+- Version-alignment release: same code as 1.0.5, republished under 1.0.6 so the app, npm package, and published version number all read 1.0.6.
+
 ## 1.0.5
 
 - **Cheap by default: standard tasks run direct (feature 014).** "Fix two bugs in the project" now just fixes them — no research phase, no plan ceremony, no approval pause. The pipeline is reserved for genuinely large/epic work (two corroborating size signals) and for explicit plan requests ("create a plan to…"), which still pause for your approval.
