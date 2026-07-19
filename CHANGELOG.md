@@ -2,7 +2,7 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
-## Unreleased
+## 1.0.5
 
 - **Cheap by default: standard tasks run direct (feature 014).** "Fix two bugs in the project" now just fixes them — no research phase, no plan ceremony, no approval pause. The pipeline is reserved for genuinely large/epic work (two corroborating size signals) and for explicit plan requests ("create a plan to…"), which still pause for your approval.
 - **One subagent at a time, always.** Parallel subagent fan-out is gone at the dispatcher level: dispatches run serially, and the phase instructions teach a single-chain workflow (one explore at a time while planning; ONE general subagent executing plan steps sequentially — each dispatch inherits its predecessor's cached context, so the serial chain is also the cheapest path).
