@@ -16,17 +16,34 @@ DeepSeek's cache is per-model, so a single flip silently wipes the entire cached
 client-side byte-stability guard can see it.
 
 The header is derived once from the session ID and never changes within a session. Each stream
-gets a distinct suffix so interleaved traffic on different models does not thrash the pin:
+gets a distinct suffix so interleaved traffic on different models does not thrash the pin.
+The live wire pins (feature 011 D4 per-kind pins; corrected here by feature 012 R-D14 — code is
+the source of truth):
 
 - Main loop: `<sessionID>:main`
-- Subagent runs: `<sessionID>:sub`
-- Compaction: `<sessionID>:main` (same `ActiveModelID` as main — shares the pin)
-- Onboarding: `<sessionID>:sub` (same `SubagentModelID` as subagents)
-- Classification / title / other aux calls: `<sessionID>:aux`
+- Subagent runs, per kind: `<sessionID>:sub:explore`, `:sub:plan`, `:sub:review`, `:sub:general`
+- Onboarding: `<sessionID>:sub:onboarding`
+- Compaction: `<sessionID>:main` on the wire (same `ActiveModelID` as main — shares the routing
+  pin) while its usage record ledgers under the `:aux` label — wire pins and ledger pins are not
+  1:1 for this stream
+- There is no `:aux` wire pin: task classification is a local heuristic and sends no request
 
 The value is header-only; it is never serialized into the JSON request body. Two consecutive
-requests of the same stream carry an identical header, and main/sub suffixes differ so their
-caches stay independent.
+requests of the same stream carry an identical header, and the per-kind suffixes keep each
+kind's prefix-cache identity independent.
+
+## Subagent context linking (feature 012)
+
+A continuation subagent replays its predecessor's stored transcript verbatim on the
+predecessor's exact pin and appends one user message, so the provider serves the shared prefix
+from cache (DeepSeek: token-0 identity in 64-token blocks; MiniMax: passive cache over
+tool-list → system → messages with a 512-token floor). The subagent system message is
+per-kind-per-session stable — the per-run handoff rides the first user message — so even fresh
+dispatches of a kind share the cached system+tools prefix. Continuation records live under
+`~/.muhiya/sessions/<id>/agents/` (compact JSON: re-indenting raw `reasoning_details` would
+change replayed bytes). Every dispatch's link decision, reason, and provider-verified cache
+share appear in the task summary and bench records; `contextLinking=off` restores pre-012
+dispatch behavior exactly.
 
 ## Maintenance scheduling and the anti-thrash latch (C4)
 

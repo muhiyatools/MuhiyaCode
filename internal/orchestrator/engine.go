@@ -56,6 +56,10 @@ type Persistence struct {
 	// so the next resume can attribute a skills/tools/model change vs a silent cold
 	// start. Optional: a nil hook leaves resume attribution dormant.
 	WritePrefixShape func(context.Context, contract.PrefixShapeSnapshot) error
+	// WriteAgentRecord (feature 012 R-D3) persists one completed subagent run's
+	// context record as a session sidecar (agents/<runID>.json). Optional and
+	// best-effort: a nil hook keeps records in-memory for the session only.
+	WriteAgentRecord func(context.Context, string, any) error
 }
 
 type RescueFunc func(string, []string) ([]contract.ToolCall, string)
@@ -249,6 +253,24 @@ type Engine struct {
 	// parent's. (B6/T024.)
 	taskCounters *callCounters
 	taskFailures []int // H5: turn numbers of failed tool calls (sliding window for the distinct-failure terminator)
+	// Feature 012 context linking (guarded by taskMu): completed-run records,
+	// their completion order, the per-dispatch link ledger for the current
+	// task, and the task ordinal that stamps record lineage.
+	agentRecords     map[string]*SubagentContextRecord
+	agentRecordOrder []string
+	taskLinks        []contract.LinkOutcome
+	taskSeq          int
+	// readGate (feature 012 contracts/role-gate.md) is the per-task state of
+	// the phase-scoped implementation-read gate.
+	readGate readGateState
+}
+
+// readGateState tracks the role gate's per-task outcomes (RG-3/RG-4).
+type readGateState struct {
+	denied      int
+	waived      bool
+	exempt      int
+	postFailure bool
 }
 
 type toolOutcome struct {
@@ -378,6 +400,10 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 	if config.InitialPlanState != nil {
 		engine.lifecycle, engine.restoredPlanNotice = restoreLifecycle(*config.InitialPlanState, engine.plan)
 	}
+	// Feature 012 R-D7: read_plan serves the session's rendered plan from the
+	// harness (no filesystem path, no outside-workspace prompt), so subagents
+	// can read their phase by reference instead of receiving pasted context.
+	engine.registry.Add(readPlanTool{engine: engine})
 	return engine, nil
 }
 

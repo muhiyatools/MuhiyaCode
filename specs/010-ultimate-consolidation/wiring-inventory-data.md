@@ -49,6 +49,7 @@ together by the session prefix golden.
 | Tool | run_shell | Run a shell command with streaming output and context-based cancellation | internal/workspace/workspace_test.go:255 (TestShellStreamingAndCancellation) | wired |
 | Tool | git_status | Show concise `git status --short` | internal/workspace/workspace_test.go:207 (TestListGlobWriteAndGitToolBehaviors) | wired |
 | Tool | git_diff | Show the workspace `git diff` (optionally staged/path/context-scoped) | internal/workspace/workspace_test.go:215 (TestListGlobWriteAndGitToolBehaviors) | wired |
+| Tool | read_plan | Harness-served read of the session's approved execution plan (feature 012 R-D7); optional section='steps' | internal/orchestrator/contextlink_test.go (TestReadPlanTool) | wired |
 
 ## Tools — synthetic main-loop (8)
 
@@ -154,6 +155,7 @@ was removed in this feature (WI-5) — see the "removed" row below and
 | Settings Field | permissionMode | normal (confirm mutations) or auto-accept | internal/tui/keys_test.go:101 (TestShiftTabCyclesPermissionMode) + slash_alias_test.go:44 (TestModeAliasMatchesCanonicalCommand) | wired |
 | Settings Field | effort | Reasoning effort: low/medium/high/max | internal/tui/slash_alias_test.go:22 (TestEffortAliasMatchesCanonicalCommand) + internal/state/config_defaults_test.go:10 (TestDefaultEffortIsHigh) | wired |
 | Settings Field | reviewGating | Review-gate mode (feature 011): off/conservative/default; explicit review requests always run | internal/orchestrator/reviewgate_test.go:202 (TestNormalizeReviewGating) + reviewgate_test.go:26 (TestDecideHardRules) | wired |
+| Settings Field | contextLinking | Subagent context-linking mode (feature 012 FR-017): off/default; off restores pre-012 dispatch behavior and disables the phase read gate | internal/orchestrator/contextlink_test.go (TestDecideLinkDisabled) + internal/state/config_test.go (contextLinking case) | wired |
 | Settings Field | theme | The color theme name | internal/tui/theme_test.go:38 (TestThemePaletteIsSingleSource) | wired |
 | Settings Field | shell.preferred | Preferred shell: auto/pwsh/powershell/cmd/sh | internal/workspace/workspace_test.go:255 (TestShellStreamingAndCancellation, ShellRunner.Preferred) | wired |
 | Settings Field | shell.timeoutMs | Shell command timeout in milliseconds | internal/workspace/workspace_test.go:255 (TestShellStreamingAndCancellation) | wired |

@@ -106,6 +106,13 @@ func taskSummaryLine(stats contract.TaskStats, colors palette) string {
 	if stats.HarnessEvents > 0 {
 		parts = append(parts, fmt.Sprintf("⚠ %d harness", stats.HarnessEvents))
 	}
+	// Feature 012 US5: one calm roll-up of subagent context reuse — how many
+	// dispatches continued a predecessor's stream, and the verified cache share
+	// when the provider reported it. Detail per dispatch lives in the link
+	// notices and the bench record; zero links add nothing.
+	if summary := linkSummaryPart(stats.Links); summary != "" {
+		parts = append(parts, summary)
+	}
 	line := colors.muted.Render(strings.Join(parts, " · "))
 	if stats.StopCause != "" {
 		// The interrupted marker is a state signal, not metadata — warning color
@@ -113,6 +120,36 @@ func taskSummaryLine(stats contract.TaskStats, colors palette) string {
 		line += "  " + colors.warning.Render("interrupted")
 	}
 	return line
+}
+
+// linkSummaryPart renders the feature-012 reuse roll-up for the task summary:
+// "links 2/3 continued (cache 85%)" — continued count over linkable dispatches,
+// with the mean verified share across reporting continuations. Shares come
+// only from provider-reported fields; none reported → the share is omitted,
+// never estimated (Constitution VI).
+func linkSummaryPart(links []contract.LinkOutcome) string {
+	if len(links) == 0 {
+		return ""
+	}
+	continued, reported := 0, 0
+	shareSum := 0.0
+	for _, link := range links {
+		if link.Decision == "continued" {
+			continued++
+			if link.CacheShare != nil {
+				reported++
+				shareSum += *link.CacheShare
+			}
+		}
+	}
+	if continued == 0 {
+		return ""
+	}
+	part := fmt.Sprintf("links %d/%d continued", continued, len(links))
+	if reported > 0 {
+		part += fmt.Sprintf(" (cache %d%%)", int(shareSum/float64(reported)*100))
+	}
+	return part
 }
 
 // headlineTokens derives the honest headline token figure and its cache tag

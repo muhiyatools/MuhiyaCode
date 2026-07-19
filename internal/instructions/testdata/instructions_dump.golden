@@ -1,4 +1,4 @@
-INSTRUCTION SYSTEM DUMP — 107 texts, 3 examples
+INSTRUCTION SYSTEM DUMP — 110 texts, 3 examples
 
 ################ AUDIENCE: main-static ################
 
@@ -192,6 +192,11 @@ INSTRUCTION SYSTEM DUMP — 107 texts, 3 examples
   ---
   Read a UTF-8 file with line numbers. Use offset/limit for large files.
 
+[tool.read_plan.desc]
+  mentions: read_plan (ctx: main-loop)
+  ---
+  Read the session's approved execution plan. Optional section: 'steps' returns only the implementation steps. Read-only; returns 'No plan exists yet' when none is set.
+
 [tool.recall_memory.desc]
   mentions: recall_memory (ctx: main-loop)
   ---
@@ -256,9 +261,10 @@ INSTRUCTION SYSTEM DUMP — 107 texts, 3 examples
 ---- cache: tail ----
 
 [pipeline.approval.gate]
+  states: rule.phase-read
   ---
   [approval gate]
-  The saved plan is awaiting explicit user approval. Do not implement.
+  The saved plan is awaiting explicit user approval. Do not implement. Once approved, full-depth implementation file reading belongs to the implementation subagents — dispatch work and orchestrate from their reports instead of reading implementation files yourself.
 
 [pipeline.finished]
   ---
@@ -500,10 +506,20 @@ INSTRUCTION SYSTEM DUMP — 107 texts, 3 examples
 
 ---- cache: sidecar ----
 
+[gate.continuation-review.mutation]
+  enforces: rule.phase-read
+  ---
+  This continuation is review-only: mutations are refused here. Report verified findings with file:line and a VERDICT line; do not edit.
+
 [gate.duplicate-read]
   enforces: rule.no-duplicate-read
   ---
   Blocked: unchanged result already in context from call %s. Use that result; do not re-read.
+
+[gate.phase-read.block]
+  enforces: rule.phase-read
+  ---
+  Implementation phase: file reading belongs to the implementation subagents. Dispatch the work (run_subagent) or await the phase report. [read attempt %d of 2 — the third proceeds with a recorded waiver]
 
 [gate.pipeline.escalated]
   enforces: rule.plan-mode-read-only

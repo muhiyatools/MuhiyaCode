@@ -77,6 +77,11 @@ type PairingRate struct {
 	CacheMissTokens    int      `json:"cacheMissTokens"`
 	SteadyStateHitRate *float64 `json:"steadyStateHitRate,omitempty"`
 	Reported           bool     `json:"reported"`
+	// PromptTokens/CompletionTokens (feature 012 R-D13) sum the pairing's
+	// provider-reported spend — exact per-pin attribution for the benchmark
+	// (retires the feature-011 whole-task review-spend approximation).
+	PromptTokens     int `json:"promptTokens,omitempty"`
+	CompletionTokens int `json:"completionTokens,omitempty"`
 }
 
 // PerPairingRates aggregates usage records per (model, pin), preserving first-
@@ -102,6 +107,12 @@ func PerPairingRates(records []UsageRecord) []PairingRate {
 			order = append(order, key)
 		}
 		b.rate.Requests++
+		if record.PromptTokens != nil {
+			b.rate.PromptTokens += *record.PromptTokens
+		}
+		if record.CompletionTokens != nil {
+			b.rate.CompletionTokens += *record.CompletionTokens
+		}
 		if record.CacheReadTokens == nil || record.CacheMissTokens == nil {
 			continue
 		}

@@ -50,6 +50,28 @@ var (
 	gatePipelineEscalatedText = Register(Text{ID: "gate.pipeline.escalated", Audience: Gate, Cache: Sidecar, Body: GatePipelineEscalatedTmpl, EnforcesRule: RulePlanModeReadOnly})
 )
 
+// RulePhaseRead is the feature-012 role-separation rule (contracts/role-gate.md):
+// during full-depth implementation phases, file reading belongs to the
+// implementation subagents; the main model orchestrates from reports.
+const RulePhaseRead = "rule.phase-read"
+
+const (
+	// GatePhaseReadBlockTmpl fires when the main model reads an implementation
+	// file while full-depth implementation is active (RG-3). It names the exact
+	// reason and the affordable next action, and shows the bounded allowance.
+	GatePhaseReadBlockTmpl = "Implementation phase: file reading belongs to the implementation subagents. Dispatch the work (run_subagent) or await the phase report. [read attempt %d of 2 — the third proceeds with a recorded waiver]"
+	// GateContinuationReviewMutationBody masks mutating tools inside a
+	// review-after-implement continuation (feature 012 R-D2): the wire tool
+	// array stays the implementer's (cache identity), so the refusal happens
+	// harness-side.
+	GateContinuationReviewMutationBody = "This continuation is review-only: mutations are refused here. Report verified findings with file:line and a VERDICT line; do not edit."
+)
+
+var (
+	gatePhaseReadBlockText             = Register(Text{ID: "gate.phase-read.block", Audience: Gate, Cache: Sidecar, Body: GatePhaseReadBlockTmpl, EnforcesRule: RulePhaseRead})
+	gateContinuationReviewMutationText = Register(Text{ID: "gate.continuation-review.mutation", Audience: Gate, Cache: Sidecar, Body: GateContinuationReviewMutationBody, EnforcesRule: RulePhaseRead})
+)
+
 // RuleNoRepeatFailedCall / RuleNoDuplicateRead are the terse-gate rule IDs
 // covered by the gate-message-quality audit (IS-8).
 const (

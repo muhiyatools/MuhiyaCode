@@ -1,0 +1,52 @@
+[
+  {
+    "task_id": "cl-001",
+    "category": "multi-phase-sequential",
+    "workspace": "../../../011-competitive-agent-audit/benchmarks/fixtures/workspaces/wslogic",
+    "prompt": "Two-phase change, run as one plan: phase 1 — add a Multiply function to calc/calc.go with a table test in calc/calc_test.go; phase 2 — use Multiply in report/report.go's Totals to compute a product line, updating store/store_test.go expectations if needed. Implement phase by phase.",
+    "expect": {
+      "links": "the phase-2 implement dispatch links `continued (same-kind)` to phase 1; SC-001 measures its first-request cache share",
+      "notes": "Quickstart S1. Also exercises the review-after-implement continuation at validation (full depth)."
+    }
+  },
+  {
+    "task_id": "cl-002",
+    "category": "self-edit-chain",
+    "workspace": "../../../011-competitive-agent-audit/benchmarks/fixtures/workspaces/wslogic",
+    "prompt": "Refactor pass in two phases: phase 1 — rename the exported Sum helper to Total across calc/ and its tests (edit every file you read); phase 2 — add doc comments to every exported symbol in calc/ you renamed. Implement phase by phase.",
+    "expect": {
+      "links": "phase 2 links `continued` with changed-fraction 0 — the predecessor's own edits are NOT stale (end-of-run fingerprints, R-D5)",
+      "notes": "Quickstart S2 first half. Zero re-reads of files phase 1 edited (SC-002)."
+    }
+  },
+  {
+    "task_id": "cl-003",
+    "category": "external-edit-staleness",
+    "workspace": "../../../011-competitive-agent-audit/benchmarks/fixtures/workspaces/wslogic",
+    "prompt": "Same two-phase refactor as cl-002, but the RUNNER touches 6 of the 10 files phase 1 read between the phases (external edit injection — see runner notes).",
+    "expect": {
+      "links": "phase 2 declines continuation with `digest-seeded / stale:60%`; the digest carries the predecessor summary + changed markers",
+      "notes": "Quickstart S2 second half. Runner support: bench harness gains a between-phase touch hook for this fixture only."
+    }
+  },
+  {
+    "task_id": "cl-004",
+    "category": "review-after-implement",
+    "workspace": "../../../011-competitive-agent-audit/benchmarks/fixtures/workspaces/wsauth",
+    "prompt": "Add an expiry check to the session token validation in middleware/auth.go (reject tokens whose exp is past), with a focused test. This touches an auth path, so the full pipeline with validation review is expected.",
+    "expect": {
+      "links": "the validation review dispatch links `continued (review-after-implement)` onto the implementer's stream; mutations inside the review are refused by the capability mask",
+      "notes": "Quickstart S3. Risk-area (auth) guarantees a review tier ≥ focused (feature 011 H4)."
+    }
+  },
+  {
+    "task_id": "cl-005",
+    "category": "related-follow-up",
+    "workspace": "../../../011-competitive-agent-audit/benchmarks/fixtures/workspaces/wslogic",
+    "prompt": "TASK A: implement a Percentile helper in calc/calc.go with tests. THEN, as a separate follow-up task in the same session: 'now use the Percentile helper in report/report.go to add a p95 line'.",
+    "expect": {
+      "links": "the follow-up task's implement dispatch links to task A's chain via the relatedness predicate (terms 'percentile'/'calc' match the touched set); an unrelated follow-up would record `relatedness-miss`",
+      "notes": "Quickstart S1 variant for Clarification Q2 (same-session follow-up eligibility). Runner drives two sequential one-shot prompts on one session."
+    }
+  }
+]

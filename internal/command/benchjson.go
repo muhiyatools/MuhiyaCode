@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
@@ -40,6 +41,23 @@ type benchPairing struct {
 	Pin                string   `json:"pin"`
 	SteadyStateHitRate *float64 `json:"steady_state_hit_rate,omitempty"`
 	Reported           bool     `json:"reported"`
+	PromptTokens       int      `json:"prompt_tokens,omitempty"`
+	CompletionTokens   int      `json:"completion_tokens,omitempty"`
+}
+
+type benchLink struct {
+	RunID          string   `json:"run_id"`
+	Kind           string   `json:"kind"`
+	Decision       string   `json:"decision"`
+	Form           string   `json:"form,omitempty"`
+	Reason         string   `json:"reason"`
+	Predecessor    string   `json:"predecessor,omitempty"`
+	CacheShare     *float64 `json:"cache_share,omitempty"`
+	CacheReported  bool     `json:"cache_reported"`
+	InheritedFiles int      `json:"inherited_files,omitempty"`
+	RereadFiles    int      `json:"reread_files,omitempty"`
+	OutboundChars  int      `json:"outbound_chars,omitempty"`
+	ReturnChars    int      `json:"return_chars,omitempty"`
 }
 
 type benchSummary struct {
@@ -52,6 +70,14 @@ type benchSummary struct {
 	Review        benchReview     `json:"review"`
 	Violations    benchViolations `json:"violations"`
 	PerPairing    []benchPairing  `json:"per_pairing,omitempty"`
+	// Links (feature 012 R-D13) is the per-dispatch context-link ledger; the
+	// read_gate counters record the role gate's outcomes.
+	Links    []benchLink `json:"links,omitempty"`
+	ReadGate struct {
+		Denied int `json:"denied,omitempty"`
+		Waived int `json:"waived,omitempty"`
+		Exempt int `json:"exempt,omitempty"`
+	} `json:"read_gate,omitzero"`
 }
 
 // emitBenchSummary renders the summary from the task's completion stats. A task
@@ -74,14 +100,20 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 		review.Rationale = stats.ReviewRationale
 		review.CeilingHit = stats.ReviewCeilingHit
 		if review.Tier != "skip" {
-			// v1 approximation until per-pin attribution (T032) lands: subagent
-			// usage this task stands in for review spend. On the nudge path the
-			// review subagent is typically the only agent, so the figure is close;
-			// it is an upper bound, never an undercount, and is replaced by the
-			// exact :sub:review pin aggregation when T032 ships.
-			review.SpendTokens = stats.AgentUsage.TotalTokens
+			// Feature 012 R-D13: exact per-pin attribution — the :sub:review
+			// pairing's provider-reported spend (retires the feature-011
+			// whole-task approximation). Falls back to the old upper bound only
+			// when no review pairing reported.
+			for _, pairing := range stats.PerPairing {
+				if strings.HasSuffix(pairing.Pin, ":sub:review") || pairing.Pin == ":sub:review" {
+					review.SpendTokens += pairing.PromptTokens + pairing.CompletionTokens
+				}
+			}
 			if review.SpendTokens == 0 {
-				review.SpendTokens = stats.AgentUsage.PromptTokens + stats.AgentUsage.CompletionTokens
+				review.SpendTokens = stats.AgentUsage.TotalTokens
+				if review.SpendTokens == 0 {
+					review.SpendTokens = stats.AgentUsage.PromptTokens + stats.AgentUsage.CompletionTokens
+				}
 			}
 		}
 	}
@@ -104,8 +136,19 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 		summary.PerPairing = append(summary.PerPairing, benchPairing{
 			Model: pairing.Model, Pin: pairing.Pin,
 			SteadyStateHitRate: pairing.SteadyStateHitRate, Reported: pairing.Reported,
+			PromptTokens: pairing.PromptTokens, CompletionTokens: pairing.CompletionTokens,
 		})
 	}
+	for _, link := range stats.Links {
+		summary.Links = append(summary.Links, benchLink{
+			RunID: link.RunID, Kind: link.Kind, Decision: link.Decision, Form: link.Form,
+			Reason: link.Reason, Predecessor: link.Predecessor,
+			CacheShare: link.CacheShare, CacheReported: link.CacheReported,
+			InheritedFiles: link.InheritedFiles, RereadFiles: link.RereadFiles,
+			OutboundChars: link.OutboundChars, ReturnChars: link.ReturnChars,
+		})
+	}
+	summary.ReadGate.Denied, summary.ReadGate.Waived, summary.ReadGate.Exempt = stats.ReadGate.Denied, stats.ReadGate.Waived, stats.ReadGate.Exempt
 	payload, err := json.Marshal(map[string]benchSummary{"muhiya_bench": summary})
 	if err != nil {
 		return

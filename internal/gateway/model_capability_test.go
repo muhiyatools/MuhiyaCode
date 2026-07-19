@@ -46,6 +46,24 @@ func TestClampOutputTokens(t *testing.T) {
 	}
 }
 
+// Feature 012 FR-010/R-D12: continuation-linking capability per family.
+// DeepSeek and MiniMax reward byte-identical replay; every unverified family
+// degrades to the digest-seeded fallback (Constitution IX). DeepSeek pins the
+// continuation's effort tier until the P3 probe proves flips are cache-safe.
+func TestContinuationLinkingCapability(t *testing.T) {
+	if p := ResolveModelProfile("deepseek-v4-pro"); p.ContinuationLinking != ContinuationSupported || !p.EffortPinned {
+		t.Fatalf("deepseek profile = %+v, want supported + effort-pinned", p)
+	}
+	if p := ResolveModelProfile("MiniMax-M3"); p.ContinuationLinking != ContinuationSupported {
+		t.Fatalf("minimax profile = %+v, want supported", p)
+	}
+	for _, name := range []string{"glm-4", "unrecognized-provider-model"} {
+		if p := ResolveModelProfile(name); p.ContinuationLinking == ContinuationSupported {
+			t.Fatalf("%s must degrade to digest-only, got %+v", name, p)
+		}
+	}
+}
+
 func TestMiniMaxProfileLimitsAndFamilyNames(t *testing.T) {
 	for _, name := range []string{"MiniMax-M3", "M3"} {
 		profile := ResolveModelProfile(name)

@@ -92,6 +92,27 @@ func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, defin
 			return toolOutcome{Call: call, Output: output, Failed: true}
 		}
 	}
+	// Feature 012 R-D2: a review-after-implement continuation carries the
+	// implementer's full tool array on the wire (cache identity) but is
+	// review-only in effect — mutations are refused harness-side. Only bites
+	// read-only scopes whose definitions include mutating tools (continuation
+	// runs); fresh read-only kinds never offer these tools, so H1 catches them
+	// first.
+	if sc.readOnly && isMutation(name) && name != "run_shell" {
+		output := instructions.GateContinuationReviewMutationBody
+		e.recordHarnessEvent(ctx, contract.HarnessGate, "continuation-review-mutation-block", name)
+		end(output)
+		e.recordFailedCall(sc, signature, output)
+		return toolOutcome{Call: call, Output: output, Failed: true}
+	}
+	// Feature 012 role gate (contracts/role-gate.md RG-1..RG-4): during
+	// full-depth implementation phases the MAIN model's implementation reads
+	// are denied with dispatch guidance — bounded at two per task, then waived
+	// with a recorded degradation; post-failure diagnosis and degraded phases
+	// are exempt.
+	if outcome, blocked := e.phaseReadGate(ctx, sc, call, name, signature); blocked {
+		return outcome
+	}
 	// 009 PL-6 / 010 UL-3: the ONE mutation gate. The 009 audit proved the two
 	// former gates guarded the SAME state set — the read-only window
 	// (research/planning/awaiting-approval) — so they collapse onto one predicate,

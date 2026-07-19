@@ -55,7 +55,29 @@ type ModelProfile struct {
 	JSONModeRules    string
 	BetaFeatures     []BetaFeature
 	KeepAliveNote    string
+	// ContinuationLinking (feature 012 FR-010, research R-D12) states whether the
+	// family's caching rewards byte-identical transcript replay, making subagent
+	// stream continuation worthwhile: DeepSeek matches identical prefixes from
+	// token 0 in 64-token blocks (R-F19); MiniMax caches passively over
+	// tool-list→system→messages order with a 512-token floor (R-F20). Unknown
+	// families degrade to the digest-seeded fallback (CP-7 / Constitution IX).
+	ContinuationLinking ContinuationSupport
+	// EffortPinned makes continuations inherit the predecessor's reasoning tier:
+	// an effort flip changes top-level body params (thinking/reasoning_effort)
+	// whose cache effect is undocumented for DeepSeek — conservative default is
+	// pinned until the P3 probe proves otherwise (research R-D12).
+	EffortPinned bool
 }
+
+// ContinuationSupport is the per-family continuation-linking capability.
+type ContinuationSupport string
+
+const (
+	// ContinuationSupported: byte-identical replay is billed as cache reads.
+	ContinuationSupported ContinuationSupport = "supported"
+	// ContinuationDigestOnly: no verified replay caching — digest fallback only.
+	ContinuationDigestOnly ContinuationSupport = "digest-only"
+)
 
 // deepSeekBetaFeatures is the recorded adoption status of DeepSeek beta features
 // (feature 007 research R9). None are adopted: MuhiyaCode edits via tool calls and
@@ -86,6 +108,8 @@ func ResolveModelProfile(name string) ModelProfile {
 			ParsesReasoning:     true,
 			ReasoningReplay:     ReasoningReplayStrip,
 			PromptAddendum:      instructions.GatewayDeepSeekAddendumBody,
+			ContinuationLinking: ContinuationSupported,
+			EffortPinned:        true,
 			SupportedParams:     deepSeekSupportedParams,
 			DeprecatedParams:    deepSeekDeprecatedParams,
 			JSONModeRules:       "response_format=json_object requires the word \"json\" plus an example of the shape in the prompt, and max_tokens sized to avoid truncation (known: occasional empty content).",
@@ -107,8 +131,9 @@ func ResolveModelProfile(name string) ModelProfile {
 			DefaultContextWindow: limit, ContextWindowLimit: limit,
 			NeedsToolCallRescue: true, ParsesReasoning: true,
 			ReasoningReplay: ReasoningReplayPreserve, CacheMinPromptTokens: 512,
-			PromptAddendum:  instructions.GatewayMiniMaxAddendumBody,
-			SupportedParams: []string{"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options", "tools", "tool_choice", "reasoning_split"},
+			ContinuationLinking: ContinuationSupported,
+			PromptAddendum:      instructions.GatewayMiniMaxAddendumBody,
+			SupportedParams:     []string{"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options", "tools", "tool_choice", "reasoning_split"},
 		}
 	case strings.Contains(lower, "glm") || strings.Contains(lower, "zhipu"):
 		return ModelProfile{Family: "glm", Temperature: .1, TopP: .9, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, PromptAddendum: instructions.GatewayGLMAddendumBody}

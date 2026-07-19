@@ -60,8 +60,13 @@ type Settings struct {
 	// "off" | "conservative" | "default" (empty = default). Explicit review
 	// requests always run regardless of this setting.
 	ReviewGating string `json:"reviewGating,omitempty"`
-	Theme        string `json:"theme"`
-	Shell        struct {
+	// ContextLinking (feature 012 FR-017) controls subagent context reuse:
+	// "off" | "default" (empty = default). "off" restores pre-012 dispatch
+	// behavior exactly — every subagent starts fresh and the phase read gate
+	// is disabled.
+	ContextLinking string `json:"contextLinking,omitempty"`
+	Theme          string `json:"theme"`
+	Shell          struct {
 		Preferred   string `json:"preferred"`
 		TimeoutMS   int    `json:"timeoutMs"`
 		OutputLimit int    `json:"outputLimit"`
@@ -566,6 +571,51 @@ type TaskStats struct {
 	// friction (gate/tool/ui classes) recorded during THIS task. >0 appends a
 	// dimmed "⚠ N harness" marker to the task summary; 0 adds no noise.
 	HarnessEvents int `json:"harnessEvents,omitempty"`
+	// Links (feature 012 FR-015) records every subagent dispatch's context-link
+	// decision this task — including declines with their reason — so the summary
+	// and benchmark records always explain what was reused and what was not.
+	Links []LinkOutcome `json:"links,omitempty"`
+	// ReadGate (feature 012 FR-006) counts the phase-scoped role gate's outcomes
+	// for this task: implementation reads denied, the bounded waiver, and
+	// recorded exemptions.
+	ReadGate ReadGateStats `json:"readGate,omitzero"`
+}
+
+// LinkOutcome (feature 012, data-model.md ContextLink) is the per-dispatch
+// record of the context-link decision and its provider-verified outcome. Cache
+// figures are provider-reported or absent — never estimated (Constitution VI).
+type LinkOutcome struct {
+	RunID       string `json:"runId"`
+	Kind        string `json:"kind"`
+	Predecessor string `json:"predecessor,omitempty"`
+	// Decision: "continued" | "digest-seeded" | "fresh".
+	Decision string `json:"decision"`
+	// Form is set when Decision=="continued": "same-kind" | "review-after-implement".
+	Form string `json:"form,omitempty"`
+	// Reason is the machine-readable first-failing (or passing) criterion from
+	// contracts/context-linking.md CL-1, e.g. "eligible", "no-candidate",
+	// "terminal-shape:failed", "stale:60%", "window-overflow", "disabled".
+	Reason string `json:"reason"`
+	// CacheShare is the first continuation request's paired cache-read share
+	// (read/(read+miss)) from provider-reported usage; nil when the provider
+	// reported no cache fields (rendered "unavailable", never estimated).
+	CacheShare    *float64 `json:"cacheShare,omitempty"`
+	CacheReported bool     `json:"cacheReported,omitempty"`
+	// InheritedFiles/RereadFiles: touched-set members carried current vs
+	// staleness-directed re-reads named in the successor handoff.
+	InheritedFiles int `json:"inheritedFiles,omitempty"`
+	RereadFiles    int `json:"rereadFiles,omitempty"`
+	// OutboundChars/ReturnChars feed the SC-006 communication-overhead share.
+	OutboundChars int `json:"outboundChars,omitempty"`
+	ReturnChars   int `json:"returnChars,omitempty"`
+}
+
+// ReadGateStats (feature 012 contracts/role-gate.md RG-3) aggregates the
+// phase-scoped read gate's telemetry for one task.
+type ReadGateStats struct {
+	Denied int `json:"denied,omitempty"`
+	Waived int `json:"waived,omitempty"`
+	Exempt int `json:"exempt,omitempty"`
 }
 
 // StopCause values for TaskStats.StopCause (003, FR-013a).

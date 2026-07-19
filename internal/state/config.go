@@ -301,6 +301,16 @@ func SetConfig(key, value string, settings *contract.Settings, secrets *contract
 		default:
 			return fmt.Errorf("reviewGating must be off, conservative, or default")
 		}
+	case "contextLinking":
+		// Feature 012 FR-017: "off" restores pre-012 dispatch behavior exactly
+		// (no continuation, no digest seeding, read gate disabled).
+		normalized := strings.TrimSpace(strings.ToLower(value))
+		switch normalized {
+		case "", "default", "off":
+			settings.ContextLinking = normalized
+		default:
+			return fmt.Errorf("contextLinking must be off or default")
+		}
 	case "rtlMode":
 		settings.RTL.Mode = value
 	case "rtlAlign":

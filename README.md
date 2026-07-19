@@ -44,6 +44,7 @@ You can also sign in from inside the app with `/login`.
 - **DeepSeek prefix-cache optimized** — byte-stable prompts keep the cache warm across a whole session.
 - **Autonomous goals** — the agent works toward a goal across bounded, self-continuing turns.
 - **Concurrent subagents** — `explore`, `plan`, `review`, and `general` run in parallel for research, planning, and review, each on its own cache pin with optional token ceilings.
+- **Subagent context linking** — a continuation subagent resumes its predecessor's conversation stream, so the provider bills the shared prefix as cache reads instead of re-reading everything from zero; staleness-checked, provider-verified, and visible per dispatch (`contextLinking`: off/default).
 - **Right-sized reviews** — a deterministic gate decides when an automatic review is warranted and at what depth (`review_gating`: off/conservative/default); trivial changes skip with a visible rationale, risk-area changes always review, and explicit review requests always run.
 - **MCP servers** — stdio and Streamable HTTP, with OAuth and per-tool permissions.
 - **Persistent project memory** — root-local `MEMORY.md` and `MUHIYA.md` travel with your repo.

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/gateway"
 	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
@@ -36,6 +37,9 @@ type subagentResult struct {
 	RunID, Agent, Title, Report, Status string
 	Turns, ToolCalls                    int
 	Usage                               contract.Usage
+	// TerminalShape (feature 012 R-D4) distinguishes clean completions from
+	// wrap-up/ceiling/failed/cancelled endings in every durable record.
+	TerminalShape string
 }
 
 type HandoffContract struct {
@@ -86,7 +90,7 @@ func handoffFor(input subagentInput, context string) HandoffContract {
 }
 
 func (e *Engine) subagentSpecs() map[string]subagentSpec {
-	read := map[string]bool{"list_files": true, "read_file": true, "grep": true, "search_text": true, "glob": true, "git_status": true, "git_diff": true, "run_shell": true}
+	read := map[string]bool{"list_files": true, "read_file": true, "grep": true, "search_text": true, "glob": true, "git_status": true, "git_diff": true, "run_shell": true, "read_plan": true}
 	all := make(map[string]bool)
 	for _, name := range e.registry.Names() {
 		all[name] = true
@@ -191,7 +195,7 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 	}
 	e.addTaskAgentUsage(result.Usage)
 	if e.persistence.AddEvent != nil {
-		summary, _ := json.Marshal(map[string]any{"runId": result.RunID, "agent": result.Agent, "title": result.Title, "status": result.Status, "turns": result.Turns, "toolCalls": result.ToolCalls, "usage": result.Usage, "task": contract.TruncateEllipsis(input.Task, 2000), "report": contract.TruncateEllipsis(result.Report, 4000)})
+		summary, _ := json.Marshal(map[string]any{"runId": result.RunID, "agent": result.Agent, "title": result.Title, "status": result.Status, "terminalShape": result.TerminalShape, "turns": result.Turns, "toolCalls": result.ToolCalls, "usage": result.Usage, "task": contract.TruncateEllipsis(input.Task, 2000), "report": contract.TruncateEllipsis(result.Report, 4000)})
 		_ = e.persistence.AddEvent(ctx, "agent", "run_summary", e.redact(string(summary)), "")
 	}
 	status := ""
@@ -224,12 +228,24 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 	return fmt.Sprintf("Subagent %q report%s (%d turns, %d tool calls; %s):\n%s%s", result.Agent, status, result.Turns, result.ToolCalls, budgetNote, parentReport, truncNote), nil
 }
 
+// subagentSystemMessage composes the per-kind-per-session STABLE system
+// message (feature 012 R-D6, contracts/phase-handoff.md PH-1): kind identity,
+// spec system text, workspace, and capability statement — never any per-run
+// content. Every dispatch of a kind therefore shares the provider-cached
+// system+tools prefix; the per-run handoff rides the first user message.
+func (e *Engine) subagentSystemMessage(spec subagentSpec) string {
+	return "You are the " + spec.Name + " subagent inside MuhiyaCode. " + spec.System + "\nWorkspace: " + e.session.WorkspacePath + "\n" + capabilityStatement(spec)
+}
+
+// subagentUserMessage joins the per-run handoff with the task as the dispatch
+// user message (PH-1 placement).
+func subagentUserMessage(handoff HandoffContract, task string) string {
+	return handoff.Render() + "\n\nTASK:\n" + task
+}
+
 func (e *Engine) executeSubagent(ctx context.Context, runID string, input subagentInput, spec subagentSpec) subagentResult {
 	result := subagentResult{RunID: runID, Agent: input.Agent, Title: input.Title, Status: "done"}
-	modelID := e.settings.Provider.SubagentModelID
-	if modelID == "" {
-		modelID = e.settings.Provider.ActiveModelID
-	}
+	modelID := e.subagentModelID()
 	modelName := modelID
 	for _, model := range e.settings.Provider.Models {
 		if model.ID == modelID {
@@ -245,15 +261,76 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		phase = pipelineLabel(l.State)
 	}
 	role := handoffRole(input.Agent)
+	// Feature 012 CL-1: every dispatch gets a recorded link decision.
+	decision := e.decideLink(input, spec, modelID, "")
+	// The stream identity (system message, tool array, pin, record kind) is the
+	// predecessor's for a continuation, the dispatched kind's otherwise (R-D1/
+	// R-D2 — review-after-implement keeps the implementer's wire identity and
+	// masks mutations harness-side).
+	streamSpec := spec
+	if decision.Decision == linkContinued {
+		if predSpec, ok := e.subagentSpecs()[decision.Predecessor.Kind]; ok {
+			streamSpec = predSpec
+		}
+	}
 	shared := ""
 	if e.knowledge != nil {
 		shared = e.knowledge.BriefingForScope(input.Task, 1500)
 	}
+	if decision.CarryForward != "" {
+		// Digest fallback (CL-3): the predecessor digest leads; any scope-matched
+		// briefing rides behind it within the same bound.
+		shared = contract.TruncateEllipsis(decision.CarryForward+"\n"+shared, 2200)
+	}
 	handoff := handoffFor(input, shared)
+	system := e.subagentSystemMessage(streamSpec)
+	definitions := e.registry.Definitions(streamSpec.Allowed)
+	var messages []contract.Message
+	if decision.Decision == linkContinued {
+		pred := decision.Predecessor
+		// CL-2: replay the predecessor's transcript VERBATIM and append one user
+		// message carrying the new phase. Byte-identity is the whole point — the
+		// stored system message wins over any recomposition, and a drifted shape
+		// aborts to the digest fallback rather than silently paying a cold write.
+		replay := append([]contract.Message(nil), pred.Transcript...)
+		if len(replay) > 0 && replay[0].Role == contract.RoleSystem {
+			system = replay[0].Content
+		}
+		if shape, err := NewPrefixShape(system, definitions, 0, modelID); err != nil || shape.SystemHash != pred.SystemHash || shape.ToolsHash != pred.ToolsHash {
+			decision = linkDecision{Decision: linkDigestSeeded, Reason: "replay-drift", Predecessor: pred, CarryForward: digestCarryForward(pred, e.session.WorkspacePath)}
+			streamSpec = spec
+			shared = contract.TruncateEllipsis(decision.CarryForward, 2200)
+			handoff = handoffFor(input, shared)
+			system = e.subagentSystemMessage(spec)
+			definitions = e.registry.Definitions(spec.Allowed)
+			messages = []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: subagentUserMessage(handoff, input.Task)}}
+		} else {
+			handoff.Context = "Continuing your prior conversation above — inherited context is current except files explicitly listed as changed."
+			continuation := "CONTINUATION: you are resuming the conversation above."
+			if decision.Form == linkFormReviewChain {
+				continuation = "CONTINUATION — ROLE CHANGE: you are now acting as the reviewer of the work above. Report verified findings only; do not edit anything (editing tools are refused in this continuation)."
+			}
+			if len(decision.Reread) > 0 {
+				continuation += "\nThese files changed since the work above — re-read them before trusting inherited content: " + strings.Join(decision.Reread, ", ") + "."
+			}
+			messages = append(replay, contract.Message{Role: contract.RoleUser, Content: continuation + "\n\n" + subagentUserMessage(handoff, input.Task)})
+		}
+	} else {
+		messages = []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: subagentUserMessage(handoff, input.Task)}}
+	}
 	e.emitAgent(contract.AgentEvent{Kind: "start", RunID: runID, Agent: input.Agent, Phase: phase, Role: role, Title: input.Title, Task: input.Task, Handoff: handoff.Render(), Model: modelName})
-	system := "You are the " + spec.Name + " subagent inside MuhiyaCode. " + spec.System + "\nWorkspace: " + e.session.WorkspacePath + "\n" + capabilityStatement(spec) + "\n\n" + handoff.Render()
-	messages := []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: input.Task}}
-	definitions := e.registry.Definitions(spec.Allowed)
+	// Per-run read/write capture (R-D5). Continuations pre-seed the
+	// predecessor's touched paths so the successor's record represents the
+	// whole stream for ITS successor; fingerprints refresh at this run's end.
+	capture := newAgentRunCapture(e.session.WorkspacePath)
+	if decision.Decision == linkContinued {
+		for path := range decision.Predecessor.Touched.Reads {
+			capture.reads[path] = true
+		}
+		for path := range decision.Predecessor.Touched.Writes {
+			capture.writes[path] = true
+		}
+	}
 	// B6/T025: subagents dispatch through the SAME shared gate as the main loop
 	// (validation, failed-cache, repeat limiter, storm breaker, plan-mode gate),
 	// but with their OWN per-run counters so their gate state never pollutes the
@@ -275,10 +352,15 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: notice})
 		},
 		dispatch: func(c context.Context, call contract.ToolCall) (string, error) {
-			return e.registry.Execute(c, call.ToolName(), json.RawMessage(call.ArgumentsJSON()), spec.Allowed)
+			return e.registry.Execute(c, call.ToolName(), json.RawMessage(call.ArgumentsJSON()), streamSpec.Allowed)
 		},
 		postDispatch: func(call contract.ToolCall, output string, failed bool, dispatchErr error) {
 			name := call.ToolName()
+			if !failed {
+				// Feature 012 R-D5: per-run read/write evidence for the
+				// continuation record (end-of-run fingerprints at finalize).
+				capture.note(name, call.ArgumentsJSON())
+			}
 			if isMutation(name) {
 				// H7: a read-only shell probe must not bust caches in the subagent path.
 				if name == "run_shell" {
@@ -306,6 +388,20 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 	// covered, then the next response is final and the result is marked partial.
 	consumedTokens := 0
 	ceilingHit := false
+	// Feature 012: the wire pin and reasoning tier belong to the STREAM. A
+	// continuation reuses the predecessor's exact pin (gateway model routing +
+	// OpenRouter stickiness, R-F11) and — on EffortPinned families — inherits
+	// its reasoning tier so top-level body params cannot cold the prefix (P3).
+	streamPin := ":sub:" + streamSpec.Name
+	reasoning := Profile(e.effort()).AgentReasoning
+	if decision.Decision == linkContinued {
+		if profile := gateway.ResolveModelProfile(modelID); profile.EffortPinned && decision.Predecessor.Reasoning != "" {
+			reasoning = decision.Predecessor.Reasoning
+		}
+	}
+	lastPromptTokens, lastCompletionTokens := 0, 0
+	var firstTurnShare *float64
+	firstTurnCacheReported := false
 	maxTurns := max(2, int(math.Ceil(float64(spec.MaxTurns)*Profile(e.effort()).AgentTurnScale)))
 	// Exhausting the turn budget is NOT a hard failure: the subagent is told to
 	// stop calling tools and gets up to wrapUpTurns extra provider turns to
@@ -339,14 +435,24 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		// D4: per-KIND session pin (":sub:explore", ":sub:review", ...) so each
 		// kind's distinct sidecar prefix keeps its own provider prefix-cache
 		// identity warm instead of all kinds churning one shared ":sub" pin
-		// (contracts/subagent-handoff.md §2).
-		response, err := e.provider.Chat(ctx, contract.ChatRequest{SessionID: e.session.ID + ":sub:" + spec.Name, Messages: messages, Tools: definitions, ModelID: modelID, Reasoning: Profile(e.effort()).AgentReasoning})
+		// (contracts/subagent-handoff.md §2). Feature 012: continuations ride the
+		// predecessor's stream pin so provider routing and caches stay warm.
+		response, err := e.provider.Chat(ctx, contract.ChatRequest{SessionID: e.session.ID + streamPin, Messages: messages, Tools: definitions, ModelID: modelID, Reasoning: reasoning})
 		if usageErr := e.recordUsageAndEmit(func() error {
-			return e.recordIsolatedUsage(ctx, modelID, ":sub:"+spec.Name, response.Usage, previousShape == nil, reasons, elapsedMS(requestStart))
+			return e.recordIsolatedUsage(ctx, modelID, streamPin, response.Usage, previousShape == nil, reasons, elapsedMS(requestStart))
 		}); usageErr != nil {
 			result.Status = "failed"
 			result.Report = "persist subagent usage: " + usageErr.Error()
 			break
+		}
+		if turn == 1 {
+			// CL-4 verification: the continuation's first response carries the
+			// provider-reported cache truth for the replayed prefix.
+			firstTurnShare = pairedCacheShare(response.Usage)
+			firstTurnCacheReported = firstTurnShare != nil
+		}
+		if response.Usage.PromptTokens > 0 || response.Usage.CompletionTokens > 0 {
+			lastPromptTokens, lastCompletionTokens = response.Usage.PromptTokens, response.Usage.CompletionTokens
 		}
 		// Keep the parent's live task-usage display in step with subagent
 		// spending — the task summary already includes it, so the live line
@@ -439,6 +545,48 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		// so the parent (and the benchmark record's ceiling_hit flag) never
 		// mistake bounded coverage for complete coverage.
 		result.Status = "partial (token ceiling)"
+	}
+	// Feature 012 R-D4: stamp the terminal shape, then bank the run's context
+	// record (any shape — non-linkable shapes still feed the digest fallback
+	// and diagnostics) and its link-ledger outcome (FR-003/FR-015).
+	result.TerminalShape = terminalShapeFor(result.Status, wrapUp, ceilingHit)
+	if e.contextLinkingEnabled() {
+		record := &SubagentContextRecord{
+			RunID: runID, Kind: streamSpec.Name, ModelID: modelID,
+			Pin:               e.session.ID + streamPin,
+			Transcript:        messages,
+			TerminalShape:     result.TerminalShape,
+			Reasoning:         reasoning,
+			FinalPromptTokens: lastPromptTokens, FinalCompletionTokens: lastCompletionTokens,
+			Result: result.Report,
+		}
+		if previousShape != nil {
+			record.SystemHash, record.ToolsHash = previousShape.SystemHash, previousShape.ToolsHash
+		}
+		e.taskMu.Lock()
+		record.TaskLineage = e.taskSeq
+		e.taskMu.Unlock()
+		e.finalizeAgentRecord(ctx, record, capture)
+		outcome := contract.LinkOutcome{
+			RunID: runID, Kind: input.Agent,
+			Decision: decision.Decision, Form: decision.Form, Reason: decision.Reason,
+			CacheShare: firstTurnShare, CacheReported: firstTurnCacheReported,
+			InheritedFiles: decision.Inherited, RereadFiles: len(decision.Reread),
+			OutboundChars: len(handoff.Render()) + len(input.Task),
+			ReturnChars:   len(result.Report),
+		}
+		if decision.Predecessor != nil {
+			outcome.Predecessor = decision.Predecessor.RunID
+		}
+		e.recordLinkOutcome(outcome)
+		if line := linkNoticeLine(outcome); line != "" {
+			e.callbacks.EmitNotice(line)
+		}
+		if decision.Decision == linkContinued && firstTurnShare != nil && *firstTurnShare < 0.20 {
+			// CL-4 honesty: a continuation whose replayed prefix missed is
+			// surfaced, never displayed as a silent win (US3-AS2).
+			e.callbacks.EmitNotice("linked but cold (provider cache miss) — the predecessor's cache likely expired or routing changed; this run paid a cold write.")
+		}
 	}
 	e.emitAgent(contract.AgentEvent{Kind: "done", RunID: runID, Agent: input.Agent, Phase: string(phase), Role: role, Title: input.Title, Status: result.Status, Report: result.Report, Usage: result.Usage})
 	return result

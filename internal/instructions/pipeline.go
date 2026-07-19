@@ -53,7 +53,10 @@ const (
 
 	PipelinePlanningInputTmpl = "[pipeline planning input]\nThe banked findings below are the authoritative inspection result. Do not re-read covered files; call update_plan directly. Include implementation steps only: every step needs an exact target, cited finding, acceptance check, and dependency marker. Example step title: \"" + PlanStepExampleBody + "\". Put repository-wide checks only in the note's Verification section.\n%s"
 
-	PipelineApprovalGateBody = "[approval gate]\nThe saved plan is awaiting explicit user approval. Do not implement."
+	// Feature 012 RG-5: the approval gate is the advance notice for the
+	// phase-read rule — it renders BEFORE full-depth implementation can begin,
+	// so the read gate never fires unannounced (gate-policy clause a).
+	PipelineApprovalGateBody = "[approval gate]\nThe saved plan is awaiting explicit user approval. Do not implement. Once approved, full-depth implementation file reading belongs to the implementation subagents — dispatch work and orchestrate from their reports instead of reading implementation files yourself."
 
 	PipelineLightImplementationBody = "[light implementation]\nThe plan is approved. Implement it in the main conversation, keep every step status current, and run its verification commands before finishing."
 
@@ -75,7 +78,7 @@ const (
 var (
 	pipelineResearchScopeText          = Register(Text{ID: "pipeline.research.scope-task", Audience: MainDynamic, Cache: Tail, Body: PipelineResearchScopeTmpl})
 	pipelinePlanningInputText          = Register(Text{ID: "pipeline.planning.input", Audience: MainDynamic, Cache: Tail, Body: PipelinePlanningInputTmpl, StatesRule: RulePlanStepShape, Example: ExamplePlanStep.ID, MentionsTools: []string{"update_plan"}, AllowlistCtx: "main-loop"})
-	pipelineApprovalGateText           = Register(Text{ID: "pipeline.approval.gate", Audience: MainDynamic, Cache: Tail, Body: PipelineApprovalGateBody})
+	pipelineApprovalGateText           = Register(Text{ID: "pipeline.approval.gate", Audience: MainDynamic, Cache: Tail, Body: PipelineApprovalGateBody, StatesRule: RulePhaseRead})
 	pipelineLightImplementationText    = Register(Text{ID: "pipeline.implementing.light", Audience: MainDynamic, Cache: Tail, Body: PipelineLightImplementationBody})
 	pipelineValidationGateText         = Register(Text{ID: "pipeline.validating.gate", Audience: MainDynamic, Cache: Tail, Body: PipelineValidationGateBody})
 	pipelineCompleteText               = Register(Text{ID: "pipeline.finished", Audience: MainDynamic, Cache: Tail, Body: PipelineCompleteBody})

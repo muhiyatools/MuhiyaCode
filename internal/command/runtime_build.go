@@ -569,6 +569,11 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			WritePrefixShape: func(_ context.Context, snapshot contract.PrefixShapeSnapshot) error {
 				return a.sessions.WritePrefixShape(session.ID, snapshot)
 			},
+			// Feature 012 R-D3: one verbatim context record per completed
+			// subagent run, under the session's agents/ sidecar family.
+			WriteAgentRecord: func(_ context.Context, runID string, record any) error {
+				return a.sessions.WriteAgentRecord(session.ID, runID, record)
+			},
 		},
 		Prompt: orchestrator.PromptContext{
 			Workspace: session.WorkspacePath, Shell: shell,
@@ -613,6 +618,12 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			_ = manager.Close()
 		}
 		return runtimeBundle{}, err
+	}
+	// Feature 012 R-D3: restore persisted subagent context records so linking
+	// survives a restart (linkability still re-verifies staleness and provider
+	// warmth at dispatch — a dead cache surfaces as "linked but cold").
+	if agentRecords, recordsErr := a.sessions.ReadAgentRecords(session.ID); recordsErr == nil && len(agentRecords) > 0 {
+		engine.RestoreAgentRecords(agentRecords)
 	}
 	recent, err := a.db.Events(ctx, session.ID, 300)
 	if err != nil {

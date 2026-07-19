@@ -36,6 +36,10 @@ const (
 	ToolRunShellDescription  = "Run a shell command in the workspace with streaming output and cancellation. For reading or searching files use read_file/grep instead — they are cheaper and cache-tracked."
 	ToolGitStatusDescription = "Show concise git status."
 	ToolGitDiffDescription   = "Show the workspace git diff."
+	// ToolReadPlanDescription (feature 012 R-D7): the harness-served plan
+	// reader — a subagent reads its assigned phase by reference instead of
+	// receiving pasted plan prose in its handoff.
+	ToolReadPlanDescription = "Read the session's approved execution plan. Optional section: 'steps' returns only the implementation steps. Read-only; returns 'No plan exists yet' when none is set."
 )
 
 var (
@@ -54,6 +58,7 @@ var (
 	toolRunShellText   = Register(Text{ID: "tool.run_shell.desc", Audience: MainStatic, Cache: Prefix, Body: ToolRunShellDescription})
 	toolGitStatusText  = Register(Text{ID: "tool.git_status.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGitStatusDescription})
 	toolGitDiffText    = Register(Text{ID: "tool.git_diff.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGitDiffDescription})
+	toolReadPlanText   = Register(Text{ID: "tool.read_plan.desc", Audience: MainStatic, Cache: Prefix, Body: ToolReadPlanDescription, MentionsTools: []string{"read_plan"}, AllowlistCtx: "main-loop"})
 )
 
 // Synthetic main-loop tool descriptions (engine.go sessionDefinitions). The

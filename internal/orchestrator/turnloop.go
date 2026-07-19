@@ -134,6 +134,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	e.taskAgentDenied = 0
 	e.taskReviewDecision, e.taskTerminalReads = nil, 0
 	e.taskOversizedPlanRejected = false
+	e.resetLinkTaskState()
 	e.taskAgentCap = budget.MaxAgentRuns
 	e.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
 	e.taskPeakContext = 0
@@ -203,6 +204,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		}
 		sort.Strings(stats.FilesChanged)
 		e.finalizeReviewStats(&stats, assessment.Class, filesChanged, taskLinesAdded, taskLinesRemoved)
+		e.finalizeLinkStats(&stats)
 		if e.callbacks.TaskComplete != nil {
 			e.callbacks.TaskComplete(stats)
 		}

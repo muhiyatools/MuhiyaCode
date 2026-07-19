@@ -1,4 +1,4 @@
-PREFIX-CLASS TEXT DUMP (instructions package only) — 45 texts
+PREFIX-CLASS TEXT DUMP (instructions package only) — 46 texts
 
 [gateway.addendum.deepseek]
 DeepSeek: use native structured tool calls; do not emit DSML. After tool results, continue to a concrete final answer. Report only work actually performed; if steps remain, say so.
@@ -137,6 +137,9 @@ Request approval before broad or risky edits.
 
 [tool.read_file.desc]
 Read a UTF-8 file with line numbers. Use offset/limit for large files.
+
+[tool.read_plan.desc]
+Read the session's approved execution plan. Optional section: 'steps' returns only the implementation steps. Read-only; returns 'No plan exists yet' when none is set.
 
 [tool.recall_memory.desc]
 Read one project-memory topic file. The always-loaded memory index marks available topics as "- [topic] description" lines — call this when a topic's description matches the task, instead of guessing what it contains. Returns the topic's full saved text; entries may reference related topics as [[topic]] links, which you recall the same way. Only topics that appear in the index exist.

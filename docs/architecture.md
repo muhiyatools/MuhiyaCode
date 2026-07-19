@@ -17,7 +17,11 @@ The only compatibility boundary is the user's durable data in `~/.muhiya` (or
   namespaced tool schemas, OAuth, deadlines, and failure isolation.
 - `internal/orchestrator`: task classification, effort budgets, prompt compiler,
   cache-stable history, inspection/knowledge ledgers, subagents, steering,
-  compaction, plan completion, and the bounded landing protocol.
+  compaction, plan completion, and the bounded landing protocol. Feature 012
+  adds subagent context linking (`contextlink.go`/`contextrecord.go`:
+  continuation-first stream reuse with verbatim transcript records under the
+  session's `agents/` sidecars), the phase read gate (`rolegate.go`), and the
+  harness-served `read_plan` tool.
 - `internal/tui`: Bubble Tea v2 presentation. It consumes runtime events and
   owns keyboard input, menus, responsive layout, RTL display, and accessibility.
 - `internal/command`: Cobra command graph and application composition.

@@ -100,10 +100,19 @@ func (e *Engine) runPipelineResearch(ctx context.Context, userPrompt string, bud
 	} else if err := e.MarkPipelineResearchCompleted(ctx); err != nil {
 		return "", err
 	}
-	// Status line only — the aggregate findings briefing is delivered ONCE, by
-	// the plan phase's prelude next turn (the instruction-bearing consumer).
-	// Sending it here too re-transmitted ~4000 chars across two billed turns.
-	return fmt.Sprintf("[research phase complete]\n%d/%d research scopes produced usable reports before planning.", succeeded, len(inputs)), nil
+	// Feature 012 R-D11 (fixes verified gap R-F15): in the normal single-Run
+	// flow this research→planning transition happens MID-Run, and the planning
+	// prelude (which carries the findings briefing) only fires when a Run
+	// STARTS in planning — so before this fix the planner never received the
+	// findings and read files itself. Deliver the briefing here, once, on the
+	// same turn that announces research completion.
+	status := fmt.Sprintf("[research phase complete]\n%d/%d research scopes produced usable reports before planning.", succeeded, len(inputs))
+	if e.knowledge != nil {
+		if briefing := e.knowledge.Briefing(4000); strings.TrimSpace(briefing) != "" {
+			return status + "\n" + fmt.Sprintf(instructions.PipelinePlanningInputTmpl, briefing), nil
+		}
+	}
+	return status, nil
 }
 
 type pipelineResearchScope struct{ title, focus string }
@@ -327,6 +336,13 @@ func (e *Engine) runPipelineImplementation(ctx context.Context, budget Budget, p
 	}
 	inputs := make([]subagentInput, len(groups))
 	parallel := profile.ParallelAgents && pipelineGroupsDisjoint(plan, groups)
+	// Feature 012 PH-2: the phase handoff carries the plan Note's Verification/
+	// Risks digest (bounded) beside the step titles, closing the step-titles-only
+	// gap — the implementer sees what "done" must satisfy without re-deriving it.
+	noteDigest := ""
+	if note := strings.TrimSpace(plan.Note); note != "" {
+		noteDigest = "\nPlan verification notes (digest): " + contract.Digest(note, 600)
+	}
 	for i, group := range groups {
 		var steps []string
 		for _, index := range group.Indexes {
@@ -335,7 +351,7 @@ func (e *Engine) runPipelineImplementation(ctx context.Context, budget Budget, p
 		inputs[i] = subagentInput{
 			Agent: "general",
 			Title: fmt.Sprintf("Implement plan part %d", i+1),
-			Task:  fmt.Sprintf(instructions.PipelineImplementTaskTmpl, strings.Join(steps, "\n")),
+			Task:  fmt.Sprintf(instructions.PipelineImplementTaskTmpl, strings.Join(steps, "\n")) + noteDigest,
 		}
 	}
 	outcomes := e.runPipelineAgentBatch(ctx, inputs, parallel)
@@ -346,6 +362,11 @@ func (e *Engine) runPipelineImplementation(ctx context.Context, budget Budget, p
 		} else {
 			failed++
 		}
+	}
+	if failed > 0 {
+		// Feature 012 RG-4: a failed implementation dispatch opens the read gate
+		// for the phase's remainder — the orchestrator diagnoses freely.
+		e.markImplementFailureDiagnosis(ctx)
 	}
 	if err := e.writeCurrentPlan(ctx); err != nil {
 		return "", err

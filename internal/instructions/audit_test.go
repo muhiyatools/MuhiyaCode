@@ -182,14 +182,14 @@ func TestCanonicalCopy_WriteFilePermissionSentenceIsTokenIdentical(t *testing.T)
 // cross-checks this mirror against the real, live subagentSpecs() output.
 var realAllowlists = map[string]map[string]bool{
 	"main-loop": setOf("list_files", "read_file", "grep", "search_text", "glob", "edit_file", "multi_edit", "write_file",
-		"apply_patch", "run_shell", "git_status", "git_diff", "update_plan", "ask_user", "propose_changes",
+		"apply_patch", "run_shell", "git_status", "git_diff", "read_plan", "update_plan", "ask_user", "propose_changes",
 		"save_memory", "recall_memory", "edit_memory", "run_subagent", "exit_plan_mode", "web_search"),
 	"subagent.general": setOf("list_files", "read_file", "grep", "search_text", "glob", "edit_file", "multi_edit",
-		"write_file", "apply_patch", "run_shell", "git_status", "git_diff", "web_search"),
-	"subagent.explore":   setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"),
-	"subagent.plan":      setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"),
-	"subagent.review":    setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"),
-	"subagent.read-only": setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"),
+		"write_file", "apply_patch", "run_shell", "git_status", "git_diff", "read_plan", "web_search"),
+	"subagent.explore":   setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell", "read_plan"),
+	"subagent.plan":      setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell", "read_plan"),
+	"subagent.review":    setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell", "read_plan"),
+	"subagent.read-only": setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell", "read_plan"),
 }
 
 func setOf(names ...string) map[string]bool {
