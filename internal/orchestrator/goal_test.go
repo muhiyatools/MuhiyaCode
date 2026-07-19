@@ -311,3 +311,28 @@ func TestPlanModeBlocksMutations(t *testing.T) {
 		t.Fatalf("plan-mode marker missing from user message: %q", last)
 	}
 }
+
+// Feature 011 T043 (audit F11): starting an orchestrated pipeline over an
+// active goal clears the goal at the TRANSITION (setter-level exclusivity, the
+// mirror of SetGoal's DG2 refusal), not just via the brief-assembly backstop.
+func TestBeginPipelineClearsActiveGoal(t *testing.T) {
+	settings := engineSettings()
+	engine, err := NewEngine(EngineConfig{
+		Settings: &settings, Session: contract.Session{ID: "goal-pipeline", WorkspacePath: t.TempDir()},
+		Provider: &scriptedProvider{responses: []contract.ChatResponse{{Content: "x"}}}, Registry: NewRegistry(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	engine.SetGoal("keep improving test coverage")
+	if _, active := engine.GoalSnapshot(); !active {
+		t.Fatal("goal must be active before the pipeline starts")
+	}
+	engine.beginPipeline(context.Background(), PlanNeedVerdict{NeedsPlan: true, Depth: PipelineDepthLight, Reason: "test"})
+	if _, active := engine.GoalSnapshot(); active {
+		t.Fatal("beginPipeline must clear the active goal (plan⇄goal exclusivity)")
+	}
+	if !engine.Lifecycle().Orchestrated() {
+		t.Fatal("pipeline must be active after beginPipeline")
+	}
+}

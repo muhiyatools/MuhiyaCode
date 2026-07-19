@@ -28,6 +28,9 @@ func friendlyTaskError(err error) string {
 		case httpErr.Status == 402:
 			return "out of credits — top up your MuhiyaCode balance to continue."
 		case httpErr.Status == 429:
+			if strings.Contains(strings.ToLower(httpErr.Body), "budget limit") {
+				return "your plan's budget window is used up — it resets automatically when the window rolls over; to continue sooner, raise the window budget in the gateway admin panel."
+			}
 			return "rate limited — the request was retried automatically; try again in a moment."
 		case httpErr.Status >= 500:
 			return "the gateway had a server error (retried automatically) — try again shortly."

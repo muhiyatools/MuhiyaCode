@@ -40,7 +40,7 @@ func (e *Engine) preparePipelinePhase(ctx context.Context, userPrompt string, bu
 		return instructions.PipelineLightImplementationBody, nil
 	case contract.LifecycleValidating:
 		if l.Depth == PipelineDepthFull && !l.Validated {
-			return e.runPipelineValidation(ctx)
+			return e.runPipelineValidation(ctx, budget.Class)
 		}
 		return instructions.PipelineValidationGateBody, nil
 	case contract.LifecycleFinished:
@@ -315,7 +315,7 @@ func (e *Engine) runPipelineImplementation(ctx context.Context, budget Budget, p
 		if err := e.MarkPipelineStepsComplete(ctx, true); err != nil {
 			return "", err
 		}
-		return e.runPipelineValidation(ctx)
+		return e.runPipelineValidation(ctx, budget.Class)
 	}
 	// Dynamic fan-out: a small set of DEPENDENT steps (explicit ordering, or a
 	// shared file) loses coherence when split across isolated blind subagents that
@@ -361,7 +361,7 @@ func (e *Engine) runPipelineImplementation(ctx context.Context, budget Budget, p
 		}
 		return instructions.PipelineImplementationRecoveryBody, nil
 	}
-	validation, err := e.runPipelineValidation(ctx)
+	validation, err := e.runPipelineValidation(ctx, budget.Class)
 	if err != nil {
 		return "", err
 	}
@@ -391,7 +391,7 @@ func (e *Engine) writeCurrentPlan(ctx context.Context) error {
 	return nil
 }
 
-func (e *Engine) runPipelineValidation(ctx context.Context) (string, error) {
+func (e *Engine) runPipelineValidation(ctx context.Context, class TaskClass) (string, error) {
 	l := e.Lifecycle()
 	if l.State == contract.LifecycleFinished || l.Validated {
 		return instructions.PipelineValidationAlreadyDoneBody, nil
@@ -400,12 +400,36 @@ func (e *Engine) runPipelineValidation(ctx context.Context) (string, error) {
 		return "", nil
 	}
 	plan := e.CurrentPlan()
+	// Feature 011 T018: the validation review is GATED, no longer unconditional.
+	// Full-depth pipelines only exist for corroborated Large/Epic work (D2), so
+	// this site's gate decides mode-off, tier, and ceiling — never a size skip.
+	// Risk terms in the plan raise focused to deep; explicit user requests run
+	// through the ungated run_subagent path and never depend on this site.
+	samples := []string{pipelineValidationBrief(plan)}
+	for _, step := range plan.Steps {
+		samples = append(samples, step.Title)
+	}
+	decision := e.decideValidationReview(class, samples)
+	e.setTaskReviewDecision(decision)
+	if decision.Tier == ReviewTierSkip {
+		if err := e.ConfirmPipelineValidation(ctx, "review gating off — automatic validation review skipped"); err != nil {
+			return "", err
+		}
+		return instructions.PipelineValidationGateBody, nil
+	}
 	input := subagentInput{
-		Agent: "review",
-		Title: "Validate approved implementation",
-		Task:  fmt.Sprintf(instructions.PipelineValidateTaskTmpl, pipelineValidationBrief(plan)),
+		Agent:        "review",
+		Title:        fmt.Sprintf("Validate approved implementation (%s review)", decision.Tier),
+		Task:         fmt.Sprintf(instructions.PipelineValidateTaskTmpl, pipelineValidationBrief(plan)),
+		TokenCeiling: decision.AbsoluteCapTokens,
+	}
+	if decision.Tier == ReviewTierFocused {
+		// T022/D6: bound the focused tier to the changed surface + direct
+		// dependents (cap 15) and require the machine-readable Coverage line.
+		input.Task += instructions.PipelineValidateFocusedScopeBody
 	}
 	outcome := e.runPipelineAgentBatch(ctx, []subagentInput{input}, false)[0]
+	e.updateTaskReviewOutcome(outcome.Output)
 	if !pipelineValidationPassed(outcome.Output, outcome.Err) {
 		e.taskMu.Lock()
 		used, limit := e.taskPhaseAgentRuns[contract.LifecycleValidating], e.taskAgentCap
@@ -415,6 +439,7 @@ func (e *Engine) runPipelineValidation(ctx context.Context) (string, error) {
 			input.Title = "Re-scoped validation"
 			input.Task += instructions.PipelineValidateRecoveryAppendBody
 			outcome = e.runPipelineAgentBatch(ctx, []subagentInput{input}, false)[0]
+			e.updateTaskReviewOutcome(outcome.Output)
 		}
 	}
 	if !pipelineValidationPassed(outcome.Output, outcome.Err) {
@@ -463,7 +488,9 @@ func (e *Engine) maybeAdvancePipelineAfterPlanUpdate(ctx context.Context) (strin
 		return " Pipeline validation already passed; pipeline done.", nil
 	}
 	if l.Depth == PipelineDepthFull {
-		validation, err := e.runPipelineValidation(ctx)
+		// No task budget in scope here; a full-depth pipeline is Large/Epic-scale
+		// by construction (NeedsPlan), so Large is the faithful class stand-in.
+		validation, err := e.runPipelineValidation(ctx, ClassLarge)
 		if err != nil {
 			return "", err
 		}

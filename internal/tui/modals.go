@@ -21,7 +21,14 @@ func (m *Model) handleAction(action actionMsg) tea.Cmd {
 		if action.kind == "compact" {
 			m.status = "Ready"
 		}
-		m.warn(action.kind + " failed: " + action.err.Error())
+		message := action.kind + " failed: " + action.err.Error()
+		if action.kind == "login" {
+			// A failed browser sign-in (timeout, browser did not open, denied) must
+			// leave an escape hatch, and the onboarding modal should be re-offered.
+			message += " — you can also paste a key with /login <key>"
+			m.openOnboarding()
+		}
+		m.warn(message)
 		return nil
 	}
 	switch action.kind {
@@ -47,6 +54,8 @@ func (m *Model) handleAction(action actionMsg) tea.Cmd {
 		models, _ := action.value.([]contract.Model)
 		m.notify(fmt.Sprintf("Model catalog refreshed: %d model(s) available.", len(models)))
 	case "login":
+		// A successful sign-in retires any pending first-run modal.
+		m.onboardingPending = false
 		if email, ok := action.value.(string); ok && email != "" {
 			m.notify("Signed in as " + email + ".")
 		} else {
@@ -54,6 +63,9 @@ func (m *Model) handleAction(action actionMsg) tea.Cmd {
 		}
 	case "logout":
 		m.notify("Signed out. The stored API key was cleared.")
+		// Re-present the sign-in modal so the app is never left in a signed-out
+		// state with no obvious way back in.
+		m.openOnboarding()
 	case "usage":
 		if data, ok := action.value.(*UsageData); ok && data != nil {
 			m.openInfo("Account usage", formatUsage(data))
@@ -226,6 +238,39 @@ func (m *Model) openPlanReadyModal() {
 	})
 }
 
+// openOnboarding shows the first-run sign-in modal: a single option that starts
+// the browser login. If another modal is currently showing (notably the
+// workspace-trust reply prompt), it defers itself and closeModal reopens it once
+// the queue drains, so it is never dropped by openChoice's reply-modal guard. A
+// signed-in user never sees it.
+func (m *Model) openOnboarding() {
+	if m.actions.IsLoggedIn != nil && m.actions.IsLoggedIn() {
+		m.onboardingPending = false
+		return
+	}
+	if m.modal != nil || len(m.modalQueue) > 0 {
+		m.onboardingPending = true
+		return
+	}
+	m.onboardingPending = false
+	choices := []contract.QuestionChoice{
+		{Label: "Log in with Muhiya Account", Description: "Opens your browser (muhiya.com) — approve, then return here", Recommended: true},
+	}
+	m.openChoice(
+		"Welcome to MuhiyaCode",
+		"Sign in to connect this machine to your Muhiya account. Your browser will open so you can approve the sign-in.\n\nPress Esc to dismiss — you can also paste a key with /login <key>.",
+		choices,
+		func(int) tea.Cmd {
+			if m.actions.LoginViaBrowser == nil {
+				m.notify("Run `muhiyacode login` in a terminal to sign in.")
+				return nil
+			}
+			m.notify("Opening your browser to sign in… approve the request, then return here.")
+			return actionCommand("login", func() (any, error) { return m.actions.LoginViaBrowser(m.ctx) })
+		},
+	)
+}
+
 // openInfo shows a read-only modal (no choices) that closes on Enter or Esc.
 func (m *Model) openInfo(title, message string) {
 	if m.replyModalOpen() {
@@ -314,5 +359,11 @@ func (m *Model) closeModal(index int) {
 		next := m.modalQueue[0]
 		m.modalQueue = m.modalQueue[1:]
 		m.enqueueModal(next)
+	}
+	// Once every other modal (a trust prompt, a queued permission) is dismissed,
+	// open the deferred first-run onboarding modal — unless the user has since
+	// signed in (e.g. via `/login <key>`), in which case just clear the flag.
+	if m.modal == nil && len(m.modalQueue) == 0 && m.onboardingPending {
+		m.openOnboarding()
 	}
 }

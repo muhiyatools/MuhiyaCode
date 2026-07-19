@@ -19,6 +19,7 @@ func TestFriendlyTaskError(t *testing.T) {
 		{"forbidden-403", &gateway.HTTPError{Status: 403}, "/login"},
 		{"credits-402", &gateway.HTTPError{Status: 402}, "out of credits"},
 		{"rate-429", &gateway.HTTPError{Status: 429}, "rate limited"},
+		{"budget-429", &gateway.HTTPError{Status: 429, Body: `{"error":{"message":"Limit exceeded: budget limit of $0.05 exceeded for window 'Burst (5 Hours)'","type":"rate_limit_error"}}`}, "budget window"},
 		{"server-503", &gateway.HTTPError{Status: 503}, "server error"},
 		{"network", errors.New("dial tcp 1.2.3.4:443: connection refused"), "check your connection"},
 		{"dns", errors.New("lookup api.muhiya.com: no such host"), "check your connection"},

@@ -104,6 +104,18 @@ var pipelineValidateTaskText = Register(Text{
 	MentionsTools: []string{"run_shell", "git_diff", "git_status"}, AllowlistCtx: "subagent.review",
 })
 
+// PipelineValidateFocusedScopeBody (feature 011 T022/D6) is appended to a
+// FOCUSED-tier validation review: it bounds the surface per
+// contracts/review-gating.md §4 (changed files + same-package files + one-hop
+// importers, max 15) and requires the machine-parseable Coverage line the
+// harness records (CoverageReport).
+const PipelineValidateFocusedScopeBody = "\n\nFocused scope: examine ONLY the changed files (one git diff/status snapshot) plus their direct dependents — same-package files and one-hop importers — up to 15 files total; name anything beyond that as skipped instead of reading it. End your report with one line exactly of the form `Coverage: covered=<file list>; skipped=<file list or none>`."
+
+var pipelineValidateFocusedScopeText = Register(Text{
+	ID: "pipeline.validating.focused-scope", Audience: Subagent, Cache: Sidecar, Body: PipelineValidateFocusedScopeBody,
+	MentionsTools: []string{"git_diff", "git_status"}, AllowlistCtx: "subagent.review",
+})
+
 const PipelineValidateRecoveryAppendBody = "\n\nRecovery attempt: restrict inspection to the changed files and the exact verification commands in the plan. Return the required verdict even if blocked."
 
 var pipelineValidateRecoveryAppendText = Register(Text{ID: "pipeline.validating.recovery-append", Audience: Subagent, Cache: Sidecar, Body: PipelineValidateRecoveryAppendBody})

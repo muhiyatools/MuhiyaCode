@@ -54,11 +54,26 @@ func (e *Engine) beginPipeline(ctx context.Context, verdict PlanNeedVerdict) {
 	e.mu.Unlock()
 	e.modeMu.Lock()
 	hadPlan = hadPlan && e.lifecycle.State != contract.LifecycleDirect
+	// Feature 011 T043 (audit F11): setter-level plan⇄goal exclusivity, the
+	// mirror of SetGoal's DG2 guard. A pipeline starting over an active goal
+	// clears the goal HERE, at the transition, instead of leaving two live modes
+	// for the per-turn brief-assembly backstop to reconcile. The backstop stays
+	// as defense in depth.
+	goalCleared := false
+	if e.goal != nil {
+		e.clearGoalLocked("an orchestrated plan is taking over this session")
+		e.goal = nil
+		goalCleared = true
+	}
 	// A fresh pipeline run starts a brand-new lifecycle at research with the
 	// task's depth (which is also the orchestration signal). Gate facts and the
 	// strike counter reset.
 	e.lifecycle = Lifecycle{State: contract.LifecycleResearch, Depth: verdict.Depth, Why: verdict.Reason}
 	e.modeMu.Unlock()
+	if goalCleared {
+		e.clearGoalSidecar()
+		e.callbacks.EmitNotice("Active goal cleared — an orchestrated plan is taking over.")
+	}
 	e.persistPlanState()
 	if hadPlan {
 		e.recordPipelineEvent(ctx, "plan_superseded", map[string]any{"reason": "new pipeline run"})

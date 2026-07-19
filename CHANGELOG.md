@@ -2,6 +2,19 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
+## 1.0.3
+
+Competitive-agent audit (feature 011): the agent stops paying a review tax on every small task, spends tokens where risk actually lives, and reports honest per-provider cache numbers.
+
+- **Risk-aware review gating.** The validation review subagent no longer fires after almost every task. A gating engine profiles each task (files touched, lines changed, task type, risk areas like auth/billing/concurrency/migrations) and picks a tier — skip, focused, or deep. Trivial and doc-only work skips review entirely; risky changes still get a full pass (risk always outranks size). Configurable via the new `reviewGating` setting (`default` / `conservative` / `off`), and an explicit `run_subagent("review")` request is never gated.
+- **Focused reviews are bounded.** Focused-tier reviews get a scoped brief (changed files + same-package neighbors + one-hop importers, capped) and a hard token ceiling; a review that hits the ceiling wraps up and reports partial coverage instead of burning unbounded tokens.
+- **Calmer task classification.** Escalating a task to the full orchestration pipeline now requires two independent signals (length, breadth words, bullet count, file paths) instead of one — so a short prompt containing a single word like "audit" no longer triggers the heavyweight pipeline.
+- **Per-kind cache pinning.** Each subagent kind (explore / plan / review / general) gets its own stable gateway session pin, so provider prompt caches stay warm per role instead of colliding on one shared pin. Task summaries now include per-pairing steady-state cache-hit rates (cold first write excluded — the honest number).
+- **Cheaper tool habits.** The prompt and shell-tool description now steer the model to `read_file`/`grep`/`glob` for reading and searching (cheaper, cache-tracked) instead of shell `cat`/`grep`; violations are counted in task stats.
+- **Benchmark harness.** `MUHIYA_BENCH_JSON=1` makes one-shot runs emit a machine-readable summary line (usage, cost, review tier/spend, violations, per-pairing cache rates); `MUHIYA_BENCH_LEGACY_REVIEW=1` restores pre-011 review behavior for honest A/B baselines. Fixture suite + runner scripts under `scripts/bench_011.*`.
+- **Clearer budget-limit errors.** A gateway 429 caused by an exhausted plan budget window now explains itself ("your plan's budget window is used up…") instead of the generic "rate limited — try again in a moment."
+- **Fixes.** Starting an orchestrated plan now clears a stale active goal instead of carrying it across; tool-argument validation recurses into nested arrays/objects; subagent reports that exceed the return budget are banked to knowledge with a digest note instead of truncated silently.
+
 ## Unreleased — Experience Overhaul (Tier 2, folded into 1.0.2)
 
 A retention-focused rework of the terminal experience and the agent's memory, built on the Stability Gate below. Executed phase-by-phase, each gated on a green build + full test suite.

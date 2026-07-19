@@ -153,6 +153,7 @@ was removed in this feature (WI-5) — see the "removed" row below and
 | Settings Field | provider.models | The configured model catalog | internal/state/config_defaults_test.go (AutoAssign family) + internal/tui/model_switch_test.go | wired |
 | Settings Field | permissionMode | normal (confirm mutations) or auto-accept | internal/tui/keys_test.go:101 (TestShiftTabCyclesPermissionMode) + slash_alias_test.go:44 (TestModeAliasMatchesCanonicalCommand) | wired |
 | Settings Field | effort | Reasoning effort: low/medium/high/max | internal/tui/slash_alias_test.go:22 (TestEffortAliasMatchesCanonicalCommand) + internal/state/config_defaults_test.go:10 (TestDefaultEffortIsHigh) | wired |
+| Settings Field | reviewGating | Review-gate mode (feature 011): off/conservative/default; explicit review requests always run | internal/orchestrator/reviewgate_test.go:202 (TestNormalizeReviewGating) + reviewgate_test.go:26 (TestDecideHardRules) | wired |
 | Settings Field | theme | The color theme name | internal/tui/theme_test.go:38 (TestThemePaletteIsSingleSource) | wired |
 | Settings Field | shell.preferred | Preferred shell: auto/pwsh/powershell/cmd/sh | internal/workspace/workspace_test.go:255 (TestShellStreamingAndCancellation, ShellRunner.Preferred) | wired |
 | Settings Field | shell.timeoutMs | Shell command timeout in milliseconds | internal/workspace/workspace_test.go:255 (TestShellStreamingAndCancellation) | wired |

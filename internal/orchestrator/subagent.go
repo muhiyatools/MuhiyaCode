@@ -24,6 +24,12 @@ type subagentInput struct {
 	Agent string `json:"agent"`
 	Title string `json:"title"`
 	Task  string `json:"task"`
+	// TokenCeiling (feature 011 D3, contracts/subagent-handoff.md §3) bounds this
+	// run's total provider-reported token consumption. 0 = uncapped. Harness-set
+	// only (review-tier dispatches copy the gate's absolute cap here); the json
+	// tag keeps it out of the model-facing tool schema so a model call can never
+	// raise its own budget.
+	TokenCeiling int `json:"-"`
 }
 
 type subagentResult struct {
@@ -180,7 +186,7 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 	// Every usable report banks with its phase/role provenance; consumers that
 	// need research evidence filter on it (Knowledge.ResearchFindings) rather
 	// than this call discriminating by agent kind.
-	if result.Status == "done" && len(result.Report) >= 80 && e.knowledge != nil {
+	if (result.Status == "done" || strings.HasPrefix(result.Status, "partial")) && len(result.Report) >= 80 && e.knowledge != nil {
 		e.knowledge.AddPhaseReport(input.Agent, pipelineLabel(l.State), handoffRole(input.Agent), input.Title, input.Task, result.Report)
 	}
 	e.addTaskAgentUsage(result.Usage)
@@ -207,9 +213,15 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 	}
 	// Full reports are durable in the agent event/knowledge sidecars. Return a
 	// bounded handoff to the parent so phase results do not become a second
-	// transcript inside the main conversation.
+	// transcript inside the main conversation. D7: when the bound truncates, say
+	// so explicitly and point at the banked full report — the main context never
+	// receives content above the bound, and never silently loses it either.
 	parentReport := contract.TruncateEllipsis(result.Report, 2200)
-	return fmt.Sprintf("Subagent %q report%s (%d turns, %d tool calls; %s):\n%s", result.Agent, status, result.Turns, result.ToolCalls, budgetNote, parentReport), nil
+	truncNote := ""
+	if len(result.Report) > 2200 {
+		truncNote = fmt.Sprintf("\n[digest: %d-char full report banked to knowledge; later phases receive it via their briefing]", len(result.Report))
+	}
+	return fmt.Sprintf("Subagent %q report%s (%d turns, %d tool calls; %s):\n%s%s", result.Agent, status, result.Turns, result.ToolCalls, budgetNote, parentReport, truncNote), nil
 }
 
 func (e *Engine) executeSubagent(ctx context.Context, runID string, input subagentInput, spec subagentSpec) subagentResult {
@@ -288,6 +300,12 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		},
 	}
 	var previousShape *PrefixShape
+	// D3: token-ceiling enforcement uses provider-REPORTED usage accumulated per
+	// turn (never estimates — Constitution VI). Breaching the ceiling triggers the
+	// same graceful wrap-up as turn exhaustion: one instruction to report what was
+	// covered, then the next response is final and the result is marked partial.
+	consumedTokens := 0
+	ceilingHit := false
 	maxTurns := max(2, int(math.Ceil(float64(spec.MaxTurns)*Profile(e.effort()).AgentTurnScale)))
 	// Exhausting the turn budget is NOT a hard failure: the subagent is told to
 	// stop calling tools and gets up to wrapUpTurns extra provider turns to
@@ -318,9 +336,13 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			break
 		}
 		requestStart := time.Now()
-		response, err := e.provider.Chat(ctx, contract.ChatRequest{SessionID: e.session.ID + ":sub", Messages: messages, Tools: definitions, ModelID: modelID, Reasoning: Profile(e.effort()).AgentReasoning})
+		// D4: per-KIND session pin (":sub:explore", ":sub:review", ...) so each
+		// kind's distinct sidecar prefix keeps its own provider prefix-cache
+		// identity warm instead of all kinds churning one shared ":sub" pin
+		// (contracts/subagent-handoff.md §2).
+		response, err := e.provider.Chat(ctx, contract.ChatRequest{SessionID: e.session.ID + ":sub:" + spec.Name, Messages: messages, Tools: definitions, ModelID: modelID, Reasoning: Profile(e.effort()).AgentReasoning})
 		if usageErr := e.recordUsageAndEmit(func() error {
-			return e.recordIsolatedUsage(ctx, modelID, response.Usage, previousShape == nil, reasons, elapsedMS(requestStart))
+			return e.recordIsolatedUsage(ctx, modelID, ":sub:"+spec.Name, response.Usage, previousShape == nil, reasons, elapsedMS(requestStart))
 		}); usageErr != nil {
 			result.Status = "failed"
 			result.Report = "persist subagent usage: " + usageErr.Error()
@@ -337,6 +359,11 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		}
 		result.Usage = result.Usage.Add(response.Usage)
 		e.emitAgent(contract.AgentEvent{Kind: "usage", RunID: runID, Usage: result.Usage})
+		turnTokens := response.Usage.TotalTokens
+		if turnTokens == 0 {
+			turnTokens = response.Usage.PromptTokens + response.Usage.CompletionTokens
+		}
+		consumedTokens += turnTokens
 		calls := response.ToolCalls
 		text := response.Content
 		// During wrap-up the text IS the report — never let the rescue path
@@ -395,10 +422,23 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			e.recordHarnessEvent(ctx, contract.HarnessRecovery, "subagent-turn-budget", input.Agent)
 			break
 		}
+		if !wrapUp && input.TokenCeiling > 0 && consumedTokens >= input.TokenCeiling {
+			// Ceiling breach → graceful wrap-up, never silent truncation or
+			// overspend: the subagent reports what it covered and what remains.
+			wrapUp = true
+			ceilingHit = true
+			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Token budget reached: stop calling tools and return your report NOW — state exactly what you covered and what you did NOT get to."})
+		}
 		if !wrapUp && turn >= maxTurns {
 			wrapUp = true
 			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Turn budget reached: stop calling tools and return your complete report NOW with everything you found, verified or partial."})
 		}
+	}
+	if ceilingHit && result.Status == "done" {
+		// A ceiling-bounded run that still reported is a PARTIAL result, labeled
+		// so the parent (and the benchmark record's ceiling_hit flag) never
+		// mistake bounded coverage for complete coverage.
+		result.Status = "partial (token ceiling)"
 	}
 	e.emitAgent(contract.AgentEvent{Kind: "done", RunID: runID, Agent: input.Agent, Phase: string(phase), Role: role, Title: input.Title, Status: result.Status, Report: result.Report, Usage: result.Usage})
 	return result

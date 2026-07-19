@@ -7,6 +7,10 @@ import (
 )
 
 type ContextReport struct {
+	// PerPairing (feature 011 D8/T033): per-(model, pin) cache health rows for
+	// the /context readout — the mixed-model visibility SC-005 requires.
+	PerPairing []contract.PairingRate
+
 	HistoryTokens      int
 	ContextLimit       int
 	Percent            float64
@@ -56,6 +60,7 @@ func (e *Engine) ContextReport() ContextReport {
 	latched := e.maintenanceLatched
 	credits := contract.SumCreditsUSD(e.usageRecords)
 	byModel := contract.AggregateUsageByModel(e.usageRecords)
+	perPairing := contract.PerPairingRates(e.usageRecords)
 	var apiTimeMS int64
 	for _, record := range e.usageRecords {
 		if record.DurationMS != nil {
@@ -66,6 +71,7 @@ func (e *Engine) ContextReport() ContextReport {
 	linesAdded, linesRemoved := e.sessionLinesAdded, e.sessionLinesRemoved
 	e.taskMu.Unlock()
 	return ContextReport{
+		PerPairing:              perPairing,
 		HistoryTokens:           history,
 		ContextLimit:            limit,
 		Percent:                 float64(history) / float64(max(1, limit)) * 100,

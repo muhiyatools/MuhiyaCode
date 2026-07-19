@@ -293,6 +293,14 @@ func SetConfig(key, value string, settings *contract.Settings, secrets *contract
 			return fmt.Errorf("reasoning effort must be low, medium, high, or max")
 		}
 		settings.Effort = effort
+	case "reviewGating":
+		normalized := strings.TrimSpace(strings.ToLower(value))
+		switch normalized {
+		case "", "default", "conservative", "off":
+			settings.ReviewGating = normalized
+		default:
+			return fmt.Errorf("reviewGating must be off, conservative, or default")
+		}
 	case "rtlMode":
 		settings.RTL.Mode = value
 	case "rtlAlign":

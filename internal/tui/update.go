@@ -66,6 +66,14 @@ func (m *Model) applyHydration(msg hydratedMsg) tea.Cmd {
 	if strings.TrimSpace(msg.result.Notice) != "" {
 		m.warn(msg.result.Notice)
 	}
+	// First-run onboarding: with no stored credential, present a blocking sign-in
+	// modal (single option) instead of only flashing the config notice, so the
+	// login flow is discoverable the moment the app opens. The notice warn above
+	// remains as the residual guidance if the user dismisses the modal.
+	signedOut := m.actions.IsLoggedIn != nil && !m.actions.IsLoggedIn()
+	if signedOut {
+		m.openOnboarding()
+	}
 	m.refreshViewport(true)
 	var cmds []tea.Cmd
 	if cmd := m.loadInitialPageCmd(); cmd != nil { // US1 T020: establish the paging cursor
@@ -73,11 +81,17 @@ func (m *Model) applyHydration(msg hydratedMsg) tea.Cmd {
 	}
 	if prompt := strings.TrimSpace(m.pendingSubmit); prompt != "" {
 		m.pendingSubmit = ""
-		// Route through the same resolution as Enter so a slash command typed during
-		// loading runs as a command rather than being sent as a text prompt.
-		if strings.HasPrefix(prompt, "/") {
+		switch {
+		case signedOut:
+			// Don't fire a prompt typed during loading while signed out — it would
+			// only error against a missing key. Preserve it in the composer so it
+			// survives sign-in.
+			m.input.SetValue(prompt)
+		case strings.HasPrefix(prompt, "/"):
+			// Route through the same resolution as Enter so a slash command typed
+			// during loading runs as a command rather than being sent as a prompt.
 			cmds = append(cmds, m.runSlash(m.resolveSlash(prompt)))
-		} else {
+		default:
 			cmds = append(cmds, m.submit(prompt))
 		}
 	}

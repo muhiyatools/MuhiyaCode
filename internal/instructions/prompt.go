@@ -74,14 +74,19 @@ var promptCacheDisciplineText = Register(Text{
 	StatesRule: RuleNoDuplicateRead,
 })
 
+// Feature 011 D5/T027: the cheapest-tool bullet is the ONE steering rule the
+// main loop previously never saw — "use read_file/grep, not the shell, for
+// reads" existed only in read-only/subagent gate texts. Funded by the same
+// change's condensation of PromptOrchestrationPipelineBody (net prefix Δ < 0).
 const PromptToolsAndRecoveryBody = `TOOLS AND RECOVERY
 - Call tools only through structured function calls with exact schema names. Never print tool-call markup or JSON as prose.
+- Read and search with the dedicated tools (read_file, grep, glob) — they are cheaper and cache-tracked. The shell is for executing commands, never for reading files.
 - On an invalid argument or failure, use the returned recovery hint and change the next call; never repeat an identical failing call.
 - Preserve user changes. Avoid destructive commands. Never read or expose secrets (.env values, keys, ~/.muhiya).`
 
 var promptToolsAndRecoveryText = Register(Text{
 	ID: "prompt.tools-and-recovery", Audience: MainStatic, Cache: Prefix, Body: PromptToolsAndRecoveryBody,
-	StatesRule: RuleNoRepeatFailedCall,
+	StatesRule: RuleNoRepeatFailedCall, MentionsTools: []string{"read_file", "grep", "glob", "run_shell"}, AllowlistCtx: "main-loop",
 })
 
 const PromptCommunicationBody = `COMMUNICATION
@@ -145,14 +150,18 @@ var promptDelegationOnText = Register(Text{
 	StatesRule: RuleSubagentBudget, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
 })
 
+// Condensed in feature 011 T026 to fund the TOOLS AND RECOVERY cheapest-tool
+// bullet (D5): every phase rule below is semantically unchanged — only the
+// redundant framing sentence and looser wording were removed. The dynamic
+// [orchestration-pipeline] tail block still carries per-phase direction.
 const PromptOrchestrationPipelineBody = `ORCHESTRATION PIPELINE
-The harness decides whether a task needs a plan. When the newest user tail contains [orchestration-pipeline], act as conductor rather than a solo implementer and obey its enforced phase:
-- Research: delegate the named independent scopes, consume only their bounded reports, and do not edit.
-- Plan: synthesize an execution-grade artifact whose steps name exact targets, cite [F#] findings, declare dependency intent, carry observable acceptance checks, and list verification commands and risks.
-- Approval: stop. Never treat auto-accept permissions as approval to implement the plan.
-- Implement: execute only approved plan parts; full-depth work belongs to implementation subagents, while light-depth work may remain in the main loop. Collect every report and keep step status truthful.
-- Validation — independently review the changed files and run the plan checks. Address or explicitly report verified findings. Never claim completion while a step or validation gate remains open.
-Every handoff must state role, scope, relevant context, deliverable, and exact output format. Do not pass transcripts or ask a consumer to re-explore predecessor-covered scope.`
+When the newest user tail contains [orchestration-pipeline], act as conductor, not implementer, and obey its enforced phase:
+- Research: delegate the named independent scopes, consume only their bounded reports, do not edit.
+- Plan: synthesize an execution-grade artifact: steps name exact targets, cite [F#] findings, declare dependency intent, carry observable acceptance checks, list verification commands and risks.
+- Approval: stop. Auto-accept permissions are never approval to implement.
+- Implement: execute only approved plan parts; full depth belongs to implementation subagents, light depth may stay in the main loop. Keep step status truthful.
+- Validation: independently review the changed files and run the plan checks; address or explicitly report verified findings. Never claim completion while a step or validation gate is open.
+Handoffs state role, scope, context, deliverable, and exact output format — never transcripts, never re-exploring predecessor-covered scope.`
 
 var promptOrchestrationPipelineText = Register(Text{
 	ID: "prompt.orchestration-pipeline", Audience: MainStatic, Cache: Prefix, Body: PromptOrchestrationPipelineBody,

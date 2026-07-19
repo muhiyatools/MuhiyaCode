@@ -25,10 +25,15 @@ const (
 // request. Pointer-valued token fields distinguish an unavailable value from a
 // provider-reported zero.
 type UsageRecord struct {
-	Seq                int              `json:"seq"`
-	At                 time.Time        `json:"at"`
-	Model              string           `json:"model"`
-	Stream             UsageStream      `json:"stream,omitempty"`
+	Seq    int         `json:"seq"`
+	At     time.Time   `json:"at"`
+	Model  string      `json:"model"`
+	Stream UsageStream `json:"stream,omitempty"`
+	// Pin is the provider cache identity ROLE this request rode (":main",
+	// ":sub:<kind>", ":sub:onboarding", ":aux") — feature 011 D8. Per-(model,
+	// pin) aggregation is what makes mixed-model cache health measurable
+	// (SC-005). Empty on records persisted before feature 011.
+	Pin                string           `json:"pin,omitempty"`
 	PromptTokens       *int             `json:"prompt_tokens"`
 	CompletionTokens   *int             `json:"completion_tokens"`
 	CacheReadTokens    *int             `json:"cache_read_tokens"`
@@ -56,6 +61,66 @@ type UsageRecord struct {
 	// (feature 008 UD-6). nil = unknown (older persisted records, pre-send
 	// failures). Nullable JSON keeps usage.jsonl backward/forward compatible.
 	DurationMS *int64 `json:"duration_ms,omitempty"`
+}
+
+// PairingRate is the per-(model, pin) cache aggregate (feature 011 D8):
+// steady-state hit rate excludes each pairing's first cache-reporting request
+// (the cold write), so a mixed-model session's per-provider cache health is
+// comparable against single-model baselines (SC-005). Reported=false means the
+// provider sent no cache fields for this pairing — shown as "not reported",
+// never fabricated (Constitution VI).
+type PairingRate struct {
+	Model              string   `json:"model"`
+	Pin                string   `json:"pin"`
+	Requests           int      `json:"requests"`
+	CacheReadTokens    int      `json:"cacheReadTokens"`
+	CacheMissTokens    int      `json:"cacheMissTokens"`
+	SteadyStateHitRate *float64 `json:"steadyStateHitRate,omitempty"`
+	Reported           bool     `json:"reported"`
+}
+
+// PerPairingRates aggregates usage records per (model, pin), preserving first-
+// appearance order for stable display. Records without a pin (pre-011) group
+// under their stream name as a best-effort label.
+func PerPairingRates(records []UsageRecord) []PairingRate {
+	type bucket struct {
+		rate     PairingRate
+		sawFirst bool // first cache-reporting record (cold write) already skipped
+	}
+	var order []string
+	buckets := map[string]*bucket{}
+	for _, record := range records {
+		pin := record.Pin
+		if pin == "" {
+			pin = string(record.Stream)
+		}
+		key := record.Model + "|" + pin
+		b, ok := buckets[key]
+		if !ok {
+			b = &bucket{rate: PairingRate{Model: record.Model, Pin: pin}}
+			buckets[key] = b
+			order = append(order, key)
+		}
+		b.rate.Requests++
+		if record.CacheReadTokens == nil || record.CacheMissTokens == nil {
+			continue
+		}
+		b.rate.Reported = true
+		if !b.sawFirst {
+			b.sawFirst = true // cold write: excluded from the steady-state rate
+			continue
+		}
+		b.rate.CacheReadTokens += *record.CacheReadTokens
+		b.rate.CacheMissTokens += *record.CacheMissTokens
+	}
+	result := make([]PairingRate, 0, len(order))
+	for _, key := range order {
+		b := buckets[key]
+		read, miss := b.rate.CacheReadTokens, b.rate.CacheMissTokens
+		b.rate.SteadyStateHitRate = HitRate(&read, &miss)
+		result = append(result, b.rate)
+	}
+	return result
 }
 
 // HitRate returns a provider-derived rate without clamping or smoothing.

@@ -124,12 +124,22 @@ func runOneShot(cmd *cobra.Command, cwd, prompt string, fresh, noMCP bool) error
 	if notice := configurationNotice(*app.Settings(), app.secrets); notice != "" {
 		return errors.New(notice)
 	}
-	answer, _, err := app.Runtime().Engine.Run(cmd.Context(), prompt)
+	answer, stats, err := app.Runtime().Engine.Run(cmd.Context(), prompt)
 	if err != nil {
+		// Feature 011 T004a: the benchmark runner needs a summary even for a
+		// failed run (recorded as completed:false), before the error propagates.
+		if os.Getenv("MUHIYA_BENCH_JSON") == "1" {
+			emitBenchSummary(cmd.OutOrStdout(), stats, err)
+		}
 		return err
 	}
-	_, err = fmt.Fprintln(cmd.OutOrStdout(), strings.TrimSpace(answer))
-	return err
+	if _, err := fmt.Fprintln(cmd.OutOrStdout(), strings.TrimSpace(answer)); err != nil {
+		return err
+	}
+	if os.Getenv("MUHIYA_BENCH_JSON") == "1" {
+		emitBenchSummary(cmd.OutOrStdout(), stats, nil)
+	}
+	return nil
 }
 
 func newResumeCommand() *cobra.Command {
@@ -263,11 +273,14 @@ func newConfigCommand() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			addDiscoveredModels(&settings, models)
+			stranded := addDiscoveredModels(&settings, models)
 			if err := state.SaveSettings(settings, paths); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "Discovered %d model(s). Main: %s; subagent: %s.\n", len(models), settings.Provider.ActiveModelID, settings.Provider.SubagentModelID)
+			if len(stranded) > 0 {
+				fmt.Fprintf(cmd.OutOrStdout(), "No longer offered (still selected): %s. Pick a new one with `muhiyacode config set model <id>`.\n", strings.Join(stranded, ", "))
+			}
 			return nil
 		},
 	}

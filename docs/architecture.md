@@ -45,6 +45,9 @@ terminate on cancellation; no package-global worker goroutines are allowed.
    and schema regression budgets are enforced in tests.
 7. Independent subagents may run concurrently, but edits and ordinary tools
    stay ordered. Read-only subagents have physically restricted tool registries.
+   Each subagent kind carries its own provider cache pin (`:sub:<kind>`), an
+   optional provider-reported token ceiling, and — for the review kind — a
+   deterministic dispatch gate (feature 011) with a user-visible rationale.
 8. A task never silently dies at a turn cap: it escalates once when warranted,
    receives a convergence warning, then lands with tools disabled and a factual
    final report.

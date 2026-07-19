@@ -226,6 +226,13 @@ type Engine struct {
 	taskPeakContext float64
 	taskDuplicates  int
 	taskOverBudget  int
+	// taskReviewDecision (feature 011) is the review-gating outcome that governed
+	// this task — set by whichever trigger site consulted the gate first, or by
+	// the informational end-of-task evaluation; surfaced on TaskStats (SC-009).
+	taskReviewDecision *ReviewDecision
+	// taskTerminalReads counts run_shell invocations that merely read a file
+	// where a dedicated tool sufficed (feature 011 SC-006 violation counter).
+	taskTerminalReads int
 	// taskOversizedPlanRejected bounds the update_plan >hard-max step gate to one
 	// guidance round per task (D5/T032): the second oversized attempt is accepted
 	// rather than rejected again, so steps are never destroyed.
@@ -270,6 +277,7 @@ type mainUsageObservation struct {
 type usageRecordInput struct {
 	model       string
 	stream      contract.UsageStream
+	pin         string
 	usage       contract.Usage
 	reasons     []string
 	attribution contract.CacheAttribution

@@ -1,0 +1,4 @@
+# wsauth fixture configuration
+listen_port: 8080
+log_level: info
+request_timeout_seconds: 15

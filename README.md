@@ -43,7 +43,8 @@ You can also sign in from inside the app with `/login`.
 - **Guarded agentic tools** — read, search, exact edits, patches, and shell, with a permission mode you control.
 - **DeepSeek prefix-cache optimized** — byte-stable prompts keep the cache warm across a whole session.
 - **Autonomous goals** — the agent works toward a goal across bounded, self-continuing turns.
-- **Concurrent subagents** — `explore`, `plan`, `review`, and `general` run in parallel for research, planning, and review.
+- **Concurrent subagents** — `explore`, `plan`, `review`, and `general` run in parallel for research, planning, and review, each on its own cache pin with optional token ceilings.
+- **Right-sized reviews** — a deterministic gate decides when an automatic review is warranted and at what depth (`review_gating`: off/conservative/default); trivial changes skip with a visible rationale, risk-area changes always review, and explicit review requests always run.
 - **MCP servers** — stdio and Streamable HTTP, with OAuth and per-tool permissions.
 - **Persistent project memory** — root-local `MEMORY.md` and `MUHIYA.md` travel with your repo.
 

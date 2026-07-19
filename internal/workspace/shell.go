@@ -71,6 +71,16 @@ func (r *ShellRunner) Run(parent context.Context, cwd, command string, timeout t
 	if err != nil {
 		return ShellResult{}, err
 	}
+	return r.runArgv(parent, cwd, shell, shellArgs(shell, command), timeout)
+}
+
+// runArgv executes an already-split argv without a shell, so a caller that
+// builds its own arguments never composes a command string an interpreter
+// could re-parse. label names the program for ShellResult.Shell.
+func (r *ShellRunner) runArgv(parent context.Context, cwd, label string, args []string, timeout time.Duration) (ShellResult, error) {
+	if len(args) == 0 {
+		return ShellResult{}, errors.New("shell command is empty")
+	}
 	if timeout <= 0 {
 		timeout = r.Timeout
 	}
@@ -86,7 +96,6 @@ func (r *ShellRunner) Run(parent context.Context, cwd, command string, timeout t
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	args := shellArgs(shell, command)
 	cmd := exec.Command(args[0], args[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
@@ -111,7 +120,7 @@ func (r *ShellRunner) Run(parent context.Context, cwd, command string, timeout t
 	if truncated {
 		output = strings.TrimRight(output, " \t\r\n") + "\n... output truncated ..."
 	}
-	result := ShellResult{Shell: shell, ExitCode: 0, Output: output, TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Cancelled: errors.Is(parent.Err(), context.Canceled), Truncated: truncated, Duration: time.Since(started)}
+	result := ShellResult{Shell: label, ExitCode: 0, Output: output, TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Cancelled: errors.Is(parent.Err(), context.Canceled), Truncated: truncated, Duration: time.Since(started)}
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}

@@ -1,0 +1,750 @@
+{
+    "run_id":  "011-v1_single_20260719-043135",
+    "suite_version":  "011-v1",
+    "timestamp":  "2026-07-19T04:31:35Z",
+    "config":  {
+                   "mode":  "single",
+                   "main_model":  null,
+                   "sub_model":  null,
+                   "effort":  null,
+                   "review_gating":  null,
+                   "agent_build":  "42b455003db55b369f53fe2cd2fdc5ba46ec7423",
+                   "binary":  "F:\\MuhiyaCode Agent Go\\bin\\muhiyacode.exe",
+                   "fixtures":  "F:\\MuhiyaCode Agent Go\\specs\\011-competitive-agent-audit\\benchmarks\\fixtures\\tasks.json"
+               },
+    "tasks":  [
+                  {
+                      "task_id":  "td-001",
+                      "category":  "trivial-docs",
+                      "task_class":  "tiny",
+                      "completed":  true,
+                      "turns":  9,
+                      "usage":  {
+                                    "prompt_tokens":  78835,
+                                    "completion_tokens":  1571,
+                                    "cache_read_tokens":  69888,
+                                    "cache_miss_tokens":  8947,
+                                    "cache_write_tokens":  0,
+                                    "reported":  true
+                                },
+                      "cost_usd":  0.0018881464,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":main",
+                                              "steady_state_hit_rate":  0.9725232745691729,
+                                              "reported":  true
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "td-002",
+                      "category":  "trivial-docs",
+                      "task_class":  "small",
+                      "completed":  true,
+                      "turns":  10,
+                      "usage":  {
+                                    "prompt_tokens":  89240,
+                                    "completion_tokens":  2236,
+                                    "cache_read_tokens":  80000,
+                                    "cache_miss_tokens":  9240,
+                                    "cache_write_tokens":  0,
+                                    "reported":  true
+                                },
+                      "cost_usd":  0.0021436800000000002,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:onboarding",
+                                              "reported":  true
+                                          },
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":main",
+                                              "steady_state_hit_rate":  0.973552290406223,
+                                              "reported":  true
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "td-003",
+                      "category":  "trivial-docs",
+                      "task_class":  "small",
+                      "completed":  true,
+                      "turns":  7,
+                      "usage":  {
+                                    "prompt_tokens":  59927,
+                                    "completion_tokens":  1441,
+                                    "cache_read_tokens":  51584,
+                                    "cache_miss_tokens":  8343,
+                                    "cache_write_tokens":  0,
+                                    "reported":  true
+                                },
+                      "cost_usd":  0.0017159352000000003,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:onboarding",
+                                              "reported":  true
+                                          },
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":main",
+                                              "steady_state_hit_rate":  0.9761536079281511,
+                                              "reported":  true
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "tc-001",
+                      "category":  "trivial-comment",
+                      "task_class":  "tiny",
+                      "completed":  true,
+                      "turns":  10,
+                      "usage":  {
+                                    "prompt_tokens":  89124,
+                                    "completion_tokens":  1555,
+                                    "cache_read_tokens":  80000,
+                                    "cache_miss_tokens":  9124,
+                                    "cache_write_tokens":  0,
+                                    "reported":  true
+                                },
+                      "cost_usd":  0.00193676,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":main",
+                                              "steady_state_hit_rate":  0.9739130434782609,
+                                              "reported":  true
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "tc-002",
+                      "category":  "trivial-comment",
+                      "task_class":  "tiny",
+                      "completed":  true,
+                      "turns":  10,
+                      "usage":  {
+                                    "prompt_tokens":  88913,
+                                    "completion_tokens":  1850,
+                                    "cache_read_tokens":  79616,
+                                    "cache_miss_tokens":  9297,
+                                    "cache_write_tokens":  0,
+                                    "reported":  true
+                                },
+                      "cost_usd":  0.0020425048000000004,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":main",
+                                              "steady_state_hit_rate":  0.971654303864872,
+                                              "reported":  true
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "rn-001",
+                      "category":  "rename",
+                      "task_class":  "standard",
+                      "completed":  true,
+                      "turns":  5,
+                      "usage":  {
+                                    "prompt_tokens":  56287,
+                                    "completion_tokens":  2848,
+                                    "cache_read_tokens":  43648,
+                                    "cache_miss_tokens":  12639,
+                                    "cache_write_tokens":  0,
+                                    "reported":  true
+                                },
+                      "cost_usd":  0.0026891144,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:explore",
+                                              "steady_state_hit_rate":  0.7592520954223082,
+                                              "reported":  true
+                                          },
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":main",
+                                              "steady_state_hit_rate":  0.9541457781044121,
+                                              "reported":  true
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "rn-002",
+                      "category":  "rename",
+                      "task_class":  "tiny",
+                      "completed":  false,
+                      "turns":  6,
+                      "usage":  {
+                                    "prompt_tokens":  42545,
+                                    "completion_tokens":  813,
+                                    "cache_read_tokens":  34432,
+                                    "cache_miss_tokens":  8113,
+                                    "cache_write_tokens":  0,
+                                    "reported":  true
+                                },
+                      "cost_usd":  0.0014598696000000001,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":main",
+                                              "steady_state_hit_rate":  0.9679764986475088,
+                                              "reported":  true
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "fm-001",
+                      "category":  "format",
+                      "task_class":  "tiny",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     }
+                  },
+                  {
+                      "task_id":  "fm-002",
+                      "category":  "format",
+                      "task_class":  "small",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:onboarding",
+                                              "reported":  false
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "cf-001",
+                      "category":  "config",
+                      "task_class":  "small",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:onboarding",
+                                              "reported":  false
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "cf-002",
+                      "category":  "config",
+                      "task_class":  "small",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:onboarding",
+                                              "reported":  false
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "sl-001",
+                      "category":  "standard-logic",
+                      "task_class":  "small",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     }
+                  },
+                  {
+                      "task_id":  "sl-002",
+                      "category":  "standard-logic",
+                      "task_class":  "small",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     }
+                  },
+                  {
+                      "task_id":  "sl-003",
+                      "category":  "standard-logic",
+                      "task_class":  "small",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     }
+                  },
+                  {
+                      "task_id":  "sl-004",
+                      "category":  "standard-logic",
+                      "task_class":  "standard",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:explore",
+                                              "reported":  false
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "sl-005",
+                      "category":  "standard-logic",
+                      "task_class":  "large",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:explore",
+                                              "reported":  false
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "ra-001",
+                      "category":  "risky-auth",
+                      "task_class":  "standard",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:explore",
+                                              "reported":  false
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "ra-002",
+                      "category":  "risky-auth",
+                      "task_class":  "small",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     }
+                  },
+                  {
+                      "task_id":  "rb-001",
+                      "category":  "risky-billing",
+                      "task_class":  "tiny",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     }
+                  },
+                  {
+                      "task_id":  "lm-001",
+                      "category":  "large-multifile",
+                      "task_class":  "large",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:explore",
+                                              "reported":  false
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "lm-002",
+                      "category":  "large-multifile",
+                      "task_class":  "large",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     },
+                      "per_pairing":  [
+                                          {
+                                              "model":  "deepseek-v4-flash",
+                                              "pin":  ":sub:explore",
+                                              "reported":  false
+                                          }
+                                      ]
+                  },
+                  {
+                      "task_id":  "gs-001",
+                      "category":  "greenfield-scaffold",
+                      "task_class":  "small",
+                      "completed":  false,
+                      "turns":  1,
+                      "usage":  {
+                                    "prompt_tokens":  0,
+                                    "completion_tokens":  0,
+                                    "cache_read_tokens":  0,
+                                    "cache_miss_tokens":  0,
+                                    "cache_write_tokens":  0,
+                                    "reported":  false
+                                },
+                      "cost_usd":  0,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  {
+                                         "terminal_read_when_tool_exists":  0,
+                                         "duplicate_reads":  0
+                                     }
+                  }
+              ],
+    "aggregates":  {
+                       "completion_rate":  0.27272727272727271,
+                       "cost_per_completed_task":  0.0023126684,
+                       "trivial_auto_review_rate":  0,
+                       "high_risk_review_retention":  0,
+                       "median_small_task_tokens":  85542.5,
+                       "review_overhead_median_pct_small":  0,
+                       "review_overhead_median_pct_medium":  0,
+                       "violations_terminal_read_total":  0,
+                       "violations_duplicate_reads_total":  0
+                   }
+}

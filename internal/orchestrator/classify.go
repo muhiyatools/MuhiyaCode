@@ -171,11 +171,29 @@ func Classify(raw string, previous TaskClass) Assessment {
 		}
 	}
 	breadth := len(breadthRE.FindAllStringIndex(text, 21))
+	// Large escalation requires TWO independent size signals (feature 011 D2/F2):
+	// a single breadth word ("audit", "migrate", "all") or merely naming four
+	// file paths used to force the full pipeline — and with it an unconditional
+	// review — on prompts that were otherwise ordinary. Corroboration keeps the
+	// full pipeline for genuinely broad work; the review gate is the authoritative
+	// backstop either way.
+	largeSignals := 0
+	for _, signal := range []bool{len(text) > 1200, breadth > 0, bullets >= 8, paths >= 4} {
+		if signal {
+			largeSignals++
+		}
+	}
+	largeThreshold := 2
+	if reviewLegacyMode {
+		// Baseline mode (MUHIYA_BENCH_LEGACY_REVIEW=1): pre-011 single-signal
+		// escalation, so baseline runs route tasks exactly as the old build did.
+		largeThreshold = 1
+	}
 	assessment := Assessment{Class: ClassStandard, Risky: risky, Reason: "typical multi-step task"}
 	switch {
 	case len(text) > 2500 || breadth >= 2 || (breadth > 0 && len(text) > 1200):
 		assessment.Class, assessment.Reason = ClassEpic, "architecture-scale request"
-	case len(text) > 1200 || breadth > 0 || bullets >= 8 || paths >= 4:
+	case largeSignals >= largeThreshold:
 		assessment.Class, assessment.Reason = ClassLarge, "broad multi-part request"
 	case changeRE.MatchString(text) && featureRE.MatchString(text):
 		assessment.Class, assessment.Reason = ClassStandard, "feature-scope request"

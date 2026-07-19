@@ -73,8 +73,10 @@ func TestMixedProviderRoutingAndPerStreamPrefixAffinity(t *testing.T) {
 			}
 		case "minimax-m3":
 			sub = append(sub, request)
-			if !strings.HasSuffix(request.SessionID, ":sub") {
-				t.Fatalf("subagent session pin = %q", request.SessionID)
+			// Feature 011 D4: subagent pins are per-kind (":sub:<kind>") so each
+			// kind's distinct prefix keeps its own provider cache identity.
+			if !strings.Contains(request.SessionID, ":sub:") {
+				t.Fatalf("subagent session pin = %q, want per-kind :sub:<kind>", request.SessionID)
 			}
 		default:
 			t.Fatalf("request routed to unexpected model %q", request.ModelID)

@@ -123,10 +123,14 @@ func TestBriefAgentFormatAndClassCaps(t *testing.T) {
 // two files and still has agent allowance gets exactly ONE review rider before
 // finalizing; the rider fits the ~50-token tail budget.
 func TestAutoReviewNudgeFiresOnceAtMax(t *testing.T) {
+	// Feature 011: the nudge now consults the review gate first, so the changed
+	// files must be genuinely review-worthy — two auth-path files trip hard rule
+	// H4 (risk outranks size). Two trivial .txt writes would correctly SKIP under
+	// the gate (that suppression is covered by reviewgate_test.go).
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
 		{ToolCalls: []contract.ToolCall{
-			contract.NewToolCall("w1", "write_file", `{"path":"a.txt","content":"x"}`),
-			contract.NewToolCall("w2", "write_file", `{"path":"b.txt","content":"y"}`),
+			contract.NewToolCall("w1", "write_file", `{"path":"internal/auth/handler.go","content":"x"}`),
+			contract.NewToolCall("w2", "write_file", `{"path":"internal/auth/session.go","content":"y"}`),
 		}},
 		{Content: "all done"},
 		{Content: "final answer after review nudge"},

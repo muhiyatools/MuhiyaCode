@@ -57,7 +57,7 @@ func TestValidationRecoveryRescopesExactlyOnce(t *testing.T) {
 	engine.plan = contract.Plan{Steps: []contract.PlanStep{{Title: "done", Status: contract.PlanCompleted}}}
 	engine.taskAgentCap = 2
 	engine.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
-	if _, err := engine.runPipelineValidation(context.Background()); err != nil {
+	if _, err := engine.runPipelineValidation(context.Background(), ClassLarge); err != nil {
 		t.Fatal(err)
 	}
 	if engine.LifecycleState() != contract.LifecycleFinished || engine.taskPhaseAgentRuns[contract.LifecycleValidating] != 2 {
@@ -75,7 +75,7 @@ func TestValidationRequiresExplicitPassVerdict(t *testing.T) {
 	engine.lifecycle = Lifecycle{State: contract.LifecycleValidating, Depth: PipelineDepthFull, ResearchCompleted: true, PlanWritten: true, Approved: true, StepsComplete: true}
 	engine.taskAgentCap = 1
 	engine.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
-	if _, err := engine.runPipelineValidation(context.Background()); err != nil {
+	if _, err := engine.runPipelineValidation(context.Background(), ClassLarge); err != nil {
 		t.Fatal(err)
 	}
 	if engine.LifecycleState() != contract.LifecycleValidating || engine.Lifecycle().Validated {

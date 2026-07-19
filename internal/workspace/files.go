@@ -329,7 +329,7 @@ func (w *Workspace) GitStatus(ctx context.Context) (ShellResult, error) {
 }
 
 func (w *Workspace) GitDiff(ctx context.Context, options GitDiffOptions) (ShellResult, error) {
-	args := []string{"git diff", "--no-ext-diff"}
+	args := []string{"git", "diff", "--no-ext-diff"}
 	if options.Staged {
 		args = append(args, "--cached")
 	}
@@ -337,7 +337,11 @@ func (w *Workspace) GitDiff(ctx context.Context, options GitDiffOptions) (ShellR
 		args = append(args, fmt.Sprintf("--unified=%d", options.Context))
 	}
 	if options.Path != "" {
-		args = append(args, "--", shellQuote(options.Path))
+		target, err := w.authorizePath(ctx, ActionSearch, options.Path)
+		if err != nil {
+			return ShellResult{}, err
+		}
+		args = append(args, "--", relativeSlash(w.root, target))
 	}
 	runner := *w.shell
 	if options.OutputLimit > 0 {
@@ -346,7 +350,7 @@ func (w *Workspace) GitDiff(ctx context.Context, options GitDiffOptions) (ShellR
 	if err := w.guard.ApproveShell(ctx, strings.Join(args, " ")); err != nil {
 		return ShellResult{}, err
 	}
-	return runner.Run(ctx, w.root, strings.Join(args, " "), 30*time.Second)
+	return runner.runArgv(ctx, w.root, "git", args, 30*time.Second)
 }
 
 func (w *Workspace) authorizePath(ctx context.Context, action Action, requested string) (string, error) {
@@ -594,11 +598,4 @@ func buildOutline(lines []string) string {
 		}
 	}
 	return strings.Join(symbols, ", ")
-}
-
-func shellQuote(value string) string {
-	if strings.IndexAny(value, " \t\"'") < 0 {
-		return value
-	}
-	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
 }

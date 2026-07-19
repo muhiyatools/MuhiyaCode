@@ -80,7 +80,7 @@ func (e *Engine) compact(ctx context.Context, reason string) error {
 	}
 	summary := ""
 	if usageErr := e.recordUsageAndEmit(func() error {
-		return e.recordAuxUsage(ctx, e.settings.Provider.ActiveModelID, response.Usage, elapsedMS(summaryStart))
+		return e.recordAuxUsage(ctx, e.settings.Provider.ActiveModelID, ":aux", response.Usage, elapsedMS(summaryStart))
 	}); usageErr != nil {
 		return fmt.Errorf("persist compaction usage: %w", usageErr)
 	}

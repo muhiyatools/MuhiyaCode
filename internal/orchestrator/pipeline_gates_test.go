@@ -115,7 +115,7 @@ func TestPipelineEndToEndHeadlessApprovalAndConfiguredRouting(t *testing.T) {
 		t.Fatalf("phase agent counts = research %d implement %d validate %d", research, implement, validate)
 	}
 	for _, request := range provider.requests {
-		if strings.HasSuffix(request.SessionID, ":sub") && request.ModelID != "worker-model" {
+		if strings.Contains(request.SessionID, ":sub:") && request.ModelID != "worker-model" {
 			t.Fatalf("subagent request ModelID = %q", request.ModelID)
 		}
 	}

@@ -1,0 +1,4 @@
+baseline_sha: 42b455003db55b369f53fe2cd2fdc5ba46ec7423
+baseline_binary: bin/muhiyacode-baseline-011.exe  (built 2026-07-19 from the working tree at this SHA + 13 uncommitted files listed below; the BINARY is the authoritative frozen reference for T006 baseline runs, since the tree was not fully committed)
+verify: go vet clean, go test ./... -count=1 = 12 packages ok
+uncommitted_at_freeze: .specify/feature.json, internal/command/{actions,root}.go, internal/command/prune_models_test.go, internal/tui/{modals,model,update}.go, internal/tui/onboarding_test.go, internal/workspace/{files,shell,workspace_test}.go, STABILITY_AND_DISCOVERABILITY_PLAN.md, specs/011-competitive-agent-audit/

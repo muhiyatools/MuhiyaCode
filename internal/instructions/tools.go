@@ -1,11 +1,12 @@
 package instructions
 
 // Tool descriptions: the top-level natural-language description shown to
-// the model for each of the 19 tools (12 workspace registry tools wired by
-// internal/workspace/registry.go, 6 synthetic main-loop tools wired by
-// internal/orchestrator/engine.go's sessionDefinitions, and web_search wired
-// by internal/gateway/web.go). All Prefix-class: they are part of the
-// session-stable tool JSON block.
+// the model for each of the 21 tools (12 workspace registry tools wired by
+// internal/workspace/registry.go, all eight synthetic main-loop tools wired by
+// internal/orchestrator's sessionDefinitions — update_plan, ask_user,
+// propose_changes, exit_plan_mode, run_subagent, save_memory, recall_memory,
+// edit_memory — and web_search wired by internal/gateway/web.go). All
+// Prefix-class: they are part of the session-stable tool JSON block.
 //
 // Property-level (per-field) schema description strings — short UI hints
 // like "Directory, default ." — are deliberately NOT individually registered
@@ -30,9 +31,11 @@ const (
 	// system prompt's CONTEXT AND EDIT DISCIPLINE section.
 	ToolWriteFileDescription  = WriteFilePermissionRuleBody
 	ToolApplyPatchDescription = "Apply a standard unified diff to files already read."
-	ToolRunShellDescription   = "Run a shell command in the workspace with streaming output and cancellation."
-	ToolGitStatusDescription  = "Show concise git status."
-	ToolGitDiffDescription    = "Show the workspace git diff."
+	// Feature 011 D5/T027: the trailing steering sentence keeps the shell for
+	// executing, not reading — read_file/grep are cheaper and cache-tracked.
+	ToolRunShellDescription  = "Run a shell command in the workspace with streaming output and cancellation. For reading or searching files use read_file/grep instead — they are cheaper and cache-tracked."
+	ToolGitStatusDescription = "Show concise git status."
+	ToolGitDiffDescription   = "Show the workspace git diff."
 )
 
 var (

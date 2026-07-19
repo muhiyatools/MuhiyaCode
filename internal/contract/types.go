@@ -56,8 +56,12 @@ type Settings struct {
 	} `json:"provider"`
 	PermissionMode PermissionMode `json:"permissionMode"`
 	Effort         EffortLevel    `json:"effort"`
-	Theme          string         `json:"theme"`
-	Shell          struct {
+	// ReviewGating controls the automatic review triggers (feature 011):
+	// "off" | "conservative" | "default" (empty = default). Explicit review
+	// requests always run regardless of this setting.
+	ReviewGating string `json:"reviewGating,omitempty"`
+	Theme        string `json:"theme"`
+	Shell        struct {
 		Preferred   string `json:"preferred"`
 		TimeoutMS   int    `json:"timeoutMs"`
 		OutputLimit int    `json:"outputLimit"`
@@ -521,6 +525,23 @@ type TaskStats struct {
 	// circuit breaker or the distinct-failure terminator. The TUI surfaces it as
 	// a warn notice so the user knows why the task stopped early.
 	TerminatedReason string `json:"terminatedReason,omitempty"`
+	// ReviewTier/ReviewRationale (feature 011 SC-009) record the review-gating
+	// decision for this task — including "skip" — so the completion summary and
+	// the benchmark records always explain what the reviewer did and why.
+	ReviewTier      string `json:"reviewTier,omitempty"`
+	ReviewRationale string `json:"reviewRationale,omitempty"`
+	// ReviewCeilingHit/ReviewCoverage (T022/D6): whether the review's token
+	// ceiling bounded the run, and the reviewer's parsed coverage line.
+	ReviewCeilingHit bool   `json:"reviewCeilingHit,omitempty"`
+	ReviewCoverage   string `json:"reviewCoverage,omitempty"`
+	// Violation counters (feature 011 SC-006, measured per task): shell commands
+	// that read files where a dedicated tool sufficed, and duplicate reads the
+	// inspection ledger blocked.
+	TerminalReadViolations  int `json:"terminalReadViolations,omitempty"`
+	DuplicateReadViolations int `json:"duplicateReadViolations,omitempty"`
+	// PerPairing (feature 011 D8) is the session's per-(model, pin) cache health
+	// — the mixed-model measurement SC-005 reads.
+	PerPairing []PairingRate `json:"perPairing,omitempty"`
 	// StopCause (003) marks a task that ended early from an interruption rather
 	// than a natural finish: user stop (Esc/cancel), a provider/stream error, or
 	// a connection loss. Empty means the task completed normally. It drives the

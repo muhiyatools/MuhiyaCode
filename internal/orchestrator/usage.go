@@ -19,7 +19,7 @@ func (e *Engine) recordMainUsage(ctx context.Context, observation mainUsageObser
 	previous := lastMainUsageRecord(e.usageRecords)
 	newTail := estimatedNewTail(previous, observation.usage)
 	attribution := e.mainCacheAttribution(cacheMissContext{previous: previous, usage: observation.usage, newTail: newTail, previousMessageCount: e.lastSentMessageCount, currentMessageCount: observation.messageCount}, observation.changeReasons)
-	record := usageRecord(usageRecordInput{model: observation.model, stream: contract.UsageStreamMain, usage: observation.usage, reasons: observation.changeReasons, attribution: attribution, durationMS: observation.durationMS})
+	record := usageRecord(usageRecordInput{model: observation.model, stream: contract.UsageStreamMain, pin: ":main", usage: observation.usage, reasons: observation.changeReasons, attribution: attribution, durationMS: observation.durationMS})
 	if previous != nil && (observation.usage.PromptTokensAvailable || observation.usage.PromptTokens != 0) {
 		record.NewTailTokens = intPointer(newTail)
 	}
@@ -60,10 +60,10 @@ func (e *Engine) mainCacheAttribution(missContext cacheMissContext, changeReason
 	return contract.CacheAttributionProvider
 }
 
-func (e *Engine) recordAuxUsage(ctx context.Context, model string, usage contract.Usage, durationMS *int64) error {
+func (e *Engine) recordAuxUsage(ctx context.Context, model, pin string, usage contract.Usage, durationMS *int64) error {
 	e.taskMu.Lock()
 	defer e.taskMu.Unlock()
-	record := usageRecord(usageRecordInput{model: model, stream: contract.UsageStreamAux, usage: usage, attribution: contract.CacheAttributionNA, durationMS: durationMS})
+	record := usageRecord(usageRecordInput{model: model, stream: contract.UsageStreamAux, pin: pin, usage: usage, attribution: contract.CacheAttributionNA, durationMS: durationMS})
 	return e.appendUsageLocked(ctx, &record)
 }
 
@@ -122,7 +122,7 @@ func (e *Engine) drainUsageEmissions() {
 	}
 }
 
-func (e *Engine) recordIsolatedUsage(ctx context.Context, model string, usage contract.Usage, coldStart bool, reasons []string, durationMS *int64) error {
+func (e *Engine) recordIsolatedUsage(ctx context.Context, model, pin string, usage contract.Usage, coldStart bool, reasons []string, durationMS *int64) error {
 	e.taskMu.Lock()
 	defer e.taskMu.Unlock()
 	attribution := contract.CacheAttributionNA
@@ -136,7 +136,7 @@ func (e *Engine) recordIsolatedUsage(ctx context.Context, model string, usage co
 			attribution = contract.CacheAttributionProvider
 		}
 	}
-	record := usageRecord(usageRecordInput{model: model, stream: contract.UsageStreamSubagent, usage: usage, reasons: reasons, attribution: attribution, durationMS: durationMS})
+	record := usageRecord(usageRecordInput{model: model, stream: contract.UsageStreamSubagent, pin: pin, usage: usage, reasons: reasons, attribution: attribution, durationMS: durationMS})
 	return e.appendUsageLocked(ctx, &record)
 }
 
@@ -166,6 +166,7 @@ func usageRecord(input usageRecordInput) contract.UsageRecord {
 		At:                 time.Now().UTC(),
 		Model:              input.model,
 		Stream:             input.stream,
+		Pin:                input.pin,
 		PromptTokens:       prompt,
 		CompletionTokens:   completion,
 		CacheReadTokens:    read,

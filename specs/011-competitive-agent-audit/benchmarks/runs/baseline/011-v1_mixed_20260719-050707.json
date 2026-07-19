@@ -1,0 +1,446 @@
+{
+    "run_id":  "011-v1_mixed_20260719-050707",
+    "suite_version":  "011-v1",
+    "timestamp":  "2026-07-19T05:07:07Z",
+    "config":  {
+                   "mode":  "mixed",
+                   "main_model":  null,
+                   "sub_model":  null,
+                   "effort":  null,
+                   "review_gating":  null,
+                   "agent_build":  "42b455003db55b369f53fe2cd2fdc5ba46ec7423",
+                   "binary":  "F:\\MuhiyaCode Agent Go\\bin\\muhiyacode.exe",
+                   "fixtures":  "F:\\MuhiyaCode Agent Go\\specs\\011-competitive-agent-audit\\benchmarks\\fixtures\\tasks.json"
+               },
+    "tasks":  [
+                  {
+                      "task_id":  "td-001",
+                      "category":  "trivial-docs",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "td-002",
+                      "category":  "trivial-docs",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "td-003",
+                      "category":  "trivial-docs",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "tc-001",
+                      "category":  "trivial-comment",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "tc-002",
+                      "category":  "trivial-comment",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "rn-001",
+                      "category":  "rename",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "rn-002",
+                      "category":  "rename",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "fm-001",
+                      "category":  "format",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "fm-002",
+                      "category":  "format",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "cf-001",
+                      "category":  "config",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "cf-002",
+                      "category":  "config",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "sl-001",
+                      "category":  "standard-logic",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "sl-002",
+                      "category":  "standard-logic",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "sl-003",
+                      "category":  "standard-logic",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "sl-004",
+                      "category":  "standard-logic",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "sl-005",
+                      "category":  "standard-logic",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "ra-001",
+                      "category":  "risky-auth",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "ra-002",
+                      "category":  "risky-auth",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "rb-001",
+                      "category":  "risky-billing",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "lm-001",
+                      "category":  "large-multifile",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "lm-002",
+                      "category":  "large-multifile",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  },
+                  {
+                      "task_id":  "gs-001",
+                      "category":  "greenfield-scaffold",
+                      "task_class":  null,
+                      "completed":  false,
+                      "turns":  0,
+                      "usage":  {
+                                    "reported":  false
+                                },
+                      "cost_usd":  null,
+                      "cost_estimated":  false,
+                      "review":  {
+                                     "tier":  "none",
+                                     "rationale":  "no muhiya_bench summary line emitted",
+                                     "spend_tokens":  0,
+                                     "ceiling_hit":  false
+                                 },
+                      "violations":  null
+                  }
+              ],
+    "aggregates":  {
+                       "completion_rate":  0,
+                       "cost_per_completed_task":  null,
+                       "trivial_auto_review_rate":  0,
+                       "high_risk_review_retention":  0,
+                       "median_small_task_tokens":  null,
+                       "review_overhead_median_pct_small":  null,
+                       "review_overhead_median_pct_medium":  null,
+                       "violations_terminal_read_total":  0,
+                       "violations_duplicate_reads_total":  0
+                   }
+}

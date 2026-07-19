@@ -116,9 +116,9 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// clarity we re-derive the same identity here (it must stay identical to
 		// the one main-loop uses).
 		onboardingStart := time.Now()
-		questions, usage := GenerateOnboardingQuestions(ctx, e.provider, e.settings.Provider.SubagentModelID, userPrompt, e.session.ID+":sub")
+		questions, usage := GenerateOnboardingQuestions(ctx, e.provider, e.settings.Provider.SubagentModelID, userPrompt, e.session.ID+":sub:onboarding")
 		if err := e.recordUsageAndEmit(func() error {
-			return e.recordAuxUsage(ctx, e.settings.Provider.SubagentModelID, usage, elapsedMS(onboardingStart))
+			return e.recordAuxUsage(ctx, e.settings.Provider.SubagentModelID, ":sub:onboarding", usage, elapsedMS(onboardingStart))
 		}); err != nil {
 			return "", stats, fmt.Errorf("persist onboarding usage: %w", err)
 		}
@@ -132,6 +132,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	e.taskAgentUsage = contract.Usage{}
 	e.taskAgentRuns, e.taskAgentReused, e.taskDuplicates, e.taskOverBudget = 0, 0, 0, 0
 	e.taskAgentDenied = 0
+	e.taskReviewDecision, e.taskTerminalReads = nil, 0
 	e.taskOversizedPlanRejected = false
 	e.taskAgentCap = budget.MaxAgentRuns
 	e.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
@@ -166,6 +167,8 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// denominator) so the persistent footer can show session hit-rate, not
 		// just this task's cache tag. Computed under taskMu with usageRecords.
 		stats.SessionHitRate = contract.AggregateUsage(e.usageRecords).SessionHitRate
+		// Feature 011 D8: per-(model, pin) cache health for mixed-model sessions.
+		stats.PerPairing = contract.PerPairingRates(e.usageRecords)
 		// The credits figure is the FULL SESSION cost — every main-loop, subagent,
 		// and auxiliary request the gateway priced (user directive: the end-of-task
 		// total is the whole session, not just this task; the token figure above
@@ -199,6 +202,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			stats.FilesChanged = append(stats.FilesChanged, file)
 		}
 		sort.Strings(stats.FilesChanged)
+		e.finalizeReviewStats(&stats, assessment.Class, filesChanged, taskLinesAdded, taskLinesRemoved)
 		if e.callbacks.TaskComplete != nil {
 			e.callbacks.TaskComplete(stats)
 		}
@@ -634,11 +638,21 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			// (read-only) and when nothing meaningful changed.
 			if profile.AutoReview && !autoReviewNudged && !e.PlanMode() && len(filesChanged) >= 2 && e.taskAgentRuns < e.taskAgentCap {
 				autoReviewNudged = true
-				if trimmed != "" {
-					_ = e.persistAssistant(ctx, trimmed)
+				// Feature 011 T019: the nudge consults the review gate first — a
+				// trivial two-file change (docs, renames, tiny low-risk edits) no
+				// longer triggers a review just because the effort is max. The gate
+				// may only suppress or shape this trigger, never widen it (contract
+				// §6); explicit user requests bypass gating entirely via the
+				// run_subagent path (§6a).
+				decision := Decide(e.reviewProfileForTask(currentClass, filesChanged, taskLinesAdded, taskLinesRemoved))
+				e.setTaskReviewDecision(decision)
+				if decision.Tier != ReviewTierSkip {
+					if trimmed != "" {
+						_ = e.persistAssistant(ctx, trimmed)
+					}
+					e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[review] Before finishing: run one %s review subagent over the files you changed and fix only verified findings, then give the final answer.", decision.Tier)})
+					continue
 				}
-				e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[review] Before finishing: run one review subagent over the files you changed and fix only verified findings, then give the final answer."})
-				continue
 			}
 			// P2 belt-and-suspenders: a plan-mode task that ended with free
 			// text (no exit_plan_mode) and a plan in place is plan-ready.
@@ -647,6 +661,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		}
 
 		sawToolCall = true
+		e.countTerminalReadCalls(calls) // feature 011 SC-006 violation counter
 		// G1: also scan the goal marker on text accompanying tool calls. Without
 		// this, [goal:complete] emitted in the same turn as a tool call is dropped.
 		if e.scanGoalMarker(assistantText) {

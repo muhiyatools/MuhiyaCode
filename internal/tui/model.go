@@ -56,7 +56,7 @@ type Actions struct {
 	// signed-in email. It powers bare `/login` when a key is not pasted directly.
 	LoginViaBrowser func(context.Context) (string, error)
 	MCP             MCPActions
-	ListSkills    func(context.Context) ([]Skill, error)
+	ListSkills      func(context.Context) ([]Skill, error)
 	// LoadSkill loads one skill's instruction body on demand (003 T036), so the
 	// /skills modal opens without reading every skill file.
 	LoadSkill func(context.Context, string) (string, error)
@@ -241,19 +241,24 @@ type Model struct {
 	// US5: a large paste is stashed here and shown in the input as a compact
 	// [#pasteN NN lines] placeholder the user can type around; expandPastes
 	// reconstructs the exact raw bytes at submit so nothing is lost or truncated.
-	pastes         map[int]string
-	pasteSeq       int
-	modal          *modalState
-	modalQueue     []modalRequest
-	agents         []*agentView
-	agentByID      map[string]*agentView
-	viewAgent      string
-	selectedSkills map[string]Skill
-	commandIndex   int
-	history        []string
-	historyIndex   int
-	initialPrompt  string
-	flash          noticeState
+	pastes     map[int]string
+	pasteSeq   int
+	modal      *modalState
+	modalQueue []modalRequest
+	// onboardingPending records that the first-run sign-in modal wants to open but
+	// another modal (e.g. the workspace-trust reply prompt) is currently showing.
+	// closeModal reopens it once the queue drains, so onboarding is deferred rather
+	// than silently dropped by openChoice's reply-modal guard.
+	onboardingPending bool
+	agents            []*agentView
+	agentByID         map[string]*agentView
+	viewAgent         string
+	selectedSkills    map[string]Skill
+	commandIndex      int
+	history           []string
+	historyIndex      int
+	initialPrompt     string
+	flash             noticeState
 	// T1: persistent usage footer. Set when statsMsg arrives, cleared on
 	// next submit() or session switch. NEVER cleared by a timer — the
 	// "footer must remain visible" requirement.

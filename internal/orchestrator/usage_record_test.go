@@ -192,8 +192,10 @@ func TestTaskUsageDeltaCoversAllStreamsAndLiveEmissionMatches(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Large-class prompt so the task grants an agent budget.
-	_, stats, err := engine.Run(context.Background(), "Implement a new config loader module with validation across the package and verify it")
+	// Large-class prompt so the task grants an agent budget. Since feature 011
+	// (D2), Large needs TWO corroborating size signals — here a breadth phrase
+	// plus four named file paths.
+	_, stats, err := engine.Run(context.Background(), "Implement a new config loader module with validation across the package and verify it in config.go, loader.go, validate.go and main.go")
 	if err != nil {
 		t.Fatal(err)
 	}

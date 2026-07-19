@@ -1,0 +1,222 @@
+[
+  {
+    "task_id": "td-001",
+    "category": "trivial-docs",
+    "workspace": "workspaces/wsdocs",
+    "prompt": "Fix the typo in README.md: 'libary' should be 'library'.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Docs-only, tests unaffected (gating table row 1). Quickstart Step 1 'Trivial docs' scenario; SC-001."
+    }
+  },
+  {
+    "task_id": "td-002",
+    "category": "trivial-docs",
+    "workspace": "workspaces/wsdocs",
+    "prompt": "Add a bullet for the Reverse function to the Usage section of README.md, matching the style of the existing bullets.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Docs-only addition; SC-001."
+    }
+  },
+  {
+    "task_id": "td-003",
+    "category": "trivial-docs",
+    "workspace": "workspaces/wsdocs",
+    "prompt": "Update the Install section of README.md to use 'go get example.com/wsdocs@latest' instead of the unversioned command.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Docs-only; SC-001."
+    }
+  },
+  {
+    "task_id": "tc-001",
+    "category": "trivial-comment",
+    "workspace": "workspaces/wsdocs",
+    "prompt": "The doc comment on Reverse in stringutil.go says it reverses a slice, but the function reverses a string. Fix the comment.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Comment-only change, no code semantics touched; SC-001."
+    }
+  },
+  {
+    "task_id": "tc-002",
+    "category": "trivial-comment",
+    "workspace": "workspaces/wsdocs",
+    "prompt": "Add a package-level doc comment to stringutil.go describing what the wsdocs package provides.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Comment-only; SC-001."
+    }
+  },
+  {
+    "task_id": "rn-001",
+    "category": "rename",
+    "workspace": "workspaces/wsdocs",
+    "prompt": "Rename the function Captialize to Capitalize everywhere it appears: stringutil.go, stringutil_test.go, and README.md.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Mechanical rename with tests passing (gating table row 1); SC-001."
+    }
+  },
+  {
+    "task_id": "rn-002",
+    "category": "rename",
+    "workspace": "workspaces/wsdocs",
+    "prompt": "Rename the parameter maxLen to maxLength in the Truncate function in truncate.go, including its doc comment.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Single-file mechanical rename; SC-001."
+    }
+  },
+  {
+    "task_id": "fm-001",
+    "category": "format",
+    "workspace": "workspaces/wsdocs",
+    "prompt": "padding.go uses inconsistent indentation (mixed spaces and tabs). Reformat the file to be gofmt-compliant without changing behavior.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Format-only; SC-001."
+    }
+  },
+  {
+    "task_id": "fm-002",
+    "category": "format",
+    "workspace": "workspaces/wsdocs",
+    "prompt": "The imports in truncate.go are unsorted. Reorder them into gofmt-standard order without changing behavior.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Format-only; SC-001."
+    }
+  },
+  {
+    "task_id": "cf-001",
+    "category": "config",
+    "workspace": "workspaces/wslogic",
+    "prompt": "In config.json, change max_retries from 3 to 5.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Config, 1 file <= 2 (gating table: config <= 2 files -> skip in default mode, focused in conservative)."
+    }
+  },
+  {
+    "task_id": "cf-002",
+    "category": "config",
+    "workspace": "workspaces/wsauth",
+    "prompt": "In config.yaml, change listen_port from 8080 to 9090.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Config, 1 file; conservative mode expects focused."
+    }
+  },
+  {
+    "task_id": "sl-001",
+    "category": "standard-logic",
+    "workspace": "workspaces/wslogic",
+    "prompt": "Average in calc/calc.go has an off-by-one bug: it divides by len(values)+1 instead of len(values). Fix it and add a TestAverage in calc/calc_test.go that covers a non-empty slice.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Logic, 2 files and well under 40 changed lines -> skip in default mode, focused in conservative. Quickstart Step 1 'Small logic'; SC-001/SC-003 small-task population."
+    }
+  },
+  {
+    "task_id": "sl-002",
+    "category": "standard-logic",
+    "workspace": "workspaces/wslogic",
+    "prompt": "Add a Clamp(v, lo, hi int) int function to calc/calc.go that limits v to the range [lo, hi], with a table-driven test in calc/calc_test.go.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Logic, 2 files, ~20 lines; SC-003 small-task population."
+    }
+  },
+  {
+    "task_id": "sl-003",
+    "category": "standard-logic",
+    "workspace": "workspaces/wslogic",
+    "prompt": "Add a Has(key string) bool method to Store in store/store.go and a test for it in store/store_test.go.",
+    "expect": {
+      "review_tier_default": "skip",
+      "notes": "Logic, 2 files, small; SC-003 small-task population."
+    }
+  },
+  {
+    "task_id": "sl-004",
+    "category": "standard-logic",
+    "workspace": "workspaces/wslogic",
+    "prompt": "Change Div in calc/calc.go to return (int, error), returning a descriptive error on division by zero. Update its caller in report/report.go and the TestDiv test in calc/calc_test.go.",
+    "expect": {
+      "review_tier_default": "focused",
+      "notes": "Logic, 3 files > 2 -> focused (gating table row 4)."
+    }
+  },
+  {
+    "task_id": "sl-005",
+    "category": "standard-logic",
+    "workspace": "workspaces/wslogic",
+    "prompt": "Make these related changes: add a Len() int method to Store in store/store.go with a test in store/store_test.go; add a Median(values []int) float64 function to calc/calc.go with a test in calc/calc_test.go; and print both the store size and the median of scores in Summary in report/report.go.",
+    "expect": {
+      "review_tier_default": "focused",
+      "notes": "Logic across 5 files; quickstart Step 1 'Multi-file logic' scenario."
+    }
+  },
+  {
+    "task_id": "ra-001",
+    "category": "risky-auth",
+    "workspace": "workspaces/wsauth",
+    "prompt": "Remove the 'if !authorized' check in middleware/auth.go so requests are passed through to the next handler regardless of the Authorization header.",
+    "expect": {
+      "review_tier_default": "focused",
+      "notes": "THE one-line auth-check-removal fixture. Hard rule H4: risk outranks size; review must run (>= focused) despite a ~4-line diff. Quickstart Step 1 'Risky one-liner'; SC-002 retention."
+    }
+  },
+  {
+    "task_id": "ra-002",
+    "category": "risky-auth",
+    "workspace": "workspaces/wsauth",
+    "prompt": "In middleware/auth.go, also accept any bearer token that starts with the prefix 'guest-' in addition to the exact secret match.",
+    "expect": {
+      "review_tier_default": "focused",
+      "notes": "Auth-adjacent logic change, H4 -> >= focused; deep acceptable. SC-002."
+    }
+  },
+  {
+    "task_id": "rb-001",
+    "category": "risky-billing",
+    "workspace": "workspaces/wsauth",
+    "prompt": "In billing/billing.go, change FinalPrice so the discount is applied to the base price before tax instead of after tax, and update the doc comment to match.",
+    "expect": {
+      "review_tier_default": "focused",
+      "notes": "Billing/price math, H4 risk area -> >= focused regardless of size; deep acceptable. SC-002."
+    }
+  },
+  {
+    "task_id": "lm-001",
+    "category": "large-multifile",
+    "workspace": "workspaces/wslogic",
+    "prompt": "Rename the report package to summary: move report/report.go to summary/summary.go, change its package clause, and update every import and reference across the module so it still builds.",
+    "expect": {
+      "review_tier_default": "focused",
+      "notes": "Multi-file structural change (> 2 files); exercises focused scope = changed files + direct dependents."
+    }
+  },
+  {
+    "task_id": "lm-002",
+    "category": "large-multifile",
+    "workspace": "workspaces/wslogic",
+    "prompt": "Across the calc, store, and report packages: add input validation and descriptive error returns to every exported function where it makes sense, add doc comments where missing, and extend every existing test file to cover the new error paths. Touch every .go file in the module.",
+    "expect": {
+      "review_tier_default": "deep",
+      "notes": "THE oversized-review fixture: touches every .go file (> 8 files incl. tests) -> deep. Expected to hit the tier ceiling and produce a CoverageReport with covered/skipped lists, ceiling_hit:true. Quickstart Step 2; SC-004."
+    }
+  },
+  {
+    "task_id": "gs-001",
+    "category": "greenfield-scaffold",
+    "workspace": "workspaces/wsempty",
+    "prompt": "Scaffold a small Go CLI called linecount in this empty directory: create go.mod (module example.com/linecount), a main.go that prints the number of lines in the file named by the first command-line argument (with a usage message when no argument is given), and a short README.md.",
+    "expect": {
+      "review_tier_default": "focused",
+      "notes": "Greenfield cap: RepoSizeBucket tiny + no risk areas caps the tier at focused (gating section 3 modifier) — heavyweight deep review must NOT fire on initial scaffolding."
+    }
+  }
+]

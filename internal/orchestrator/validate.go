@@ -97,12 +97,42 @@ func checkPrimitiveType(tool, key string, value any, schema map[string]any) erro
 			return fmt.Errorf("%s: field %q must be a boolean, got %T", tool, key, value)
 		}
 	case "array":
-		if _, ok := value.([]any); !ok {
+		items, ok := value.([]any)
+		if !ok {
 			return fmt.Errorf("%s: field %q must be an array, got %T", tool, key, value)
 		}
+		// Feature 011 T044 (audit F12): validate array ITEM schemas too, so a
+		// malformed nested element fails pre-dispatch instead of at execution.
+		if itemSchema, ok := schema["items"].(map[string]any); ok {
+			for index, item := range items {
+				if err := checkPrimitiveType(tool, fmt.Sprintf("%s[%d]", key, index), item, itemSchema); err != nil {
+					return err
+				}
+			}
+		}
 	case "object":
-		if _, ok := value.(map[string]any); !ok {
+		nested, ok := value.(map[string]any)
+		if !ok {
 			return fmt.Errorf("%s: field %q must be an object, got %T", tool, key, value)
+		}
+		// Feature 011 T044: recurse into nested object properties + required keys.
+		for _, requiredKey := range stringListFromAny(schema["required"]) {
+			if _, present := nested[requiredKey]; !present {
+				return fmt.Errorf("%s: field %q missing required key %q", tool, key, requiredKey)
+			}
+		}
+		if properties, ok := schema["properties"].(map[string]any); ok {
+			for propName, propSchemaAny := range properties {
+				propSchema, ok := propSchemaAny.(map[string]any)
+				if !ok {
+					continue
+				}
+				if nestedValue, present := nested[propName]; present {
+					if err := checkPrimitiveType(tool, key+"."+propName, nestedValue, propSchema); err != nil {
+						return err
+					}
+				}
+			}
 		}
 	}
 	return nil

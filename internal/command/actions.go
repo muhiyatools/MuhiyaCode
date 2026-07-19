@@ -76,10 +76,18 @@ func (a *Application) Actions() tui.Actions {
 			}
 			return a.switchSession(ctx, session)
 		},
-		SetAPIKey:  func(ctx context.Context, key string) error { return a.setAPIKey(ctx, key) },
-		Logout:     func(_ context.Context) error { return a.setAPIKey(context.Background(), "") },
+		SetAPIKey: func(ctx context.Context, key string) error { return a.setAPIKey(ctx, key) },
+		Logout:    func(_ context.Context) error { return a.setAPIKey(context.Background(), "") },
 		LoginViaBrowser: func(ctx context.Context) (string, error) {
-			email, token, err := performBrowserLogin(ctx, "", nil)
+			// Surface the authorization URL in the TUI transcript as a fallback for
+			// when the browser cannot be opened automatically (headless/SSH), so the
+			// user is not left staring at a silent 5-minute wait.
+			onURL := func(u string) {
+				if a.callbacks.Notice != nil {
+					a.callbacks.Notice("If your browser did not open, visit:\n" + u)
+				}
+			}
+			email, token, err := performBrowserLogin(ctx, "", onURL)
 			if err != nil {
 				return "", err
 			}
@@ -106,11 +114,14 @@ func (a *Application) Actions() tui.Actions {
 			if err != nil {
 				return nil, err
 			}
-			addDiscoveredModels(a.settings, models)
+			stranded := addDiscoveredModels(a.settings, models)
 			if err := state.SaveSettings(*a.settings, a.paths); err != nil {
 				return nil, err
 			}
 			a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
+			if len(stranded) > 0 && a.callbacks.Notice != nil {
+				a.callbacks.Notice("No longer offered by the gateway (still selected — pick a new one with /model): " + strings.Join(stranded, ", "))
+			}
 			return a.settings.Provider.Models, nil
 		},
 		// TranscriptPage (005 US1 T020) serves keyset pages of the durable transcript
@@ -183,7 +194,12 @@ func parsePlan(content string) contract.Plan {
 	return plan
 }
 
-func addDiscoveredModels(settings *contract.Settings, models []contract.Model) {
+// addDiscoveredModels merges a fresh gateway model list into settings: it upserts
+// every returned model, prunes previously endpoint-discovered models the gateway
+// no longer offers, and (re)assigns the default main/subagent roles. It returns
+// the ids of any still-selected models that vanished from the catalog so the
+// caller can advise switching.
+func addDiscoveredModels(settings *contract.Settings, models []contract.Model) []string {
 	sort.SliceStable(models, func(i, j int) bool { return models[i].ID < models[j].ID })
 	for _, model := range models {
 		if model.ContextLimit <= 0 {
@@ -191,7 +207,43 @@ func addDiscoveredModels(settings *contract.Settings, models []contract.Model) {
 		}
 		state.UpsertModel(settings, model, false)
 	}
+	stranded := pruneStaleDiscoveredModels(settings, models)
 	if !state.AssignFreshDefaultModels(settings) {
 		state.AutoAssignModels(settings)
 	}
+	return stranded
+}
+
+// pruneStaleDiscoveredModels removes previously endpoint-discovered models the
+// gateway no longer offers (e.g. after an operator unchecks "MuhiyaCode
+// Discoverable"), so a hidden model does not linger in the picker forever. The
+// currently-selected main and subagent models are always kept even when newly
+// absent, so a refresh can never strand the running session; their ids are
+// returned so the caller can advise switching. Manually-added models
+// (Source != "endpoint") are never pruned. It is a no-op when fresh is empty: an
+// empty successful fetch is treated as "unknown", never as "unpublish everything".
+func pruneStaleDiscoveredModels(settings *contract.Settings, fresh []contract.Model) []string {
+	if settings == nil || len(fresh) == 0 {
+		return nil
+	}
+	freshIDs := make(map[string]bool, len(fresh))
+	for _, model := range fresh {
+		freshIDs[model.ID] = true
+	}
+	active := settings.Provider.ActiveModelID
+	subagent := settings.Provider.SubagentModelID
+	kept := settings.Provider.Models[:0]
+	var stranded []string
+	for _, model := range settings.Provider.Models {
+		stale := model.Source == "endpoint" && !freshIDs[model.ID]
+		if stale && model.ID != active && model.ID != subagent {
+			continue // drop a model the gateway no longer lists
+		}
+		if stale {
+			stranded = append(stranded, model.ID)
+		}
+		kept = append(kept, model)
+	}
+	settings.Provider.Models = kept
+	return stranded
 }

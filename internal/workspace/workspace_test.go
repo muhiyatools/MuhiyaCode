@@ -271,6 +271,59 @@ func TestListGlobWriteAndGitToolBehaviors(t *testing.T) {
 	if !strings.Contains(diff.Output, "committed.go") || !strings.Contains(diff.Output, "changed") {
 		t.Fatalf("GitDiff output missing the expected change: %q", diff.Output)
 	}
+
+	// git_diff (path): a real in-repo path still produces a diff naming it. This
+	// is the non-regression guard for the argv rewrite — legitimate use must be
+	// unchanged now that the pathspec is canonicalized instead of shell-quoted.
+	pathDiff, err := w.GitDiff(ctx, GitDiffOptions{Path: "committed.go"})
+	if err != nil {
+		t.Fatalf("GitDiff(path): %v", err)
+	}
+	if !strings.Contains(pathDiff.Output, "committed.go") {
+		t.Fatalf("GitDiff(path) output missing committed.go: %q", pathDiff.Output)
+	}
+
+	// git_diff (injection): a Path carrying shell metacharacters must reach git
+	// only as a literal pathspec, never as a command. The old shellQuote passed
+	// this string through raw, so `sh -c` executed the `>pwned` redirect; the
+	// argv rewrite makes it inert on every shell.
+	if _, err := w.GitDiff(ctx, GitDiffOptions{Path: ".;>pwned"}); err != nil {
+		t.Fatalf("GitDiff(injection): %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "pwned")); !os.IsNotExist(err) {
+		t.Fatalf("GitDiff(injection) created a side-effect file: stat err=%v", err)
+	}
+
+	// git_diff (confinement): a path outside the workspace is refused before git
+	// runs. The test workspace has no approver, so the outside-workspace confirm
+	// fails closed with ErrPermissionDenied.
+	if _, err := w.GitDiff(ctx, GitDiffOptions{Path: "../outside"}); !errors.Is(err, ErrPermissionDenied) {
+		t.Fatalf("GitDiff(outside) = %v, want ErrPermissionDenied", err)
+	}
+}
+
+// TestGitDiffBlocksSensitivePath (defense-in-depth): git_diff now confines its
+// path argument through authorizePath, so a pathspec pointing at a protected
+// credential root is blocked before git is ever invoked — the same containment
+// Grep and Glob already apply. No git binary is required because the block
+// happens before any process starts.
+func TestGitDiffBlocksSensitivePath(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	home := t.TempDir()
+	sshRoot := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshRoot, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	trust := NewMemoryTrustStore()
+	_ = trust.Trust(ctx, root)
+	w, err := New(root, Options{PermissionMode: contract.PermissionAutoAccept, Trust: trust, SensitiveRoots: []string{sshRoot}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.GitDiff(ctx, GitDiffOptions{Path: sshRoot}); !errors.Is(err, ErrSensitivePath) {
+		t.Fatalf("GitDiff(sensitive) = %v, want ErrSensitivePath", err)
+	}
 }
 
 func containsPath(entries []ListEntry, path string) bool {
