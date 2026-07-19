@@ -385,7 +385,7 @@ func TestFaultInjectionCatalog(t *testing.T) {
 				{ToolCalls: []contract.ToolCall{contract.NewToolCall("u", "update_plan", `{"steps":[{"title":"[serial] internal/orchestrator/engine.go configure the widget [F1] Verify: go test ./internal/orchestrator","status":"pending"}],"note":"Verification:\n- go test ./...\nRisks:\n- none"}`)}},
 				{ToolCalls: []contract.ToolCall{contract.NewToolCall("x", "exit_plan_mode", `{"summary":"widget plan ready"}`)}},
 			},
-			prompt: "Use a subagent to configure the widget.",
+			prompt: "Create a plan to configure the widget properly.",
 			want:   outcomeUserDecision,
 		},
 
@@ -759,7 +759,7 @@ func TestFaultTerminalPlanApprovalNoOpsThenStaysLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	answer, stats, runErr := engine2.Run(context.Background(), "Fix the authentication login flow bug in the dashboard module.")
+	answer, stats, runErr := engine2.Run(context.Background(), "Create a plan to fix the authentication login flow bug in the dashboard module.")
 	assertRecoveryInvariant(t, engine2, stats, runErr, answer, outcomeUserDecision)
 }
 

@@ -12,13 +12,15 @@ type EffortProfile struct {
 	// cap). Scope (feature 009 PL-4): for a DIRECT task it is per task; for an
 	// orchestrated pipeline task it applies PER PHASE — task size selects which
 	// phases run, effort selects how many subagents each phase may use.
-	// ParallelAgents lets independent run_subagent calls execute concurrently;
+	// (ParallelAgents was removed by feature 014: subagents run one at a
+	// time, always — serial chains reuse each other's cached streams and
+	// never interleave workspace edits.)
+	// Formerly: lets independent run_subagent calls execute concurrently;
 	// AutoReview makes the engine nudge one review-subagent pass at the end of
 	// substantial file-changing work (feature 008 DG-7). The former
 	// Directives/PlanBeforeEdit fields were dead (populated, never consumed) — their
 	// intent now lives in the static DELEGATION prompt section (feature 008 R1/D2).
 	MaxAgentRuns           int
-	ParallelAgents         bool
 	AutoReview             bool
 	MaxTurns               int
 	AgentTurnScale         float64
@@ -48,15 +50,15 @@ var effortProfiles = map[contract.EffortLevel]EffortProfile{
 	},
 	contract.EffortHigh: {
 		Level: contract.EffortHigh, Rank: 2,
-		Summary:      "Deep work with parallel exploration and thorough checks.",
-		MaxAgentRuns: 4, ParallelAgents: true, MaxTurns: 36, AgentTurnScale: 1.1,
+		Summary:      "Deep work with broad exploration and thorough checks.",
+		MaxAgentRuns: 4, MaxTurns: 36, AgentTurnScale: 1.1,
 		KeepFullToolOutputs: 6, TrimmedToolOutputChars: 700, ToolOutputCap: 16_000, CompactThreshold: .87,
 		Onboarding: true, Reasoning: contract.ReasoningHigh, AgentReasoning: contract.ReasoningMedium,
 	},
 	contract.EffortMax: {
 		Level: contract.EffortMax, Rank: 3,
 		Summary:      "Production-critical migrations, audits, and architecture work.",
-		MaxAgentRuns: 8, ParallelAgents: true, AutoReview: true, MaxTurns: 48, AgentTurnScale: 1.4,
+		MaxAgentRuns: 8, AutoReview: true, MaxTurns: 48, AgentTurnScale: 1.4,
 		KeepFullToolOutputs: 8, TrimmedToolOutputChars: 900, ToolOutputCap: 24_000, CompactThreshold: .90,
 		Onboarding: true, Reasoning: contract.ReasoningMax, AgentReasoning: contract.ReasoningHigh,
 	},

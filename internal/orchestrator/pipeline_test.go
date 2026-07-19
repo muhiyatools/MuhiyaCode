@@ -16,7 +16,10 @@ func TestNeedsPlanMatrix(t *testing.T) {
 		{ClassChat, false, ""},
 		{ClassTiny, false, ""},
 		{ClassSmall, false, ""},
-		{ClassStandard, true, PipelineDepthLight},
+		// Feature 014: standard work runs DIRECT — a "fix two bugs" request
+		// gets fixed, not ceremonied. Plans come from explicit requests
+		// (PlanRequest) or corroborated large/epic classification only.
+		{ClassStandard, false, ""},
 		{ClassLarge, true, PipelineDepthFull},
 		{ClassEpic, true, PipelineDepthFull},
 	}

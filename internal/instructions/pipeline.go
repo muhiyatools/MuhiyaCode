@@ -53,7 +53,7 @@ var goalBlockInstructionText = Register(Text{ID: "prompt.goal-block", Audience: 
 // run_subagent delegation (the user's standing directive: launching agents is
 // the model's decision, never automatic).
 const (
-	PipelinePlanningInputTmpl = "[pipeline planning]\nInvestigate, then plan. Inspect only what the task needs — read the relevant files directly with read_file/grep/glob (cheapest for a handful of files), or delegate scoped explore subagents via run_subagent when the surface is genuinely large; never fan out agents to map a workspace a few reads would cover. Then call update_plan. Include implementation steps only: every step needs an exact target, acceptance check, and dependency marker. Example step title: \"" + PlanStepExampleBody + "\". Put repository-wide checks only in the note's Verification section.\n%s"
+	PipelinePlanningInputTmpl = "[pipeline planning]\nInvestigate, then plan. Inspect only what the task needs — read the relevant files directly with read_file/grep/glob (cheapest for a handful of files), or delegate ONE scoped explore subagent at a time via run_subagent when the surface is genuinely large; never fan out agents to map a workspace a few reads would cover. Then call update_plan. Include implementation steps only: every step needs an exact target, acceptance check, and dependency marker. Example step title: \"" + PlanStepExampleBody + "\". Put repository-wide checks only in the note's Verification section.\n%s"
 
 	// Feature 012 RG-5: the approval gate is the advance notice for the
 	// phase-read rule — it renders BEFORE full-depth implementation can begin,
@@ -70,7 +70,7 @@ const (
 	// full-depth implementing prelude. Execution is the model's to orchestrate —
 	// delegate or implement directly, its call; update_plan progression is what
 	// advances the phase (maybeAdvancePipelineAfterPlanUpdate).
-	PipelineImplementDelegateBody = "[implementation]\nThe plan is approved — execute it now. For each step or group of related steps, choose: delegate to a general subagent (run_subagent, agent=\"general\") with the exact step titles and their acceptance checks as the task, or implement directly yourself when the work is small or tightly coupled to what you already hold. Mark progress with update_plan as steps complete — completing every step advances validation automatically."
+	PipelineImplementDelegateBody = "[implementation]\nThe plan is approved — execute it now with at most ONE subagent at a time: delegate the next step or group of related steps to a single general subagent (run_subagent, agent=\"general\") with the exact step titles and their acceptance checks as the task, wait for its report, then send the next — each dispatch inherits its predecessor's context, so a serial chain is the cheap path. Implement directly yourself when the work is small or tightly coupled to what you already hold. Mark progress with update_plan as steps complete — completing every step advances validation automatically."
 
 	PipelineValidationDegradedBody = "[validation degraded]\nRun the plan's verification commands directly; a successful check confirms the fallback and unlocks completion."
 

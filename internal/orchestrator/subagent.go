@@ -394,8 +394,11 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		// must too.
 		previousShape = &shape
 		if err != nil {
+			// Feature 014: subagent reports surface the shared friendly mapping,
+			// never a raw transport error ("Post .../chat/completions: context
+			// canceled" was a live user-visible incident).
 			result.Status = statusFromContext(ctx, "failed")
-			result.Report = err.Error()
+			result.Report = gateway.FriendlyRequestError(err)
 			break
 		}
 		result.Usage = result.Usage.Add(response.Usage)

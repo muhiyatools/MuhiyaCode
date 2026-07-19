@@ -51,9 +51,11 @@ const (
 )
 
 // NeedsPlan is deliberately a pure predicate over the existing classifier.
-// Conversational, tiny, and small work stays on the byte-identical direct
-// path. Standard work gets research+plan+approval; large and epic work get
-// the full pipeline. General questions are already classified as ClassChat.
+// Feature 014 (cheap-by-default, user directive): conversational, tiny,
+// small, AND standard work all stay on the direct path — a "fix two bugs"
+// request gets fixed, not ceremonied through research/plan/approval. Only
+// corroborated large/epic work (or an explicit plan request of any size)
+// enters the pipeline.
 func NeedsPlan(assessment Assessment) PlanNeedVerdict {
 	verdict := PlanNeedVerdict{Reason: assessment.Reason}
 	// P3(a): executing an existing plan document never enters the research/planning
@@ -72,11 +74,7 @@ func NeedsPlan(assessment Assessment) PlanNeedVerdict {
 		}
 		return verdict
 	}
-	switch assessment.Class {
-	case ClassStandard:
-		verdict.NeedsPlan = true
-		verdict.Depth = PipelineDepthLight
-	case ClassLarge, ClassEpic:
+	if assessment.Class == ClassLarge || assessment.Class == ClassEpic {
 		verdict.NeedsPlan = true
 		verdict.Depth = PipelineDepthFull
 	}

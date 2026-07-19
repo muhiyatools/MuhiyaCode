@@ -275,7 +275,7 @@ INSTRUCTION SYSTEM DUMP — 107 texts, 3 examples
   mentions: run_subagent, update_plan (ctx: main-loop)
   ---
   [implementation]
-  The plan is approved — execute it now. For each step or group of related steps, choose: delegate to a general subagent (run_subagent, agent="general") with the exact step titles and their acceptance checks as the task, or implement directly yourself when the work is small or tightly coupled to what you already hold. Mark progress with update_plan as steps complete — completing every step advances validation automatically.
+  The plan is approved — execute it now with at most ONE subagent at a time: delegate the next step or group of related steps to a single general subagent (run_subagent, agent="general") with the exact step titles and their acceptance checks as the task, wait for its report, then send the next — each dispatch inherits its predecessor's context, so a serial chain is the cheap path. Implement directly yourself when the work is small or tightly coupled to what you already hold. Mark progress with update_plan as steps complete — completing every step advances validation automatically.
 
 [pipeline.implementing.light]
   ---
@@ -288,7 +288,7 @@ INSTRUCTION SYSTEM DUMP — 107 texts, 3 examples
   mentions: glob, grep, read_file, run_subagent, update_plan (ctx: main-loop)
   ---
   [pipeline planning]
-  Investigate, then plan. Inspect only what the task needs — read the relevant files directly with read_file/grep/glob (cheapest for a handful of files), or delegate scoped explore subagents via run_subagent when the surface is genuinely large; never fan out agents to map a workspace a few reads would cover. Then call update_plan. Include implementation steps only: every step needs an exact target, acceptance check, and dependency marker. Example step title: "src/store/editorStore.ts: add undo/redo history stack (50 snapshots) [F2] — Verify: npx tsc --noEmit passes". Put repository-wide checks only in the note's Verification section.
+  Investigate, then plan. Inspect only what the task needs — read the relevant files directly with read_file/grep/glob (cheapest for a handful of files), or delegate ONE scoped explore subagent at a time via run_subagent when the surface is genuinely large; never fan out agents to map a workspace a few reads would cover. Then call update_plan. Include implementation steps only: every step needs an exact target, acceptance check, and dependency marker. Example step title: "src/store/editorStore.ts: add undo/redo history stack (50 snapshots) [F2] — Verify: npx tsc --noEmit passes". Put repository-wide checks only in the note's Verification section.
   %s
 
 [pipeline.validating.already-done]

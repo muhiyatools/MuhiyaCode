@@ -12,11 +12,9 @@ import (
 )
 
 // subagentKind reads the "agent" field out of a run_subagent call's raw
-// arguments and returns the kind. H3: malformed JSON must fail closed —
-// parallel-batch decisions (engine.go:executeBatch) treat non-"general"
-// kinds as parallelizable, and a malformed/unknown general-subagent call
-// would otherwise be RUN IN PARALLEL while still having full mutation
-// permission. Treat any decode failure or empty value as "general".
+// arguments. H3: malformed JSON fails closed to "general" (the most
+// restricted-by-gates kind) so a mangled call never gains an unintended
+// capability class.
 func subagentKind(call contract.ToolCall) string {
 	var input struct {
 		Agent string `json:"agent"`
@@ -71,20 +69,18 @@ func failedClassKey(name, message string) string {
 }
 
 func (e *Engine) executeBatch(ctx context.Context, calls []contract.ToolCall, definitions []contract.ToolDefinition, effort EffortProfile) []toolOutcome {
-	// Only read-only subagent kinds (explore/plan/review) may run
-	// concurrently. "general" subagents get the full mutating tool registry,
-	// so running more than one at once risks unordered, interleaved edits to
-	// the same workspace with no locking anywhere in the tool registry.
+	// Feature 014 (user directive): subagents run ONE at a time, always. A
+	// serial chain is cheaper (each dispatch can continue its predecessor's
+	// cached stream, feature 012), safer (no interleaved workspace edits),
+	// and matches the intended shape: the main model plans, one subagent
+	// executes. Batches are still announced up front so the queue is visible.
 	allSubagents := len(calls) > 1
-	allAgents := allSubagents && effort.ParallelAgents
 	for _, call := range calls {
 		allSubagents = allSubagents && call.ToolName() == "run_subagent"
-		allAgents = allAgents && call.ToolName() == "run_subagent" && subagentKind(call) != "general"
 	}
 	// Announce every delegate in the batch BEFORE any of them executes. The
 	// per-call ToolStart inside gatedExecute fires only when that call is
-	// dispatched, so a serial delegate batch (ParallelAgents off, or any
-	// "general" delegate forcing the safe serial path) revealed delegate N+1's
+	// dispatched, so a serial delegate batch revealed delegate N+1's
 	// "Delegate … running" transcript row only after delegate N fully
 	// completed — the announced fan-out looked frozen for minutes. Announcing
 	// up front renders every row at batch launch; execution order, the shared
@@ -108,18 +104,6 @@ func (e *Engine) executeBatch(ctx context.Context, calls []contract.ToolCall, de
 		return e.gatedExecute(c, call, definitions, effort, scope)
 	}
 	result := make([]toolOutcome, len(calls))
-	if allAgents {
-		var wait sync.WaitGroup
-		for i, call := range calls {
-			wait.Add(1)
-			go func(index int, value contract.ToolCall) {
-				defer wait.Done()
-				result[index] = execute(ctx, value)
-			}(i, call)
-		}
-		wait.Wait()
-		return result
-	}
 	for i, call := range calls {
 		result[i] = execute(ctx, call)
 	}
