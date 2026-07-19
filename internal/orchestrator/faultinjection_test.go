@@ -187,6 +187,48 @@ func (t *schemaTool) Execute(_ context.Context, _ json.RawMessage) (string, erro
 	return "configured.", nil
 }
 
+// TestSubagentMalformedArgsGuidedRetry preserves the FI-5 subagent-scope
+// coverage after feature 013 (the catalog rows that reached it through the
+// old auto-dispatch are gone): H1 argument validation inside a subagent's own
+// dispatch gate guides wrong-type, missing-required, and bad-enum calls, and
+// the run still ends with a usable report — never a loop or hard failure.
+func TestSubagentMalformedArgsGuidedRetry(t *testing.T) {
+	for _, tc := range []struct{ name, badArgs string }{
+		{"wrong-type", `{"path":123}`},
+		{"missing-required", `{"mode":"a"}`},
+		{"bad-enum", `{"path":"x","mode":"z"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := &scriptedProvider{responses: []contract.ChatResponse{
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("a", "configure_widget", tc.badArgs)}},
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("b", "configure_widget", `{"path":"x","mode":"a"}`)}},
+				{Content: "Changes made: widget configured after correcting the arguments. Validation performed: tool succeeded. Problems: none. Remaining concerns: none."},
+			}}
+			settings := engineSettings()
+			engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "sub-h1-" + tc.name, WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&schemaTool{name: "configure_widget"})})
+			if err != nil {
+				t.Fatal(err)
+			}
+			result := engine.executeSubagent(context.Background(), "run-"+tc.name, subagentInput{Agent: "general", Task: "configure the widget"}, engine.subagentSpecs()["general"])
+			if result.Status != "done" || !strings.Contains(result.Report, "widget configured") {
+				t.Fatalf("guided retry failed: %+v", result)
+			}
+			// The guidance reached the model as the malformed call's tool result.
+			guided := false
+			for _, request := range provider.requests {
+				for _, message := range request.Messages {
+					if message.Role == contract.RoleTool && strings.Contains(message.Content, "Re-emit the call with well-formed arguments") {
+						guided = true
+					}
+				}
+			}
+			if !guided {
+				t.Fatal("H1 guidance never reached the subagent transcript")
+			}
+		})
+	}
+}
+
 // TestFaultInjectionCatalog runs the chaos catalog. Rows that depend on the
 // unified lifecycle (US1) are added in T009/US2; the rows below are the
 // lifecycle-independent MISSING/PARTIAL cells the R5 matrix flagged.
@@ -221,14 +263,17 @@ func TestFaultInjectionCatalog(t *testing.T) {
 		},
 		{
 			// FI-8: oversized plan (13 steps) — update_plan rejects with merge
-			// guidance, the model re-emits, no loop.
+			// guidance, the model re-emits a valid plan, exits, and the task
+			// reaches the approval pause. No loop (feature 013: a planning task
+			// naturally ends at the human approval decision).
 			name: "oversized-plan-rejected",
 			responses: []contract.ChatResponse{
 				{ToolCalls: []contract.ToolCall{contract.NewToolCall("a", "update_plan", oversizedPlanArgs(13))}},
-				{Content: "acknowledged the limit and continued"},
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("b", "update_plan", `{"steps":[{"title":"[serial] internal/orchestrator/engine.go function Run [F1] Verify: go test ./internal/orchestrator","status":"pending"}],"note":"Verification:\n- go test ./...\nRisks:\n- none"}`)}},
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("c", "exit_plan_mode", `{"summary":"merged to a phase-sized plan"}`)}},
 			},
 			prompt: "plan the work",
-			want:   outcomeGuidedSuccess,
+			want:   outcomeUserDecision,
 		},
 		{
 			// FI-10: a tool that keeps failing — the storm breaker / loop guard
@@ -326,44 +371,22 @@ func TestFaultInjectionCatalog(t *testing.T) {
 			want:   outcomeGuidedSuccess,
 		},
 		{
-			// "Delegate ... to a subagent" bumps classification to standard
-			// (agentRE), giving the task a real subagent allowance — without it
-			// run_subagent would be denied outright (agents=0) before ever
-			// reaching H1 inside the subagent's own dispatch gate.
-			name:  "malformed-args-wrong-type-subagent-scope",
+			// Feature 013: "Use a subagent" now classifies into the orchestrated
+			// planning window, where a "general" dispatch is plan-mode-blocked
+			// with bounded teach-the-model guidance (P3). The invariant this row
+			// pins: that block guides — the model adapts to planning, exits, and
+			// reaches the approval decision; never a loop. H1-inside-subagent
+			// coverage for wrong-type/missing/enum lives in
+			// TestSubagentMalformedArgsGuidedRetry.
+			name:  "general-subagent-blocked-in-planning-guides",
 			tools: []contract.Tool{&schemaTool{name: "configure_widget"}},
 			responses: []contract.ChatResponse{
 				{ToolCalls: []contract.ToolCall{contract.NewToolCall("s", "run_subagent", `{"agent":"general","task":"configure the widget for this task"}`)}},
-				{ToolCalls: []contract.ToolCall{contract.NewToolCall("a", "configure_widget", `{"path":123}`)}},
-				{Content: "Configured the widget correctly after the earlier malformed attempt."},
-				{Content: "Delegated work complete."},
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("u", "update_plan", `{"steps":[{"title":"[serial] internal/orchestrator/engine.go configure the widget [F1] Verify: go test ./internal/orchestrator","status":"pending"}],"note":"Verification:\n- go test ./...\nRisks:\n- none"}`)}},
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("x", "exit_plan_mode", `{"summary":"widget plan ready"}`)}},
 			},
 			prompt: "Use a subagent to configure the widget.",
-			want:   outcomeGuidedSuccess,
-		},
-		{
-			name:  "malformed-args-missing-required-subagent-scope",
-			tools: []contract.Tool{&schemaTool{name: "configure_widget"}},
-			responses: []contract.ChatResponse{
-				{ToolCalls: []contract.ToolCall{contract.NewToolCall("s", "run_subagent", `{"agent":"general","task":"configure the widget for this task"}`)}},
-				{ToolCalls: []contract.ToolCall{contract.NewToolCall("a", "configure_widget", `{"mode":"a"}`)}},
-				{Content: "Configured the widget correctly after the earlier malformed attempt."},
-				{Content: "Delegated work complete."},
-			},
-			prompt: "Use a subagent to configure the widget.",
-			want:   outcomeGuidedSuccess,
-		},
-		{
-			name:  "malformed-args-bad-enum-subagent-scope",
-			tools: []contract.Tool{&schemaTool{name: "configure_widget"}},
-			responses: []contract.ChatResponse{
-				{ToolCalls: []contract.ToolCall{contract.NewToolCall("s", "run_subagent", `{"agent":"general","task":"configure the widget for this task"}`)}},
-				{ToolCalls: []contract.ToolCall{contract.NewToolCall("a", "configure_widget", `{"path":"x","mode":"z"}`)}},
-				{Content: "Configured the widget correctly after the earlier malformed attempt."},
-				{Content: "Delegated work complete."},
-			},
-			prompt: "Use a subagent to configure the widget.",
-			want:   outcomeGuidedSuccess,
+			want:   outcomeUserDecision,
 		},
 
 		// --- T021 (FI-6): per-phase subagent budget driven past the cap.
@@ -398,19 +421,20 @@ func TestFaultInjectionCatalog(t *testing.T) {
 			// degradation records immediately. The model then confirms
 			// validation directly (a real check call), which is the only way to
 			// escape LifecycleValidating's "blocked until confirmed" gate.
-			name:  "budget-exhausted-validate-degrades",
+			name:  "failed-review-then-direct-verification-confirms",
 			tools: []contract.Tool{&recordingTool{name: "run_shell"}},
 			setup: func(e *Engine) {
 				e.lifecycle = Lifecycle{State: contract.LifecycleValidating, Depth: PipelineDepthFull, ResearchCompleted: true, PlanWritten: true, Approved: true, StepsComplete: true}
 				e.plan = contract.Plan{Steps: []contract.PlanStep{{Title: "ship the fix", Status: contract.PlanCompleted}}}
 			},
 			responses: []contract.ChatResponse{
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("r", "run_subagent", `{"agent":"review","task":"validate the completed plan against the changed workspace"}`)}},
 				{Content: "Checked but could not confirm every acceptance criterion. VERDICT: FAIL more verification needed."},
 				{ToolCalls: []contract.ToolCall{contract.NewToolCall("c", "run_shell", `{"command":"go test ./..."}`)}},
-				{Content: "Verification passed directly after the subagent's inconclusive pass."},
+				{Content: "Verification passed directly after the review's inconclusive verdict."},
 			},
 			prompt: "do the work",
-			want:   outcomeRecordedDegradation,
+			want:   outcomeGuidedSuccess,
 		},
 
 		// --- T022 (FI-7): interrupt/restart at every lifecycle state, driven
@@ -429,7 +453,6 @@ func TestFaultInjectionCatalog(t *testing.T) {
 				}
 			},
 			responses: []contract.ChatResponse{
-				{Content: "Findings: internal/orchestrator/engine.go function Run owns the main loop; verified against the source. Risks: none identified."},
 				{ToolCalls: []contract.ToolCall{contract.NewToolCall("x", "exit_plan_mode", `{"summary":"ready"}`)}},
 			},
 			want: outcomeUserDecision,
@@ -469,6 +492,7 @@ func TestFaultInjectionCatalog(t *testing.T) {
 				e.plan = contract.Plan{Steps: []contract.PlanStep{{Title: "ship it", Status: contract.PlanCompleted}}}
 			},
 			responses: []contract.ChatResponse{
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("r", "run_subagent", `{"agent":"review","task":"validate the completed plan"}`)}},
 				{Content: "Checked the completed implementation. VERDICT: PASS."},
 				{Content: "Pipeline complete: implementation and validation both confirmed."},
 			},
@@ -481,6 +505,7 @@ func TestFaultInjectionCatalog(t *testing.T) {
 				e.plan = contract.Plan{Steps: []contract.PlanStep{{Title: "ship it", Status: contract.PlanCompleted}}}
 			},
 			responses: []contract.ChatResponse{
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("r", "run_subagent", `{"agent":"review","task":"validate the completed plan"}`)}},
 				{Content: "Checked the completed implementation. VERDICT: PASS."},
 				{Content: "Pipeline complete: validation confirmed."},
 			},
@@ -544,11 +569,11 @@ func TestFaultInjectionCatalog(t *testing.T) {
 		},
 
 		{
-			// FI-11: one implementation group succeeds via subagent, the other's
-			// subagent returns nothing (unusable) — the degradation records and
-			// the SUCCESSFUL step's completion is preserved (never rolled back)
-			// while the model absorbs the failed step directly, and validation
-			// still completes the pipeline.
+			// FI-11 under feature 013: the MODEL delegates step 1 (succeeds) and
+			// step 2 (subagent returns nothing — unusable). The successful step's
+			// completion is preserved via the model's own update_plan, the failed
+			// dispatch opens the post-failure read exemption, the model absorbs
+			// step 2 directly, and its review dispatch completes the pipeline.
 			name: "implementation-partial-preserved-after-subagent-failure",
 			setup: func(e *Engine) {
 				e.lifecycle = Lifecycle{State: contract.LifecycleImplementing, Depth: PipelineDepthFull, ResearchCompleted: true, PlanWritten: true, Approved: true}
@@ -561,14 +586,17 @@ func TestFaultInjectionCatalog(t *testing.T) {
 				}
 			},
 			responses: []contract.ChatResponse{
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("s1", "run_subagent", `{"agent":"general","task":"Fix the login token validator per the approved step"}`)}},
 				{Content: "Changes made: fixed the login token validator. Validation performed: ran the focused unit test. Problems: none. Remaining concerns: none."},
-				{}, // second group's subagent returns nothing — an unusable report
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("s2", "run_subagent", `{"agent":"general","task":"Update the dashboard error banner per the approved step"}`)}},
+				{}, // second dispatch's subagent returns nothing — an unusable report
 				{ToolCalls: []contract.ToolCall{contract.NewToolCall("u", "update_plan", `{"steps":[{"title":"Fix the login token validator","status":"completed"},{"title":"Update the dashboard error banner","status":"completed"}]}`)}},
+				{ToolCalls: []contract.ToolCall{contract.NewToolCall("r", "run_subagent", `{"agent":"review","task":"validate the completed plan"}`)}},
 				{Content: "Checked the recovered change directly. VERDICT: PASS."},
 				{Content: "Pipeline complete: step 1 via subagent, step 2 recovered directly after its subagent returned nothing; validation passed."},
 			},
 			prompt: "Fix the authentication login flow bug in the dashboard module.",
-			want:   outcomeRecordedDegradation,
+			want:   outcomeGuidedSuccess,
 		},
 
 		{
@@ -724,7 +752,6 @@ func TestFaultTerminalPlanApprovalNoOpsThenStaysLive(t *testing.T) {
 	settings2 := engineSettings()
 	settings2.Effort = contract.EffortLow
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
-		{}, // auto research subagent — empty/unusable is fine, only liveness matters here
 		{ToolCalls: []contract.ToolCall{contract.NewToolCall("u", "update_plan", `{"steps":[{"title":"[serial] internal/orchestrator/engine.go function Run [F1] Verify: go test ./internal/orchestrator","status":"pending"}],"note":"Verification:\n- go test ./...\nRisks:\n- none"}`)}},
 		{ToolCalls: []contract.ToolCall{contract.NewToolCall("x", "exit_plan_mode", `{"summary":"ready"}`)}},
 	}}

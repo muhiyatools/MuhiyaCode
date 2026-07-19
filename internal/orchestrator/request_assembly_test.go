@@ -68,7 +68,7 @@ func TestValidateCallArgs(t *testing.T) {
 	}{
 		{"valid minimal", `{"path":"x"}`, false, ""},
 		{"valid full incl numeric+string enum", `{"path":"x","level":2,"mode":"a","flag":true}`, false, ""},
-		{"unparseable json", `{"path":`, true, "were not valid JSON"},
+		{"unparseable json", `{"path":`, true, "cut off mid-generation"},
 		{"missing required", `{"mode":"a"}`, true, "missing required field"},
 		{"wrong primitive type", `{"path":123}`, true, "must be a string"},
 		{"numeric enum violation", `{"path":"x","level":9}`, true, "must be one of"},

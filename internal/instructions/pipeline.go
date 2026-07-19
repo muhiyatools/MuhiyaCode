@@ -48,10 +48,12 @@ const GoalBlockInstructionBody = "Work autonomously toward this goal. End every 
 var goalBlockInstructionText = Register(Text{ID: "prompt.goal-block", Audience: MainDynamic, Cache: Tail, Body: GoalBlockInstructionBody})
 
 // Pipeline phase preludes (orchestrator/pipeline.go preparePipelinePhase).
+// Model-driven orchestration: the harness never launches subagents on its own —
+// every phase instructs the MAIN model, which chooses between direct work and
+// run_subagent delegation (the user's standing directive: launching agents is
+// the model's decision, never automatic).
 const (
-	PipelineResearchScopeTmpl = "Research scope %d/%d for this requested task:\n%s\n\nUser task:\n%s\n\nDeliver only verified findings with file:line or file:symbol references, risks, and facts the implementation plan must carry. Do not edit."
-
-	PipelinePlanningInputTmpl = "[pipeline planning input]\nThe banked findings below are the authoritative inspection result. Do not re-read covered files; call update_plan directly. Include implementation steps only: every step needs an exact target, cited finding, acceptance check, and dependency marker. Example step title: \"" + PlanStepExampleBody + "\". Put repository-wide checks only in the note's Verification section.\n%s"
+	PipelinePlanningInputTmpl = "[pipeline planning]\nInvestigate, then plan. Inspect only what the task needs — read the relevant files directly with read_file/grep/glob (cheapest for a handful of files), or delegate scoped explore subagents via run_subagent when the surface is genuinely large; never fan out agents to map a workspace a few reads would cover. Then call update_plan. Include implementation steps only: every step needs an exact target, acceptance check, and dependency marker. Example step title: \"" + PlanStepExampleBody + "\". Put repository-wide checks only in the note's Verification section.\n%s"
 
 	// Feature 012 RG-5: the approval gate is the advance notice for the
 	// phase-read rule — it renders BEFORE full-depth implementation can begin,
@@ -64,9 +66,11 @@ const (
 
 	PipelineCompleteBody = "[pipeline complete]\nResearch, planning, approved implementation, and validation have completed. Attribute their contributions in the final answer."
 
-	PipelineImplementationRecoveryBody = "[implementation recovery]\nSuccessful subagent plan parts are marked complete. Failed parts remain open; absorb them directly, keep update_plan current, then validate."
-
-	PipelineImplementationCompleteTmpl = "[implementation phase complete]\n%d implementation group(s) executed the approved plan.\n%s"
+	// PipelineImplementDelegateBody (feature 013 model-driven dispatch): the
+	// full-depth implementing prelude. Execution is the model's to orchestrate —
+	// delegate or implement directly, its call; update_plan progression is what
+	// advances the phase (maybeAdvancePipelineAfterPlanUpdate).
+	PipelineImplementDelegateBody = "[implementation]\nThe plan is approved — execute it now. For each step or group of related steps, choose: delegate to a general subagent (run_subagent, agent=\"general\") with the exact step titles and their acceptance checks as the task, or implement directly yourself when the work is small or tightly coupled to what you already hold. Mark progress with update_plan as steps complete — completing every step advances validation automatically."
 
 	PipelineValidationDegradedBody = "[validation degraded]\nRun the plan's verification commands directly; a successful check confirms the fallback and unlocks completion."
 
@@ -76,36 +80,32 @@ const (
 )
 
 var (
-	pipelineResearchScopeText          = Register(Text{ID: "pipeline.research.scope-task", Audience: MainDynamic, Cache: Tail, Body: PipelineResearchScopeTmpl})
-	pipelinePlanningInputText          = Register(Text{ID: "pipeline.planning.input", Audience: MainDynamic, Cache: Tail, Body: PipelinePlanningInputTmpl, StatesRule: RulePlanStepShape, Example: ExamplePlanStep.ID, MentionsTools: []string{"update_plan"}, AllowlistCtx: "main-loop"})
-	pipelineApprovalGateText           = Register(Text{ID: "pipeline.approval.gate", Audience: MainDynamic, Cache: Tail, Body: PipelineApprovalGateBody, StatesRule: RulePhaseRead})
-	pipelineLightImplementationText    = Register(Text{ID: "pipeline.implementing.light", Audience: MainDynamic, Cache: Tail, Body: PipelineLightImplementationBody})
-	pipelineValidationGateText         = Register(Text{ID: "pipeline.validating.gate", Audience: MainDynamic, Cache: Tail, Body: PipelineValidationGateBody})
-	pipelineCompleteText               = Register(Text{ID: "pipeline.finished", Audience: MainDynamic, Cache: Tail, Body: PipelineCompleteBody})
-	pipelineImplementationRecoveryText = Register(Text{ID: "pipeline.implementing.recovery", Audience: MainDynamic, Cache: Tail, Body: PipelineImplementationRecoveryBody})
-	pipelineImplementationCompleteText = Register(Text{ID: "pipeline.implementing.complete", Audience: MainDynamic, Cache: Tail, Body: PipelineImplementationCompleteTmpl})
-	pipelineValidationDegradedText     = Register(Text{ID: "pipeline.validating.degraded", Audience: MainDynamic, Cache: Tail, Body: PipelineValidationDegradedBody})
-	pipelineValidationCompleteText     = Register(Text{ID: "pipeline.validating.complete", Audience: MainDynamic, Cache: Tail, Body: PipelineValidationCompleteBody})
-	pipelineValidationAlreadyDoneText  = Register(Text{ID: "pipeline.validating.already-done", Audience: MainDynamic, Cache: Tail, Body: PipelineValidationAlreadyDoneBody})
+	pipelinePlanningInputText         = Register(Text{ID: "pipeline.planning.input", Audience: MainDynamic, Cache: Tail, Body: PipelinePlanningInputTmpl, StatesRule: RulePlanStepShape, Example: ExamplePlanStep.ID, MentionsTools: []string{"update_plan", "read_file", "grep", "glob", "run_subagent"}, AllowlistCtx: "main-loop"})
+	pipelineApprovalGateText          = Register(Text{ID: "pipeline.approval.gate", Audience: MainDynamic, Cache: Tail, Body: PipelineApprovalGateBody, StatesRule: RulePhaseRead})
+	pipelineLightImplementationText   = Register(Text{ID: "pipeline.implementing.light", Audience: MainDynamic, Cache: Tail, Body: PipelineLightImplementationBody})
+	pipelineImplementDelegateText     = Register(Text{ID: "pipeline.implementing.delegate", Audience: MainDynamic, Cache: Tail, Body: PipelineImplementDelegateBody, MentionsTools: []string{"run_subagent", "update_plan"}, AllowlistCtx: "main-loop"})
+	pipelineValidationGateText        = Register(Text{ID: "pipeline.validating.gate", Audience: MainDynamic, Cache: Tail, Body: PipelineValidationGateBody})
+	pipelineCompleteText              = Register(Text{ID: "pipeline.finished", Audience: MainDynamic, Cache: Tail, Body: PipelineCompleteBody})
+	pipelineValidationDegradedText    = Register(Text{ID: "pipeline.validating.degraded", Audience: MainDynamic, Cache: Tail, Body: PipelineValidationDegradedBody})
+	pipelineValidationCompleteText    = Register(Text{ID: "pipeline.validating.complete", Audience: MainDynamic, Cache: Tail, Body: PipelineValidationCompleteBody})
+	pipelineValidationAlreadyDoneText = Register(Text{ID: "pipeline.validating.already-done", Audience: MainDynamic, Cache: Tail, Body: PipelineValidationAlreadyDoneBody})
 )
 
-// Pipeline implementation/validation subagent task templates. The
-// implementation template reuses ReportFormatImplementation verbatim
-// instead of a second hand-copied field list (fix c's canonical-copy
-// discipline extends to this site too).
-const PipelineImplementTaskTmpl = "Execute only these approved plan steps, in order:\n%s\n\nInspect before editing. Preserve unrelated/user changes. Run focused checks. Report exactly: " + ReportFormatImplementation
-
-var pipelineImplementTaskText = Register(Text{
-	ID: "pipeline.implementing.task", Audience: Subagent, Cache: Sidecar, Body: PipelineImplementTaskTmpl,
-	MentionsTools: []string{}, AllowlistCtx: "subagent.general",
-})
-
+// PipelineValidateTaskTmpl is the review-subagent task the validating prelude
+// hands the MAIN model to launch (model-driven dispatch — the harness composes
+// the task text; the model issues the run_subagent call).
 const PipelineValidateTaskTmpl = "Validate the completed approved plan against the changed workspace. Run each Verification command once using the read-only shell capability before doing any extra inspection. Use one git diff/status snapshot when available; do not repeat predecessor per-file reads or greps unless a check fails and creates a concrete ambiguity. End with `VERDICT: PASS` when acceptance checks are satisfied or `VERDICT: FAIL` with exact corrective actions.\n\n%s"
 
 var pipelineValidateTaskText = Register(Text{
 	ID: "pipeline.validating.task", Audience: Subagent, Cache: Sidecar, Body: PipelineValidateTaskTmpl,
 	MentionsTools: []string{"run_shell", "git_diff", "git_status"}, AllowlistCtx: "subagent.review",
 })
+
+// PipelineValidateInstructTmpl (feature 013): the validating prelude for
+// focused/deep tiers — instructs the model to launch exactly ONE review
+// subagent with the composed task. Completion stays blocked until that
+// review's VERDICT: PASS is observed (run_subagent review-report hook).
+const PipelineValidateInstructTmpl = "[validation]\nAll steps are complete. Launch exactly ONE review subagent now — run_subagent with agent=\"review\" and this task verbatim:\n---\n%s\n---\nCompletion stays blocked until that review returns VERDICT: PASS. If it returns FAIL, fix the findings, update the to-dos, and re-run the review."
 
 // PipelineValidateFocusedScopeBody (feature 011 T022/D6) is appended to a
 // FOCUSED-tier validation review: it bounds the surface per
@@ -119,6 +119,4 @@ var pipelineValidateFocusedScopeText = Register(Text{
 	MentionsTools: []string{"git_diff", "git_status"}, AllowlistCtx: "subagent.review",
 })
 
-const PipelineValidateRecoveryAppendBody = "\n\nRecovery attempt: restrict inspection to the changed files and the exact verification commands in the plan. Return the required verdict even if blocked."
-
-var pipelineValidateRecoveryAppendText = Register(Text{ID: "pipeline.validating.recovery-append", Audience: Subagent, Cache: Sidecar, Body: PipelineValidateRecoveryAppendBody})
+var pipelineValidateInstructText = Register(Text{ID: "pipeline.validating.instruct", Audience: MainDynamic, Cache: Tail, Body: PipelineValidateInstructTmpl, MentionsTools: []string{"run_subagent", "update_plan"}, AllowlistCtx: "main-loop"})

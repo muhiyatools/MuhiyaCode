@@ -10,13 +10,21 @@ import (
 )
 
 func TestPipelineEndToEndHeadlessApprovalAndConfiguredRouting(t *testing.T) {
+	// Feature 013 flow: the MODEL launches every subagent. Run 1 (planning):
+	// the model chooses one explore dispatch, then plans and exits. Run 2
+	// (proceed): the model delegates the implementation step to one general
+	// subagent, marks it complete, launches the instructed review, and answers.
 	validStep := `[serial] internal/orchestrator/engine.go function Run [F1] Acceptance: pipeline reaches validated completion`
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("scout", "run_subagent", `{"agent":"explore","task":"map internal/orchestrator/engine.go task routing for the overhaul"}`)}},
 		{Content: "Findings: internal/orchestrator/engine.go function Run owns task routing; exact reference verified. Risks include preserving the direct fast path and plan approval."},
 		{ToolCalls: []contract.ToolCall{contract.NewToolCall("plan", "update_plan", `{"steps":[{"title":"`+validStep+`","status":"pending"}],"note":"Verification:\n- go test ./internal/orchestrator\nRisks:\n- preserve the direct fast path"}`)}},
 		{ToolCalls: []contract.ToolCall{contract.NewToolCall("exit", "exit_plan_mode", `{"summary":"research-backed plan ready"}`)}},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("impl", "run_subagent", `{"agent":"general","task":"Execute this approved plan step and report: `+validStep+`"}`)}},
 		{ToolCalls: []contract.ToolCall{contract.NewToolCall("edit", "edit_file", `{"path":"internal/orchestrator/engine.go","content":"focused change"}`)}},
 		{Content: "Changes made: focused engine update. Validation performed: focused package check. Problems: none. Remaining concerns: final independent review."},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("done", "update_plan", `{"steps":[{"title":"`+validStep+`","status":"completed"}]}`)}},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("rev", "run_subagent", `{"agent":"review","task":"Validate the completed approved plan against the changed workspace"}`)}},
 		{Content: "Verified findings: implementation matches the approved step and the direct path remains isolated. Checks performed: plan command inspected. VERDICT: PASS. Remaining concerns: none."},
 		{Content: "Pipeline complete: research grounded the plan, implementation executed the approved step, and validation passed."},
 	}}
@@ -69,8 +77,8 @@ func TestPipelineEndToEndHeadlessApprovalAndConfiguredRouting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if executionStats.ToolCalls != 0 || executionStats.AgentRuns != 2 {
-		t.Fatalf("full pipeline leaked delegated execution back to main: stats=%+v", executionStats)
+	if executionStats.AgentRuns != 2 {
+		t.Fatalf("execution run must delegate implement + review (2 agent runs): stats=%+v", executionStats)
 	}
 	if engine.LifecycleState() != contract.LifecycleFinished {
 		t.Fatalf("pipeline did not finish: state=%s answer=%q", engine.LifecycleState(), answer)
@@ -92,7 +100,7 @@ func TestPipelineEndToEndHeadlessApprovalAndConfiguredRouting(t *testing.T) {
 		}
 	}
 
-	research, implement, validate := 0, 0, 0
+	explore, implement, validate := 0, 0, 0
 	agentMu.Lock()
 	for _, event := range agents {
 		if event.Kind != "start" {
@@ -101,18 +109,18 @@ func TestPipelineEndToEndHeadlessApprovalAndConfiguredRouting(t *testing.T) {
 		if event.Model != "Worker" {
 			t.Fatalf("subagent routed to %q, want configured Worker", event.Model)
 		}
-		switch event.Phase {
-		case string(contract.PipelinePhaseResearch):
-			research++
-		case string(contract.PipelinePhaseImplement):
+		switch event.Agent {
+		case "explore":
+			explore++
+		case "general":
 			implement++
-		case string(contract.PipelinePhaseValidate):
+		case "review":
 			validate++
 		}
 	}
 	agentMu.Unlock()
-	if research != 1 || implement != 1 || validate != 1 {
-		t.Fatalf("phase agent counts = research %d implement %d validate %d", research, implement, validate)
+	if explore != 1 || implement != 1 || validate != 1 {
+		t.Fatalf("model-launched agent counts = explore %d implement %d review %d", explore, implement, validate)
 	}
 	for _, request := range provider.requests {
 		if strings.Contains(request.SessionID, ":sub:") && request.ModelID != "worker-model" {

@@ -361,29 +361,30 @@ func TestParseReportTrailer(t *testing.T) {
 	}
 }
 
-// TestResearchTransitionDeliversBriefing pins R-D11 (verified gap R-F15): the
-// mid-Run research→planning transition delivers the findings briefing once.
-func TestResearchTransitionDeliversBriefing(t *testing.T) {
-	provider := &scriptedProvider{responses: []contract.ChatResponse{
-		{Content: "Findings: the calc package holds Sum in calc/calc.go. Exact references: calc/calc.go:10. Risks/unknowns: none. Plan implications: extend calc."},
-	}}
+// TestResearchAutoTransitionsWithoutDispatch pins feature 013: entering an
+// orchestrated pipeline NEVER fans out harness subagents — research passes
+// straight into planning with the investigate-then-plan instruction, and the
+// provider sees zero requests.
+func TestResearchAutoTransitionsWithoutDispatch(t *testing.T) {
+	provider := &scriptedProvider{}
 	settings := engineSettings()
 	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "brief", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry()})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"calc.go", "report.go", "store.go"} {
-		writeWorkspaceFile(t, engine, name, "package calc")
-	}
 	engine.lifecycle = Lifecycle{State: contract.LifecycleResearch, Depth: PipelineDepthFull}
-	engine.taskAgentCap = 2
-	engine.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
-	prelude, err := engine.runPipelineResearch(context.Background(), "extend the calc package with a Multiply function", Budget{MaxAgentRuns: 1}, Profile(contract.EffortMedium))
+	prelude, err := engine.preparePipelinePhase(context.Background(), "extend the calc package with a Multiply function", Budget{MaxAgentRuns: 2}, Profile(contract.EffortMedium))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(prelude, "[research phase complete]") || !strings.Contains(prelude, "[pipeline planning input]") {
-		t.Fatalf("mid-Run transition must deliver the findings briefing once, got %q", prelude)
+	if !strings.Contains(prelude, "[pipeline planning]") {
+		t.Fatalf("research must hand the model the planning instruction, got %q", prelude)
+	}
+	if engine.LifecycleState() != contract.LifecyclePlanning {
+		t.Fatalf("research must transition to planning, got %s", engine.LifecycleState())
+	}
+	if len(provider.requests) != 0 {
+		t.Fatalf("the harness must not launch subagents on its own — %d provider requests fired", len(provider.requests))
 	}
 }
 

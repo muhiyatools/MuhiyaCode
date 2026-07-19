@@ -1,4 +1,4 @@
-INSTRUCTION SYSTEM DUMP — 110 texts, 3 examples
+INSTRUCTION SYSTEM DUMP — 107 texts, 3 examples
 
 ################ AUDIENCE: main-static ################
 
@@ -271,40 +271,25 @@ INSTRUCTION SYSTEM DUMP — 110 texts, 3 examples
   [pipeline complete]
   Research, planning, approved implementation, and validation have completed. Attribute their contributions in the final answer.
 
-[pipeline.implementing.complete]
+[pipeline.implementing.delegate]
+  mentions: run_subagent, update_plan (ctx: main-loop)
   ---
-  [implementation phase complete]
-  %d implementation group(s) executed the approved plan.
-  %s
+  [implementation]
+  The plan is approved — execute it now. For each step or group of related steps, choose: delegate to a general subagent (run_subagent, agent="general") with the exact step titles and their acceptance checks as the task, or implement directly yourself when the work is small or tightly coupled to what you already hold. Mark progress with update_plan as steps complete — completing every step advances validation automatically.
 
 [pipeline.implementing.light]
   ---
   [light implementation]
   The plan is approved. Implement it in the main conversation, keep every step status current, and run its verification commands before finishing.
 
-[pipeline.implementing.recovery]
-  ---
-  [implementation recovery]
-  Successful subagent plan parts are marked complete. Failed parts remain open; absorb them directly, keep update_plan current, then validate.
-
 [pipeline.planning.input]
   states: rule.plan-step-shape
   example: example.plan-step
-  mentions: update_plan (ctx: main-loop)
+  mentions: glob, grep, read_file, run_subagent, update_plan (ctx: main-loop)
   ---
-  [pipeline planning input]
-  The banked findings below are the authoritative inspection result. Do not re-read covered files; call update_plan directly. Include implementation steps only: every step needs an exact target, cited finding, acceptance check, and dependency marker. Example step title: "src/store/editorStore.ts: add undo/redo history stack (50 snapshots) [F2] — Verify: npx tsc --noEmit passes". Put repository-wide checks only in the note's Verification section.
+  [pipeline planning]
+  Investigate, then plan. Inspect only what the task needs — read the relevant files directly with read_file/grep/glob (cheapest for a handful of files), or delegate scoped explore subagents via run_subagent when the surface is genuinely large; never fan out agents to map a workspace a few reads would cover. Then call update_plan. Include implementation steps only: every step needs an exact target, acceptance check, and dependency marker. Example step title: "src/store/editorStore.ts: add undo/redo history stack (50 snapshots) [F2] — Verify: npx tsc --noEmit passes". Put repository-wide checks only in the note's Verification section.
   %s
-
-[pipeline.research.scope-task]
-  ---
-  Research scope %d/%d for this requested task:
-  %s
-  
-  User task:
-  %s
-  
-  Deliver only verified findings with file:line or file:symbol references, risks, and facts the implementation plan must carry. Do not edit.
 
 [pipeline.validating.already-done]
   ---
@@ -324,6 +309,16 @@ INSTRUCTION SYSTEM DUMP — 110 texts, 3 examples
   ---
   [validation gate]
   Run the plan's verification commands and review the changed files. Completion remains blocked until a successful check confirms validation.
+
+[pipeline.validating.instruct]
+  mentions: run_subagent, update_plan (ctx: main-loop)
+  ---
+  [validation]
+  All steps are complete. Launch exactly ONE review subagent now — run_subagent with agent="review" and this task verbatim:
+  ---
+  %s
+  ---
+  Completion stays blocked until that review returns VERDICT: PASS. If it returns FAIL, fix the findings, update the to-dos, and re-run the review.
 
 [prompt.goal-block]
   ---
@@ -413,25 +408,12 @@ INSTRUCTION SYSTEM DUMP — 110 texts, 3 examples
 
 ---- cache: sidecar ----
 
-[pipeline.implementing.task]
-  ---
-  Execute only these approved plan steps, in order:
-  %s
-  
-  Inspect before editing. Preserve unrelated/user changes. Run focused checks. Report exactly: Changes made; Validation performed; Problems; Remaining concerns.
-
 [pipeline.validating.focused-scope]
   mentions: git_diff, git_status (ctx: subagent.review)
   ---
   
   
   Focused scope: examine ONLY the changed files (one git diff/status snapshot) plus their direct dependents — same-package files and one-hop importers — up to 15 files total; name anything beyond that as skipped instead of reading it. End your report with one line exactly of the form `Coverage: covered=<file list>; skipped=<file list or none>`.
-
-[pipeline.validating.recovery-append]
-  ---
-  
-  
-  Recovery attempt: restrict inspection to the changed files and the exact verification commands in the plan. Return the required verdict even if blocked.
 
 [pipeline.validating.task]
   mentions: git_diff, git_status, run_shell (ctx: subagent.review)

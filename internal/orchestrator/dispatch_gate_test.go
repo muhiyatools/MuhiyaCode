@@ -63,7 +63,7 @@ func TestGatedExecuteSubagentMalformedArgsActionableError(t *testing.T) {
 	call := contract.NewToolCall("r", "read_file", `{"path":`) // truncated JSON
 
 	o := engine.gatedExecute(context.Background(), call, defs, Profile(contract.EffortMedium), sc)
-	if !o.Failed || !strings.Contains(o.Output, "were not valid JSON") {
+	if !o.Failed || !strings.Contains(o.Output, "cut off mid-generation") {
 		t.Fatalf("malformed args should get the actionable validation error, got %q", o.Output)
 	}
 }

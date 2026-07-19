@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -483,4 +484,58 @@ func (e *Engine) finalizeReviewStats(stats *contract.TaskStats, class TaskClass,
 	e.taskMu.Lock()
 	stats.TerminalReadViolations, stats.DuplicateReadViolations = e.taskTerminalReads, e.taskDuplicates
 	e.taskMu.Unlock()
+}
+
+// --- workspace probe -------------------------------------------------------
+// The bounded source-file probe the repo-size bucket reads. It lived with the
+// research fan-out until feature 013 removed harness dispatch; the review gate
+// is its remaining consumer.
+
+const researchLensProbeCeiling = 26 // bounded probe: enough to tell the buckets apart
+
+var researchSourceExtensions = map[string]bool{
+	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".mjs": true,
+	".py": true, ".rb": true, ".rs": true, ".java": true, ".kt": true, ".cs": true,
+	".cpp": true, ".cc": true, ".c": true, ".h": true, ".hpp": true, ".php": true,
+	".swift": true, ".scala": true, ".vue": true, ".svelte": true, ".css": true,
+	".scss": true, ".html": true, ".sql": true, ".sh": true, ".lua": true, ".dart": true,
+}
+
+var researchSkipDirs = map[string]bool{
+	"node_modules": true, "vendor": true, "dist": true, "build": true, "target": true,
+	".next": true, ".nuxt": true, ".venv": true, "venv": true, "__pycache__": true,
+	"bin": true, "obj": true, "out": true, "coverage": true, ".turbo": true,
+}
+
+// countWorkspaceSourceFiles walks root counting source files, skipping vendor
+// and hidden directories, stopping at stopAt so the probe is O(stopAt), never
+// O(repo). An unreadable entry is skipped, never fatal.
+func countWorkspaceSourceFiles(root string, stopAt int) int {
+	count := 0
+	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			if path == root {
+				return nil
+			}
+			name := d.Name()
+			if researchSkipDirs[name] || strings.HasPrefix(name, ".") {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if researchSourceExtensions[strings.ToLower(filepath.Ext(d.Name()))] {
+			count++
+			if count >= stopAt {
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	return count
 }

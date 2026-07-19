@@ -2,6 +2,12 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
+## Unreleased
+
+- **You decide, not the harness: model-driven subagent dispatch (feature 013).** The harness no longer launches subagents on its own — no more automatic research fan-out reading your whole workspace before planning. Every pipeline phase now instructs the main model, which chooses between working directly and delegating: planning opens with "inspect only what the task needs — read files directly, or delegate scoped explores if the surface is genuinely large"; after your approval the model delegates plan steps to general subagents (or implements directly) at its own judgment; the review gate still decides whether a validation review is warranted, but the model launches it, and completion stays blocked until its `VERDICT: PASS`. Phase enforcement, approval pauses, budgets, and context linking are all unchanged — only the launching moved to the model.
+- **Clearer truncated-call errors.** A tool call whose JSON was cut off mid-generation (the live `update_plan: unexpected end of JSON input` failure) now names the real cause and the one-step fix — re-emit the whole call, shorter if it was large — instead of echoing the parser error.
+- **Refactor pass (no behavior change).** Dead code and duplicate logic removed across the codebase (the old fan-out/grouping machinery, an unused TUI field, misplaced comments); the deprecated `strings.Title` replaced by a byte-identical local helper; `staticcheck` now runs clean outside documented idioms.
+
 ## 1.0.4
 
 - **Fixed MiniMax models being unusable.** The default `max_tokens` for the MiniMax family was set to the entire context window (1M on M3), and MiniMax counts requested output against the shared context budget — so every M3 request failed with a 400 "maximum context length exceeded" before producing anything. The operational default is now 16k per turn like every other family; explicit larger requests still clamp to the documented ceiling. A regression test pins the invariant.

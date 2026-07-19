@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
@@ -18,6 +19,13 @@ func validateCallArgs(call contract.ToolCall, definitions []contract.ToolDefinit
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
+		// A truncated payload ("unexpected end of JSON input") is almost always
+		// the model's own generation cutting off mid-call (live incident: a long
+		// update_plan). Name that cause and the one-step fix instead of echoing
+		// the bare parser error.
+		if strings.Contains(err.Error(), "unexpected end of JSON input") {
+			return fmt.Errorf("%s: the call's JSON was cut off mid-generation. Re-emit the ENTIRE call in one piece — and if the payload was large, send a shorter version (fewer, more compact steps)", call.ToolName())
+		}
 		return fmt.Errorf("%s: arguments were not valid JSON (%v)", call.ToolName(), err)
 	}
 	schema := findDefinition(definitions, call.ToolName())

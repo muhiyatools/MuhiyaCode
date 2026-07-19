@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"encoding/json"
-	"strings"
 	"testing"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
@@ -58,32 +57,6 @@ func TestPipelinePhasePersistsInPlanStateSnapshot(t *testing.T) {
 	}
 }
 
-func TestPipelineResearchScopesUseExplicitIndependentDirectories(t *testing.T) {
-	scopes, explicit := pipelineResearchScopes("Audit auth/, billing/, reports/, and notify/ independently.")
-	if !explicit {
-		t.Fatal("four named directories must be reported as explicit disjoint scopes")
-	}
-	if len(scopes) != 4 {
-		t.Fatalf("explicit scopes = %d, want 4: %+v", len(scopes), scopes)
-	}
-	for index, want := range []string{"auth/", "billing/", "reports/", "notify/"} {
-		if !strings.Contains(scopes[index].title, want) || !strings.Contains(scopes[index].focus, "only the independent scope "+want) {
-			t.Fatalf("scope %d = %+v, want %s", index, scopes[index], want)
-		}
-	}
-}
-
-func TestPipelineParallelGroupsRequireDisjointExactTargets(t *testing.T) {
-	plan := contract.Plan{Steps: []contract.PlanStep{
-		{Title: "[parallel] internal/orchestrator/pipeline.go function A [F1] Acceptance: A passes", Status: contract.PlanPending},
-		{Title: "[parallel] internal/orchestrator/pipeline.go function B [F2] Acceptance: B passes", Status: contract.PlanPending},
-	}}
-	groups := groupPipelineSteps(plan, 2)
-	if pipelineGroupsDisjoint(plan, groups) {
-		t.Fatal("same-file plan steps were allowed to mutate concurrently")
-	}
-	plan.Steps[1].Title = "[parallel] internal/gateway/provider.go function B [F2] Acceptance: B passes"
-	if !pipelineGroupsDisjoint(plan, groupPipelineSteps(plan, 2)) {
-		t.Fatal("distinct exact-file plan steps lost safe parallelism")
-	}
-}
+// The research-scope and step-grouping helpers were removed with feature 013's
+// model-driven dispatch: the model decomposes and delegates its own way; the
+// harness no longer fans out or groups on its behalf.

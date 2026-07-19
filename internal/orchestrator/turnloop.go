@@ -246,13 +246,14 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	} else if strings.TrimSpace(pipelinePrelude) != "" {
 		brief = pipelinePrelude + "\n" + brief
 	}
-	// The full pipeline executes approved steps and validation inside the
-	// harness before the main model is called. Never also inject the legacy
-	// "executing saved plan" payload after that work reached done: doing so asks
-	// the main agent to repeat completed edits and checks. Light pipelines and
-	// degraded full runs still receive the plan for direct execution/recovery.
+	// The legacy "[executing saved plan]" payload serves DIRECT resumes (a
+	// saved plan executed in the main conversation). An orchestrated full-depth
+	// resume never gets it (feature 013): the phase prelude carries the current
+	// instruction and the model reads the plan via read_plan — injecting the
+	// whole plan body would duplicate both and re-ask for completed work once
+	// the pipeline finishes. Light pipelines and manual resumes keep it.
 	pipelineAfterPrepare := e.Lifecycle()
-	if executingPlanText != "" && (pipelineAfterPrepare.Depth != PipelineDepthFull || pipelineAfterPrepare.State != contract.LifecycleFinished) {
+	if executingPlanText != "" && pipelineAfterPrepare.Depth != PipelineDepthFull {
 		brief = "[executing saved plan]\n" + executingPlanText + "\n" + brief
 	}
 	plan := e.planBlock()
