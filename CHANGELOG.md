@@ -2,6 +2,10 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
+## 1.0.4
+
+- **Fixed MiniMax models being unusable.** The default `max_tokens` for the MiniMax family was set to the entire context window (1M on M3), and MiniMax counts requested output against the shared context budget — so every M3 request failed with a 400 "maximum context length exceeded" before producing anything. The operational default is now 16k per turn like every other family; explicit larger requests still clamp to the documented ceiling. A regression test pins the invariant.
+
 ## 1.0.3
 
 Competitive-agent audit (feature 011): the agent stops paying a review tax on every small task, spends tokens where risk actually lives, and reports honest per-provider cache numbers.
