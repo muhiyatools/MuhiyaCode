@@ -31,10 +31,6 @@ func subagentKind(call contract.ToolCall) string {
 	return kind
 }
 
-// recordPlanViolationAndBlock increments the per-task violation counter and
-// returns a blocked toolOutcome whose output escalates from a soft notice
-// (counts 1–2) to a hard governance message (count ≥ 3 with the storm
-// indicator). (P4.)
 // failedCallLastError returns the cached error for an identical prior
 // verbatim call, or ("", false) when no such failure has been recorded.
 func failedCallLastError(c *callCounters, signature string) (string, bool) {

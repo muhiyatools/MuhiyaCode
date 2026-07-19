@@ -10,7 +10,8 @@ import (
 // basename-legible, hash-disambiguated, sanitized, lowercased, and length-capped.
 func TestProjectID(t *testing.T) {
 	same := `c:\users\me\my project`
-	if ProjectID(same) != ProjectID(same) {
+	first, second := ProjectID(same), ProjectID(same)
+	if first != second {
 		t.Fatal("ProjectID is not deterministic")
 	}
 	if ProjectID(`c:\a\shared`) == ProjectID(`c:\b\shared`) {

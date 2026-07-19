@@ -317,7 +317,7 @@ func TestReleaseDoesNotReinvoke(t *testing.T) {
 	m = updated.(*Model)
 	// The release at the same coordinate must not fire the callback again.
 	updated, _ = m.Update(tea.MouseReleaseMsg{X: m.width / 2, Y: clickY, Button: tea.MouseLeft})
-	m = updated.(*Model)
+	_ = updated
 	if count != 1 {
 		t.Fatalf("callback fired %d times; press must fire once and release never", count)
 	}
@@ -400,7 +400,7 @@ func TestClickToolChipTogglesExpansion(t *testing.T) {
 		}
 	}
 	updated, _ = m.Update(tea.MouseClickMsg{X: 5, Y: clickY, Button: tea.MouseLeft})
-	m = updated.(*Model)
+	_ = updated
 	if tool.expanded {
 		t.Fatal("clicking the tool chip again did not collapse it")
 	}

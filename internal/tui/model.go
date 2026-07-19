@@ -207,27 +207,26 @@ type noticeState struct {
 }
 
 type Model struct {
-	ctx       context.Context
-	runtime   Runtime
-	bridge    *Bridge
-	actions   Actions
-	version   string
-	theme     Theme
-	palette   palette
-	glyphs    glyphs
-	viewport  viewport.Model
-	input     Composer
-	width     int
-	height    int
-	items     []item
-	busy      bool
-	status    string
-	started   time.Time
-	usage     contract.Usage
-	context   contract.ContextInfo
-	plan      contract.Plan
-	reasoning string // live 300-rune tail shown collapsed
-	frame     int
+	ctx      context.Context
+	runtime  Runtime
+	bridge   *Bridge
+	actions  Actions
+	version  string
+	theme    Theme
+	palette  palette
+	glyphs   glyphs
+	viewport viewport.Model
+	input    Composer
+	width    int
+	height   int
+	items    []item
+	busy     bool
+	status   string
+	started  time.Time
+	usage    contract.Usage
+	context  contract.ContextInfo
+	plan     contract.Plan
+	frame    int
 	// transcriptRenders counts full transcript re-renders; the US1/US2 hot-path
 	// guard asserts it does not advance on keystrokes or idle ticks.
 	transcriptRenders int

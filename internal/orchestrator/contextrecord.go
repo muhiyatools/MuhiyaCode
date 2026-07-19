@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
@@ -129,28 +130,32 @@ func (c *agentRunCapture) note(name, argumentsJSON string) {
 	}
 }
 
+// statFingerprint is the ONE staleness primitive: the current mtime+size of a
+// normalized touched-set path, zero when the file is absent (a later existence
+// change still reads as "changed"). Capture, staleness comparison, and tests
+// all share it so the fingerprint semantics cannot drift.
+func statFingerprint(workspace, path string) FileFingerprint {
+	info, err := os.Stat(filepath.Join(workspace, filepath.FromSlash(path)))
+	if err != nil {
+		return FileFingerprint{}
+	}
+	return FileFingerprint{MTimeMS: float64(info.ModTime().UnixNano()) / 1e6, Size: info.Size()}
+}
+
 // finalize performs the single end-of-run stat pass (R-D5) and returns the
-// touched set with completion-time fingerprints. Paths that vanished stat as
-// zero fingerprints (a later existence change still reads as "changed").
+// touched set with completion-time fingerprints.
 func (c *agentRunCapture) finalize() ReadWriteSet {
 	set := ReadWriteSet{}
-	stat := func(path string) FileFingerprint {
-		info, err := os.Stat(filepath.Join(c.workspace, filepath.FromSlash(path)))
-		if err != nil {
-			return FileFingerprint{}
-		}
-		return FileFingerprint{MTimeMS: float64(info.ModTime().UnixNano()) / 1e6, Size: info.Size()}
-	}
 	if len(c.reads) > 0 {
 		set.Reads = make(map[string]FileFingerprint, len(c.reads))
 		for path := range c.reads {
-			set.Reads[path] = stat(path)
+			set.Reads[path] = statFingerprint(c.workspace, path)
 		}
 	}
 	if len(c.writes) > 0 {
 		set.Writes = make(map[string]FileFingerprint, len(c.writes))
 		for path := range c.writes {
-			set.Writes[path] = stat(path)
+			set.Writes[path] = statFingerprint(c.workspace, path)
 		}
 	}
 	return set
@@ -316,13 +321,7 @@ func (e *Engine) RestoreAgentRecords(raw [][]byte) {
 		restored = append(restored, &record)
 	}
 	// Oldest first so agentRecordOrder keeps completion order.
-	for i := 0; i < len(restored); i++ {
-		for j := i + 1; j < len(restored); j++ {
-			if restored[j].CompletedAt < restored[i].CompletedAt {
-				restored[i], restored[j] = restored[j], restored[i]
-			}
-		}
-	}
+	sort.Slice(restored, func(i, j int) bool { return restored[i].CompletedAt < restored[j].CompletedAt })
 	for _, record := range restored {
 		if _, exists := e.agentRecords[record.RunID]; exists {
 			continue

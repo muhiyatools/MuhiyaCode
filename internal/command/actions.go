@@ -167,7 +167,7 @@ func approvalMessage(request workspace.ApprovalRequest) string {
 	if request.Command != "" {
 		return "Allow shell command in " + request.Workspace + "?\n\n" + request.Command
 	}
-	label := strings.Title(string(request.Action))
+	label := contract.TitleWords(string(request.Action))
 	if request.OutsideWorkspace {
 		label += " outside the workspace"
 	}

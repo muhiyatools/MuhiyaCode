@@ -21,7 +21,7 @@ import (
 // phaseReadGate returns (outcome, true) when the call is denied. It never
 // records into the failed-call cache: the identical read becomes legal the
 // moment the phase changes, and a cached denial would strand it.
-func (e *Engine) phaseReadGate(ctx context.Context, sc dispatchScope, call contract.ToolCall, name, signature string) (toolOutcome, bool) {
+func (e *Engine) phaseReadGate(ctx context.Context, sc dispatchScope, call contract.ToolCall, name string) (toolOutcome, bool) {
 	if !sc.trackStats || !e.contextLinkingEnabled() {
 		return toolOutcome{}, false
 	}
@@ -76,7 +76,6 @@ func (e *Engine) phaseReadGate(ctx context.Context, sc dispatchScope, call contr
 	if sc.onEnd != nil {
 		sc.onEnd(call, output)
 	}
-	_ = signature
 	return toolOutcome{Call: call, Output: output, Failed: true}, true
 }
 

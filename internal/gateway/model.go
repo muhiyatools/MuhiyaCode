@@ -136,9 +136,9 @@ func ResolveModelProfile(name string) ModelProfile {
 			SupportedParams:     []string{"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options", "tools", "tool_choice", "reasoning_split"},
 		}
 	case strings.Contains(lower, "glm") || strings.Contains(lower, "zhipu"):
-		return ModelProfile{Family: "glm", Temperature: .1, TopP: .9, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, PromptAddendum: instructions.GatewayGLMAddendumBody}
+		return ModelProfile{Family: "glm", Temperature: .1, TopP: .9, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGLMAddendumBody}
 	default:
-		return ModelProfile{Family: "generic", Temperature: .1, TopP: .95, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, PromptAddendum: instructions.GatewayGenericAddendumBody}
+		return ModelProfile{Family: "generic", Temperature: .1, TopP: .95, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGenericAddendumBody}
 	}
 }
 

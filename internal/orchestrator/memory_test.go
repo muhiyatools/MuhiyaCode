@@ -117,7 +117,7 @@ func TestAppendMemoryEntryEscapesReservedTags(t *testing.T) {
 		}
 	}
 	// escapeReservedTags inserts a zero-width space after the < / </.
-	for _, escaped := range []string{"</​project-memory", "<​memory-update", "<​project-instructions"} {
+	for _, escaped := range []string{"</\u200bproject-memory", "<\u200bmemory-update", "<\u200bproject-instructions"} {
 		if !strings.Contains(got, escaped) {
 			t.Fatalf("escaped form %q missing from %q", escaped, got)
 		}

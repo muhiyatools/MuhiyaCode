@@ -21,8 +21,8 @@ var reservedContextTags = []string{"user-instructions", "project-instructions", 
 
 func escapeReservedTags(s string) string {
 	for _, name := range reservedContextTags {
-		s = strings.ReplaceAll(s, "<"+name, "<​"+name)
-		s = strings.ReplaceAll(s, "</"+name, "</​"+name)
+		s = strings.ReplaceAll(s, "<"+name, "<\u200b"+name)
+		s = strings.ReplaceAll(s, "</"+name, "</\u200b"+name)
 	}
 	return s
 }

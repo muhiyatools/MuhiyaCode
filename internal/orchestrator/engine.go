@@ -407,6 +407,25 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 	return engine, nil
 }
 
+// resetTaskState clears every per-task counter and ledger at task start. One
+// home for the whole reset so a new per-task field cannot be forgotten in the
+// turn loop's prologue.
+func (e *Engine) resetTaskState(budget Budget) {
+	e.taskMu.Lock()
+	e.taskAgentUsage = contract.Usage{}
+	e.taskAgentRuns, e.taskAgentReused, e.taskDuplicates, e.taskOverBudget = 0, 0, 0, 0
+	e.taskAgentDenied = 0
+	e.taskReviewDecision, e.taskTerminalReads = nil, 0
+	e.taskOversizedPlanRejected = false
+	e.resetLinkTaskState()
+	e.taskAgentCap = budget.MaxAgentRuns
+	e.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
+	e.taskPeakContext = 0
+	e.taskCounters = newCallCounters()
+	e.taskFailures = nil // H5: reset the per-task failure window
+	e.taskMu.Unlock()
+}
+
 func (e *Engine) IsBusy() bool {
 	e.mu.Lock()
 	busy := e.cancel != nil

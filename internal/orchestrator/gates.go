@@ -11,6 +11,9 @@ import (
 	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
+// recordPlanViolationAndBlock increments the per-task violation counter and
+// returns a blocked toolOutcome whose output escalates from a soft notice
+// (counts 1–2) to a hard governance message (count ≥ 3). (P4.)
 func (e *Engine) recordPlanViolationAndBlock(ctx context.Context, sc dispatchScope, call contract.ToolCall, kind, soft string) toolOutcome {
 	sc.counters.mu.Lock()
 	sc.counters.planViolations++
@@ -110,7 +113,7 @@ func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, defin
 	// are denied with dispatch guidance — bounded at two per task, then waived
 	// with a recorded degradation; post-failure diagnosis and degraded phases
 	// are exempt.
-	if outcome, blocked := e.phaseReadGate(ctx, sc, call, name, signature); blocked {
+	if outcome, blocked := e.phaseReadGate(ctx, sc, call, name); blocked {
 		return outcome
 	}
 	// 009 PL-6 / 010 UL-3: the ONE mutation gate. The 009 audit proved the two

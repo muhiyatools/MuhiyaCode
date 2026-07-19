@@ -261,76 +261,10 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		phase = pipelineLabel(l.State)
 	}
 	role := handoffRole(input.Agent)
-	// Feature 012 CL-1: every dispatch gets a recorded link decision.
-	decision := e.decideLink(input, spec, modelID, "")
-	// The stream identity (system message, tool array, pin, record kind) is the
-	// predecessor's for a continuation, the dispatched kind's otherwise (R-D1/
-	// R-D2 — review-after-implement keeps the implementer's wire identity and
-	// masks mutations harness-side).
-	streamSpec := spec
-	if decision.Decision == linkContinued {
-		if predSpec, ok := e.subagentSpecs()[decision.Predecessor.Kind]; ok {
-			streamSpec = predSpec
-		}
-	}
-	shared := ""
-	if e.knowledge != nil {
-		shared = e.knowledge.BriefingForScope(input.Task, 1500)
-	}
-	if decision.CarryForward != "" {
-		// Digest fallback (CL-3): the predecessor digest leads; any scope-matched
-		// briefing rides behind it within the same bound.
-		shared = contract.TruncateEllipsis(decision.CarryForward+"\n"+shared, 2200)
-	}
-	handoff := handoffFor(input, shared)
-	system := e.subagentSystemMessage(streamSpec)
-	definitions := e.registry.Definitions(streamSpec.Allowed)
-	var messages []contract.Message
-	if decision.Decision == linkContinued {
-		pred := decision.Predecessor
-		// CL-2: replay the predecessor's transcript VERBATIM and append one user
-		// message carrying the new phase. Byte-identity is the whole point — the
-		// stored system message wins over any recomposition, and a drifted shape
-		// aborts to the digest fallback rather than silently paying a cold write.
-		replay := append([]contract.Message(nil), pred.Transcript...)
-		if len(replay) > 0 && replay[0].Role == contract.RoleSystem {
-			system = replay[0].Content
-		}
-		if shape, err := NewPrefixShape(system, definitions, 0, modelID); err != nil || shape.SystemHash != pred.SystemHash || shape.ToolsHash != pred.ToolsHash {
-			decision = linkDecision{Decision: linkDigestSeeded, Reason: "replay-drift", Predecessor: pred, CarryForward: digestCarryForward(pred, e.session.WorkspacePath)}
-			streamSpec = spec
-			shared = contract.TruncateEllipsis(decision.CarryForward, 2200)
-			handoff = handoffFor(input, shared)
-			system = e.subagentSystemMessage(spec)
-			definitions = e.registry.Definitions(spec.Allowed)
-			messages = []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: subagentUserMessage(handoff, input.Task)}}
-		} else {
-			handoff.Context = "Continuing your prior conversation above — inherited context is current except files explicitly listed as changed."
-			continuation := "CONTINUATION: you are resuming the conversation above."
-			if decision.Form == linkFormReviewChain {
-				continuation = "CONTINUATION — ROLE CHANGE: you are now acting as the reviewer of the work above. Report verified findings only; do not edit anything (editing tools are refused in this continuation)."
-			}
-			if len(decision.Reread) > 0 {
-				continuation += "\nThese files changed since the work above — re-read them before trusting inherited content: " + strings.Join(decision.Reread, ", ") + "."
-			}
-			messages = append(replay, contract.Message{Role: contract.RoleUser, Content: continuation + "\n\n" + subagentUserMessage(handoff, input.Task)})
-		}
-	} else {
-		messages = []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: subagentUserMessage(handoff, input.Task)}}
-	}
+	plan := e.planDispatch(input, spec, modelID)
+	decision, streamSpec, capture := plan.decision, plan.streamSpec, plan.capture
+	system, definitions, messages, handoff := plan.system, plan.definitions, plan.messages, plan.handoff
 	e.emitAgent(contract.AgentEvent{Kind: "start", RunID: runID, Agent: input.Agent, Phase: phase, Role: role, Title: input.Title, Task: input.Task, Handoff: handoff.Render(), Model: modelName})
-	// Per-run read/write capture (R-D5). Continuations pre-seed the
-	// predecessor's touched paths so the successor's record represents the
-	// whole stream for ITS successor; fingerprints refresh at this run's end.
-	capture := newAgentRunCapture(e.session.WorkspacePath)
-	if decision.Decision == linkContinued {
-		for path := range decision.Predecessor.Touched.Reads {
-			capture.reads[path] = true
-		}
-		for path := range decision.Predecessor.Touched.Writes {
-			capture.writes[path] = true
-		}
-	}
 	// B6/T025: subagents dispatch through the SAME shared gate as the main loop
 	// (validation, failed-cache, repeat limiter, storm breaker, plan-mode gate),
 	// but with their OWN per-run counters so their gate state never pollutes the

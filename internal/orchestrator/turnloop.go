@@ -128,19 +128,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			}
 		}
 	}
-	e.taskMu.Lock()
-	e.taskAgentUsage = contract.Usage{}
-	e.taskAgentRuns, e.taskAgentReused, e.taskDuplicates, e.taskOverBudget = 0, 0, 0, 0
-	e.taskAgentDenied = 0
-	e.taskReviewDecision, e.taskTerminalReads = nil, 0
-	e.taskOversizedPlanRejected = false
-	e.resetLinkTaskState()
-	e.taskAgentCap = budget.MaxAgentRuns
-	e.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
-	e.taskPeakContext = 0
-	e.taskCounters = newCallCounters()
-	e.taskFailures = nil // H5: reset the per-task failure window
-	e.taskMu.Unlock()
+	e.resetTaskState(budget)
 	// G5: goal autonomous-continuation budget is per task, not per goal.
 	e.ResetGoalTaskCounter()
 	if err := e.applyBoundaryToolChange(ctx); err != nil {

@@ -17,7 +17,8 @@ func TestSkillsSectionDeterministic(t *testing.T) {
 			{Name: "code-review", Path: ".agents/skills/code-review/SKILL.md", Description: "Review changed code."},
 			{Name: "release-notes", Path: ".agents/skills/release-notes/SKILL.md", Description: "Draft release notes."},
 		}
-		if SystemPrompt(ctx) != SystemPrompt(ctx) {
+		first, second := SystemPrompt(ctx), SystemPrompt(ctx)
+		if first != second {
 			t.Fatal("skills section is not byte-identical across constructions")
 		}
 		if !strings.Contains(SystemPrompt(ctx), "SKILLS") {

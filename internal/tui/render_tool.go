@@ -313,7 +313,7 @@ func toolLabel(name string) string {
 	if strings.HasPrefix(name, "mcp__") {
 		return "MCP · " + strings.ReplaceAll(strings.TrimPrefix(name, "mcp__"), "__", " / ")
 	}
-	return strings.Title(strings.ReplaceAll(name, "_", " "))
+	return contract.TitleWords(strings.ReplaceAll(name, "_", " "))
 }
 
 func summarizeTool(output string) string {

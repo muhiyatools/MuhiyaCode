@@ -264,7 +264,7 @@ func formatUsage(data *UsageData) string {
 		if t, err := time.Parse(time.RFC3339, w.ResetTime); err == nil {
 			reset = t.Local().Format("Jan 2 15:04")
 		}
-		lines = append(lines, strings.Title(w.Name))
+		lines = append(lines, contract.TitleWords(w.Name))
 		lines = append(lines, creditMeterLines(used, total)...)
 		if reset != "" {
 			lines = append(lines, "  Resets "+reset)

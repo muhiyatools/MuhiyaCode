@@ -573,9 +573,7 @@ func writeTextPreservingMode(path string, data []byte) error {
 
 func splitLines(value string) []string {
 	value = strings.ReplaceAll(value, "\r\n", "\n")
-	if strings.HasSuffix(value, "\n") {
-		value = strings.TrimSuffix(value, "\n")
-	}
+	value = strings.TrimSuffix(value, "\n")
 	if value == "" {
 		return []string{}
 	}

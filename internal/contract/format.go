@@ -3,6 +3,7 @@ package contract
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // HumanTokens renders a token count compactly (1.2k / 3.4m) for notices and
@@ -20,6 +21,33 @@ func HumanTokens(value int) string {
 	default:
 		return fmt.Sprintf("%d", value)
 	}
+}
+
+// TitleWords uppercases the first letter of every word, replicating the exact
+// word-boundary rule of the deprecated strings.Title (a rune following a
+// non-letter starts a word) so the four display call sites that used it keep
+// byte-identical output without the deprecated API. The equality is pinned by
+// TestTitleWordsMatchesLegacyStringsTitle. Display-label helper only — not a
+// linguistically correct title-caser (neither was strings.Title).
+func TitleWords(value string) string {
+	previous := ' '
+	return strings.Map(func(r rune) rune {
+		wordStart := !isTitleWordLetter(previous)
+		previous = r
+		if wordStart {
+			return unicode.ToTitle(r)
+		}
+		return r
+	}, value)
+}
+
+// isTitleWordLetter mirrors strings.Title's isSeparator complement: letters,
+// digits, and underscore continue a word; everything else separates.
+func isTitleWordLetter(r rune) bool {
+	if r == '_' {
+		return true
+	}
+	return unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 // TruncateEllipsis is the ONE rune-safe truncation primitive (feature 010

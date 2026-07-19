@@ -351,7 +351,7 @@ func (m *Model) openModelList(role string) {
 		}
 		choices[i] = contract.QuestionChoice{Label: model.Name, Description: detail, Recommended: model.ID == current}
 	}
-	m.openChoice(strings.Title(role)+" model", "Select a configured virtual model id.", choices, func(index int) tea.Cmd { return m.chooseModel(role, models[index].ID) })
+	m.openChoice(contract.TitleWords(role)+" model", "Select a configured virtual model id.", choices, func(index int) tea.Cmd { return m.chooseModel(role, models[index].ID) })
 }
 
 func (m *Model) chooseModel(role, id string) tea.Cmd {

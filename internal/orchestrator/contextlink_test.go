@@ -31,13 +31,7 @@ func linkTestEngine(t *testing.T) *Engine {
 // the CURRENT state of the named workspace files (i.e., end-of-run capture).
 func bankLinkableRecord(t *testing.T, e *Engine, runID, kind string, lineage int, reads []string, writes []string) *SubagentContextRecord {
 	t.Helper()
-	stat := func(path string) FileFingerprint {
-		info, err := os.Stat(filepath.Join(e.session.WorkspacePath, path))
-		if err != nil {
-			return FileFingerprint{}
-		}
-		return FileFingerprint{MTimeMS: float64(info.ModTime().UnixNano()) / 1e6, Size: info.Size()}
-	}
+	stat := func(path string) FileFingerprint { return statFingerprint(e.session.WorkspacePath, path) }
 	record := &SubagentContextRecord{
 		RunID: runID, Kind: kind, ModelID: e.subagentModelID(),
 		Pin: e.session.ID + ":sub:" + kind,
@@ -81,7 +75,7 @@ func TestDecideLinkDisabled(t *testing.T) {
 	e := linkTestEngine(t)
 	e.settings.ContextLinking = "off"
 	bankLinkableRecord(t, e, "r1", "general", 1, nil, nil)
-	decision := e.decideLink(subagentInput{Agent: "general", Task: "continue"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	decision := e.decideLink(subagentInput{Agent: "general", Task: "continue"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if decision.Decision != linkFresh || decision.Reason != "disabled" {
 		t.Fatalf("off switch must yield fresh/disabled, got %+v", decision)
 	}
@@ -89,7 +83,7 @@ func TestDecideLinkDisabled(t *testing.T) {
 
 func TestDecideLinkNoCandidate(t *testing.T) {
 	e := linkTestEngine(t)
-	decision := e.decideLink(subagentInput{Agent: "general", Task: "anything"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	decision := e.decideLink(subagentInput{Agent: "general", Task: "anything"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if decision.Decision != linkFresh || decision.Reason != "no-candidate" {
 		t.Fatalf("want fresh/no-candidate, got %+v", decision)
 	}
@@ -99,15 +93,15 @@ func TestDecideLinkContinuedSameKindAndReviewChain(t *testing.T) {
 	e := linkTestEngine(t)
 	writeWorkspaceFile(t, e, "a.go", "package a")
 	bankLinkableRecord(t, e, "impl1", "general", 1, []string{"a.go"}, []string{"a.go"})
-	same := e.decideLink(subagentInput{Agent: "general", Task: "phase 2"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	same := e.decideLink(subagentInput{Agent: "general", Task: "phase 2"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if same.Decision != linkContinued || same.Form != linkFormSameKind || same.Reason != "eligible" {
 		t.Fatalf("same-kind continuation expected, got %+v", same)
 	}
-	review := e.decideLink(subagentInput{Agent: "review", Task: "review the change"}, e.subagentSpecs()["review"], e.subagentModelID(), "")
+	review := e.decideLink(subagentInput{Agent: "review", Task: "review the change"}, e.subagentSpecs()["review"], e.subagentModelID())
 	if review.Decision != linkContinued || review.Form != linkFormReviewChain {
 		t.Fatalf("review-after-implement continuation expected, got %+v", review)
 	}
-	explore := e.decideLink(subagentInput{Agent: "explore", Task: "explore"}, e.subagentSpecs()["explore"], e.subagentModelID(), "")
+	explore := e.decideLink(subagentInput{Agent: "explore", Task: "explore"}, e.subagentSpecs()["explore"], e.subagentModelID())
 	if explore.Decision != linkDigestSeeded || explore.Reason != "kind-pair-unsupported" {
 		t.Fatalf("explore after general must digest-seed, got %+v", explore)
 	}
@@ -117,13 +111,13 @@ func TestDecideLinkModelChangedAndWindowOverflow(t *testing.T) {
 	e := linkTestEngine(t)
 	record := bankLinkableRecord(t, e, "impl1", "general", 1, nil, nil)
 	record.ModelID = "some-other-model"
-	decision := e.decideLink(subagentInput{Agent: "general", Task: "next"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	decision := e.decideLink(subagentInput{Agent: "general", Task: "next"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if decision.Decision != linkDigestSeeded || decision.Reason != "model-changed" {
 		t.Fatalf("want digest/model-changed, got %+v", decision)
 	}
 	record.ModelID = e.subagentModelID()
 	record.FinalPromptTokens = 120_000 // 128k window * 0.8 headroom = 102.4k
-	decision = e.decideLink(subagentInput{Agent: "general", Task: "next"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	decision = e.decideLink(subagentInput{Agent: "general", Task: "next"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if decision.Decision != linkDigestSeeded || decision.Reason != "window-overflow" {
 		t.Fatalf("want digest/window-overflow, got %+v", decision)
 	}
@@ -139,7 +133,7 @@ func TestSelfEditChainNotStale(t *testing.T) {
 	}
 	// End-of-run capture: fingerprints reflect the post-edit state.
 	bankLinkableRecord(t, e, "impl1", "general", 1, []string{"f1.go", "f2.go", "f3.go", "f4.go"}, []string{"f1.go", "f2.go", "f3.go", "f4.go"})
-	decision := e.decideLink(subagentInput{Agent: "general", Task: "phase 2"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	decision := e.decideLink(subagentInput{Agent: "general", Task: "phase 2"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if decision.Decision != linkContinued {
 		t.Fatalf("self-edit chain must continue (changed-fraction 0), got %+v", decision)
 	}
@@ -162,7 +156,7 @@ func TestExternalEditMajorityDeclines(t *testing.T) {
 	for _, name := range names[:3] {
 		writeWorkspaceFile(t, e, name, "changed after the run "+name)
 	}
-	decision := e.decideLink(subagentInput{Agent: "general", Task: "phase 2"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	decision := e.decideLink(subagentInput{Agent: "general", Task: "phase 2"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if decision.Decision != linkDigestSeeded || !strings.HasPrefix(decision.Reason, "stale:") {
 		t.Fatalf("want digest-seeded stale:NN%%, got %+v", decision)
 	}
@@ -181,7 +175,7 @@ func TestMinorityStalenessRereads(t *testing.T) {
 	bankLinkableRecord(t, e, "impl1", "general", 1, names, nil)
 	time.Sleep(20 * time.Millisecond)
 	writeWorkspaceFile(t, e, "h1.go", "changed after the run — longer content")
-	decision := e.decideLink(subagentInput{Agent: "general", Task: "phase 2"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	decision := e.decideLink(subagentInput{Agent: "general", Task: "phase 2"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if decision.Decision != linkContinued {
 		t.Fatalf("minority staleness must continue, got %+v", decision)
 	}
@@ -194,11 +188,11 @@ func TestFollowUpRelatednessPredicate(t *testing.T) {
 	e := linkTestEngine(t)
 	writeWorkspaceFile(t, e, "billing.go", "package billing")
 	bankLinkableRecord(t, e, "prev-task", "general", 7, []string{"billing.go"}, nil) // lineage != current taskSeq (1)
-	related := e.decideLink(subagentInput{Agent: "general", Task: "now fix the billing.go rounding"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	related := e.decideLink(subagentInput{Agent: "general", Task: "now fix the billing.go rounding"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if related.Decision != linkContinued {
 		t.Fatalf("related follow-up must link, got %+v", related)
 	}
-	unrelated := e.decideLink(subagentInput{Agent: "general", Task: "tweak the css theme"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	unrelated := e.decideLink(subagentInput{Agent: "general", Task: "tweak the css theme"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if unrelated.Decision != linkFresh || unrelated.Reason != "relatedness-miss" {
 		t.Fatalf("unrelated follow-up must be fresh/relatedness-miss, got %+v", unrelated)
 	}
@@ -208,7 +202,7 @@ func TestDecideLinkNonLinkableShapesFallBack(t *testing.T) {
 	e := linkTestEngine(t)
 	record := bankLinkableRecord(t, e, "impl1", "general", 1, nil, nil)
 	record.Linkable = false // e.g. wrapup-done / failed / incomplete pairings
-	decision := e.decideLink(subagentInput{Agent: "general", Task: "next"}, e.subagentSpecs()["general"], e.subagentModelID(), "")
+	decision := e.decideLink(subagentInput{Agent: "general", Task: "next"}, e.subagentSpecs()["general"], e.subagentModelID())
 	if decision.Decision != linkFresh || decision.Reason != "no-candidate" {
 		t.Fatalf("non-linkable records are never candidates, got %+v", decision)
 	}
@@ -291,12 +285,12 @@ func TestPhaseReadGateDeniesTwiceThenWaives(t *testing.T) {
 	sc := dispatchScope{counters: newCallCounters(), trackStats: true}
 	call := gateCall("read_file", `{"path":"impl.go"}`)
 	for attempt := 1; attempt <= 2; attempt++ {
-		outcome, blocked := e.phaseReadGate(context.Background(), sc, call, "read_file", "sig")
+		outcome, blocked := e.phaseReadGate(context.Background(), sc, call, "read_file")
 		if !blocked || !outcome.Failed || !strings.Contains(outcome.Output, "belongs to the implementation subagents") {
 			t.Fatalf("attempt %d must deny with guidance, got blocked=%v %+v", attempt, blocked, outcome)
 		}
 	}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, call, "read_file", "sig"); blocked {
+	if _, blocked := e.phaseReadGate(context.Background(), sc, call, "read_file"); blocked {
 		t.Fatal("third attempt must proceed with a recorded waiver (RG-3) — a gate can never loop")
 	}
 	var stats contract.TaskStats
@@ -309,13 +303,13 @@ func TestPhaseReadGateDeniesTwiceThenWaives(t *testing.T) {
 func TestPhaseReadGateShellReadDeniedGrepPasses(t *testing.T) {
 	e := roleGateEngine(t)
 	sc := dispatchScope{counters: newCallCounters(), trackStats: true}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("run_shell", `{"command":"cat impl.go"}`), "run_shell", "s1"); !blocked {
+	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("run_shell", `{"command":"cat impl.go"}`), "run_shell"); !blocked {
 		t.Fatal("shell cat bypass must be denied (RG-2)")
 	}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("run_shell", `{"command":"go test ./..."}`), "run_shell", "s2"); blocked {
+	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("run_shell", `{"command":"go test ./..."}`), "run_shell"); blocked {
 		t.Fatal("non-read shell commands must pass")
 	}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("grep", `{"pattern":"x"}`), "grep", "s3"); blocked {
+	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("grep", `{"pattern":"x"}`), "grep"); blocked {
 		t.Fatal("discovery tools must never be gated")
 	}
 }
@@ -325,30 +319,30 @@ func TestPhaseReadGateExemptions(t *testing.T) {
 	e := roleGateEngine(t)
 	e.lifecycle.Depth = "light"
 	sc := dispatchScope{counters: newCallCounters(), trackStats: true}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file", "s"); blocked {
+	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file"); blocked {
 		t.Fatal("light depth must never gate")
 	}
 	// Degraded phase: exempt.
 	e = roleGateEngine(t)
 	e.lifecycle.Degradations = []LifecycleDegradation{{State: contract.LifecycleImplementing, Reason: "x"}}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file", "s"); blocked {
+	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file"); blocked {
 		t.Fatal("degraded phases must be exempt (advance-notice texts promise reads)")
 	}
 	// Post-failure diagnosis: exempt after a failed dispatch.
 	e = roleGateEngine(t)
 	e.markImplementFailureDiagnosis(context.Background())
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file", "s"); blocked {
+	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file"); blocked {
 		t.Fatal("post-failure diagnosis must be exempt (RG-4)")
 	}
 	// Subagent scopes: never gated.
 	e = roleGateEngine(t)
-	if _, blocked := e.phaseReadGate(context.Background(), dispatchScope{counters: newCallCounters()}, gateCall("read_file", `{"path":"a"}`), "read_file", "s"); blocked {
+	if _, blocked := e.phaseReadGate(context.Background(), dispatchScope{counters: newCallCounters()}, gateCall("read_file", `{"path":"a"}`), "read_file"); blocked {
 		t.Fatal("subagent scopes must never be gated")
 	}
 	// Kill switch: gate disabled with linking off.
 	e = roleGateEngine(t)
 	e.settings.ContextLinking = "off"
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file", "s"); blocked {
+	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file"); blocked {
 		t.Fatal("contextLinking=off must disable the gate (FR-017)")
 	}
 }

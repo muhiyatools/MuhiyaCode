@@ -2,8 +2,6 @@ package orchestrator
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 
@@ -60,7 +58,7 @@ func (e *Engine) contextLinkingEnabled() bool {
 }
 
 // decideLink evaluates CL-1 in order and returns the recorded decision.
-func (e *Engine) decideLink(input subagentInput, spec subagentSpec, modelID string, pin string) linkDecision {
+func (e *Engine) decideLink(input subagentInput, spec subagentSpec, modelID string) linkDecision {
 	if !e.contextLinkingEnabled() {
 		return linkDecision{Decision: linkFresh, Reason: "disabled"}
 	}
@@ -107,7 +105,6 @@ func (e *Engine) decideLink(input subagentInput, spec subagentSpec, modelID stri
 	if expected := e.session.ID + ":sub:" + candidate.Kind; expected != candidate.Pin {
 		return fallback("pin-mismatch")
 	}
-	_ = pin
 	// 5. Staleness: changed fraction of the touched set vs END-OF-RUN
 	// fingerprints (R-D5 — the predecessor's own edits are never stale).
 	changed, total := staleness(candidate, e.session.WorkspacePath)
@@ -155,11 +152,7 @@ func staleness(record *SubagentContextRecord, workspace string) ([]string, int) 
 		if !ok {
 			continue
 		}
-		info, err := os.Stat(filepath.Join(workspace, filepath.FromSlash(path)))
-		current := FileFingerprint{}
-		if err == nil {
-			current = FileFingerprint{MTimeMS: float64(info.ModTime().UnixNano()) / 1e6, Size: info.Size()}
-		}
+		current := statFingerprint(workspace, path)
 		if current.Size != recorded.Size || absFloat(current.MTimeMS-recorded.MTimeMS) > 0.01 {
 			changed = append(changed, path)
 		}
@@ -229,6 +222,91 @@ func digestCarryForward(record *SubagentContextRecord, workspace string) string 
 		}
 	}
 	return contract.TruncateEllipsis(b.String(), 1400)
+}
+
+// dispatchPlan is a dispatch with its link decision resolved: the stream
+// identity (system, tool array, record kind), the wire conversation, the
+// rendered handoff, and the read/write capture — everything executeSubagent
+// consumes (CL-1..CL-3 + PH-1).
+type dispatchPlan struct {
+	decision    linkDecision
+	streamSpec  subagentSpec
+	system      string
+	definitions []contract.ToolDefinition
+	messages    []contract.Message
+	handoff     HandoffContract
+	capture     *agentRunCapture
+}
+
+// planDispatch resolves the CL-1 decision and builds the dispatch conversation.
+// Continuations replay the predecessor's transcript VERBATIM and append one
+// user message carrying the new phase — byte-identity is the whole point, so
+// the stored system message wins over any recomposition, and a drifted shape
+// aborts to the digest fallback rather than silently paying a cold write.
+func (e *Engine) planDispatch(input subagentInput, spec subagentSpec, modelID string) dispatchPlan {
+	decision := e.decideLink(input, spec, modelID)
+	// The stream identity is the predecessor's for a continuation, the
+	// dispatched kind's otherwise (R-D1/R-D2 — review-after-implement keeps
+	// the implementer's wire identity; mutations are masked harness-side).
+	streamSpec := spec
+	if decision.Decision == linkContinued {
+		if predSpec, ok := e.subagentSpecs()[decision.Predecessor.Kind]; ok {
+			streamSpec = predSpec
+		}
+	}
+	shared := ""
+	if e.knowledge != nil {
+		shared = e.knowledge.BriefingForScope(input.Task, 1500)
+	}
+	if decision.CarryForward != "" {
+		// Digest fallback (CL-3): the predecessor digest leads; any scope-matched
+		// briefing rides behind it within the same bound.
+		shared = contract.TruncateEllipsis(decision.CarryForward+"\n"+shared, 2200)
+	}
+	handoff := handoffFor(input, shared)
+	system := e.subagentSystemMessage(streamSpec)
+	definitions := e.registry.Definitions(streamSpec.Allowed)
+	var messages []contract.Message
+	if decision.Decision == linkContinued {
+		pred := decision.Predecessor
+		replay := append([]contract.Message(nil), pred.Transcript...)
+		if len(replay) > 0 && replay[0].Role == contract.RoleSystem {
+			system = replay[0].Content
+		}
+		if shape, err := NewPrefixShape(system, definitions, 0, modelID); err != nil || shape.SystemHash != pred.SystemHash || shape.ToolsHash != pred.ToolsHash {
+			decision = linkDecision{Decision: linkDigestSeeded, Reason: "replay-drift", Predecessor: pred, CarryForward: digestCarryForward(pred, e.session.WorkspacePath)}
+			streamSpec = spec
+			handoff = handoffFor(input, contract.TruncateEllipsis(decision.CarryForward, 2200))
+			system = e.subagentSystemMessage(spec)
+			definitions = e.registry.Definitions(spec.Allowed)
+			messages = []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: subagentUserMessage(handoff, input.Task)}}
+		} else {
+			handoff.Context = "Continuing your prior conversation above — inherited context is current except files explicitly listed as changed."
+			continuation := "CONTINUATION: you are resuming the conversation above."
+			if decision.Form == linkFormReviewChain {
+				continuation = "CONTINUATION — ROLE CHANGE: you are now acting as the reviewer of the work above. Report verified findings only; do not edit anything (editing tools are refused in this continuation)."
+			}
+			if len(decision.Reread) > 0 {
+				continuation += "\nThese files changed since the work above — re-read them before trusting inherited content: " + strings.Join(decision.Reread, ", ") + "."
+			}
+			messages = append(replay, contract.Message{Role: contract.RoleUser, Content: continuation + "\n\n" + subagentUserMessage(handoff, input.Task)})
+		}
+	} else {
+		messages = []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: subagentUserMessage(handoff, input.Task)}}
+	}
+	// Per-run read/write capture (R-D5). Continuations pre-seed the
+	// predecessor's touched paths so the successor's record represents the
+	// whole stream for ITS successor; fingerprints refresh at this run's end.
+	capture := newAgentRunCapture(e.session.WorkspacePath)
+	if decision.Decision == linkContinued {
+		for path := range decision.Predecessor.Touched.Reads {
+			capture.reads[path] = true
+		}
+		for path := range decision.Predecessor.Touched.Writes {
+			capture.writes[path] = true
+		}
+	}
+	return dispatchPlan{decision: decision, streamSpec: streamSpec, system: system, definitions: definitions, messages: messages, handoff: handoff, capture: capture}
 }
 
 // subagentModelID resolves the model a subagent dispatch will use.
