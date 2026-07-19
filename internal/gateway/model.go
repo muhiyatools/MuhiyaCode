@@ -99,7 +99,11 @@ func ResolveModelProfile(name string) ModelProfile {
 		}
 		return ModelProfile{
 			Family: "minimax", Temperature: .15, TopP: .95,
-			MaxOutputTokens: limit, OutputTokenLimit: limit,
+			// MiniMax counts max_tokens against the shared context budget
+			// (prompt + max_tokens must fit the window), so the operational
+			// default must stay far below the documented ceiling or every
+			// request 400s with "maximum context length exceeded".
+			MaxOutputTokens: 16_000, OutputTokenLimit: limit,
 			DefaultContextWindow: limit, ContextWindowLimit: limit,
 			NeedsToolCallRescue: true, ParsesReasoning: true,
 			ReasoningReplay: ReasoningReplayPreserve, CacheMinPromptTokens: 512,

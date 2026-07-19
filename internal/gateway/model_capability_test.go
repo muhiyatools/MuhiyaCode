@@ -62,6 +62,19 @@ func TestMiniMaxProfileLimitsAndFamilyNames(t *testing.T) {
 			t.Fatalf("%s profile = %+v", name, profile)
 		}
 	}
+	// MiniMax counts max_tokens against the context window (prompt + max_tokens
+	// must fit), so the default requested output must never equal the window:
+	// MaxOutputTokens == ContextWindowLimit made every M3 request 400 with
+	// "maximum context length is 1000000 tokens ... 1000000 in the output".
+	for _, name := range []string{"MiniMax-M3", "M3", "MiniMax-M2.7", "M2"} {
+		profile := ResolveModelProfile(name)
+		if profile.MaxOutputTokens >= profile.ContextWindowLimit {
+			t.Fatalf("%s MaxOutputTokens %d must be far below the %d context window", name, profile.MaxOutputTokens, profile.ContextWindowLimit)
+		}
+		if profile.MaxOutputTokens != 16_000 {
+			t.Fatalf("%s operational MaxOutputTokens = %d, want 16000", name, profile.MaxOutputTokens)
+		}
+	}
 }
 
 // IsDeprecatedParam reports whether name is a parameter the provider has
