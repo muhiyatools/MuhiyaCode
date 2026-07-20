@@ -10,23 +10,8 @@ import (
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
-// subagentKind reads the "agent" field out of a run_subagent call's raw
-// arguments. H3: malformed JSON fails closed to "general" (the most
-// restricted-by-gates kind) so a mangled call never gains an unintended
-// capability class.
-func subagentKind(call contract.ToolCall) string {
-	var input struct {
-		Agent string `json:"agent"`
-	}
-	if err := json.Unmarshal([]byte(call.ArgumentsJSON()), &input); err != nil {
-		return "general"
-	}
-	kind := strings.TrimSpace(input.Agent)
-	if kind == "" {
-		return "general"
-	}
-	return kind
-}
+// subagentKind was removed with the harness-side fan-out that inspected a
+// call's kind before dispatch: run_subagent now decodes its own arguments.
 
 // failedCallLastError returns the cached error for an identical prior
 // verbatim call, or ("", false) when no such failure has been recorded.

@@ -17,7 +17,7 @@ const RuleContinuationReviewOnly = "rule.continuation-review-only"
 // review-after-implement continuation (feature 012 R-D2).
 const GateContinuationReviewMutationBody = "This continuation is review-only: mutations are refused here. Report verified findings with file:line and a VERDICT line; do not edit."
 
-var gateContinuationReviewMutationText = Register(Text{ID: "gate.continuation-review.mutation", Audience: Gate, Cache: Sidecar, Body: GateContinuationReviewMutationBody, EnforcesRule: RuleContinuationReviewOnly})
+var _ = Register(Text{ID: "gate.continuation-review.mutation", Audience: Gate, Cache: Sidecar, Body: GateContinuationReviewMutationBody, EnforcesRule: RuleContinuationReviewOnly})
 
 // RuleNoRepeatFailedCall / RuleNoDuplicateRead are the terse-gate rule IDs
 // covered by the gate-message-quality audit (IS-8).
@@ -38,8 +38,8 @@ const (
 )
 
 var (
-	gateRepeatLimiterText = Register(Text{ID: "gate.repeat-limiter", Audience: Gate, Cache: Sidecar, Body: GateRepeatLimiterBody, EnforcesRule: RuleNoRepeatFailedCall})
-	gateDuplicateReadText = Register(Text{ID: "gate.duplicate-read", Audience: Gate, Cache: Sidecar, Body: GateDuplicateReadTmpl, EnforcesRule: RuleNoDuplicateRead})
+	_ = Register(Text{ID: "gate.repeat-limiter", Audience: Gate, Cache: Sidecar, Body: GateRepeatLimiterBody, EnforcesRule: RuleNoRepeatFailedCall})
+	_ = Register(Text{ID: "gate.duplicate-read", Audience: Gate, Cache: Sidecar, Body: GateDuplicateReadTmpl, EnforcesRule: RuleNoDuplicateRead})
 )
 
 // Read-only-agent run_shell rejection (subagent gate; distinct from the
@@ -47,7 +47,7 @@ var (
 // gates it directly rather than through the mutation-block lifecycle check).
 const GateSubagentShellBlockedBody = "Blocked: this read-only agent's run_shell only runs read-only commands. " + ReadOnlyShellAllowlistBody + " Do not retry the same command. For searching or counting file contents your grep tool is faster; for reading files use read_file — neither needs the shell."
 
-var gateSubagentShellBlockedText = Register(Text{
+var _ = Register(Text{
 	ID: "gate.subagent.run_shell-blocked", Audience: Gate, Cache: Sidecar, Body: GateSubagentShellBlockedBody,
 	EnforcesRule: RuleReadOnlyShell, MentionsTools: []string{"run_shell", "grep", "read_file"}, AllowlistCtx: "subagent.read-only",
 })
@@ -62,7 +62,7 @@ const RuleExecutionBelongsToAgent = "rule.execution-belongs-to-agent"
 // file itself. It names the exact reason and the one affordable next action.
 const GateRoleExecutionBody = "Execution runs in the execution agent, not here. Call run_subagent (agent \"general\") with the specific change, the files involved, and the check that proves it works. This session plans, instructs, and reviews — tasks.md is the one file you edit directly."
 
-var gateRoleExecutionText = Register(Text{
+var _ = Register(Text{
 	ID: "gate.role.execution", Audience: Gate, Cache: Sidecar, Body: GateRoleExecutionBody,
 	EnforcesRule: RuleExecutionBelongsToAgent, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
 })
@@ -73,7 +73,7 @@ var gateRoleExecutionText = Register(Text{
 // converges the model onto the delegation path.
 const GateRoleExecutionEscalatedTmpl = "[loop guard] %d direct edits attempted in this task. They will all be refused — this session cannot change workspace files. Call run_subagent (agent \"general\") with the full change now, or give the final answer explaining what is blocked."
 
-var gateRoleExecutionEscalatedText = Register(Text{
+var _ = Register(Text{
 	ID: "gate.role.execution-escalated", Audience: Gate, Cache: Sidecar, Body: GateRoleExecutionEscalatedTmpl,
 	EnforcesRule: RuleExecutionBelongsToAgent, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
 })

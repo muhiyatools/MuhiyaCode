@@ -110,6 +110,9 @@ func (m *Manager) EnsureLive(ctx context.Context, serverName string) error {
 		return nil
 	}
 	if refreshErr == nil {
+		// This text is read by the MODEL as a tool result, not by a Go caller
+		// wrapping it: the sentences and the terminal period are the instruction.
+		//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
 		refreshErr = fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", serverName)
 	}
 	m.setStatus(serverName, "error", refreshErr.Error(), 0)

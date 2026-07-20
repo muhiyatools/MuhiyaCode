@@ -197,22 +197,8 @@ func reasoningSummary(level contract.EffortLevel) string {
 	}
 }
 
-// engineOp runs a void engine mutation in a tea.Cmd goroutine (off the Update
-// loop) and surfaces a fixed notice when it completes (T021).
-func engineOp(op func(), notice string) tea.Cmd {
-	return func() tea.Msg {
-		op()
-		return engineNoticeMsg{notice: notice}
-	}
-}
-
-func suffix(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return ""
-	}
-	return "\n\nReason: " + value
-}
+// engineOp and suffix went with the interactive engine mutations (/model and
+// friends) that used them; nothing drives a void engine op from the TUI now.
 
 // Ultimate Polish P1: the /plan command is removed. Planning is now an internal
 // agent flow — the classifier routes "create a plan …" into the pipeline (proposes

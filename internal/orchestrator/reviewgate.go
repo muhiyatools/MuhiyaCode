@@ -361,38 +361,9 @@ func (e *Engine) reviewProfileForTask(class TaskClass, filesChanged map[string]b
 	}
 }
 
-// decideValidationReview is the pipeline-validation dispatch gate. Full-depth
-// pipelines exist only for genuinely large work (post-D2 corroborated
-// classification), so the size-based skip rows never apply here — the gate's
-// job at this site is the "off" switch, the tier, the ceiling, and the
-// always-visible rationale. Risk areas in the plan/brief text can still raise
-// focused to deep.
-func (e *Engine) decideValidationReview(class TaskClass, contentSamples []string) ReviewDecision {
-	d := ReviewDecision{TaskType: "logic", RiskAreas: MatchRiskAreas(nil, contentSamples...)}
-	if reviewLegacyMode {
-		d.Tier, d.Rationale = ReviewTierFocused, "legacy baseline mode (pre-011 unconditional review)"
-		return d
-	}
-	if e.reviewGatingMode() == ReviewGatingOff {
-		d.Tier, d.Rationale = ReviewTierSkip, "review gating is off"
-		return d
-	}
-	d.Tier = ReviewTierFocused
-	d.Rationale = fmt.Sprintf("full-pipeline validation (%s)", class)
-	if class == ClassLarge || class == ClassEpic || len(d.RiskAreas) > 0 {
-		d.Tier = ReviewTierDeep
-	}
-	if len(d.RiskAreas) > 0 {
-		d.Rationale += " touching " + strings.Join(d.RiskAreas, ", ")
-	}
-	bucket := e.reviewRepoBucket()
-	if d.Tier == ReviewTierDeep && bucket == RepoBucketTiny && len(d.RiskAreas) == 0 {
-		d.Tier = ReviewTierFocused
-		d.Rationale += " (greenfield: capped at focused)"
-	}
-	d.ProportionalCapPct, d.AbsoluteCapTokens = ceilingsFor(d.Tier, bucket)
-	return d
-}
+// decideValidationReview went with the validation PHASE it gated: there is no
+// pipeline to validate now, and review dispatch is the model's call via
+// reviewProfileForTask.
 
 // setTaskReviewDecision records the gating decision that governed this task so
 // the completion stats and the rationale line can surface it (SC-009). First

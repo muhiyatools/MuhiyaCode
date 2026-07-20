@@ -345,7 +345,8 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 	// subagent that returns nothing even then is reported as failed.
 	const wrapUpTurns = 2
 	wrapUp := false
-	lastText := "" // last interim note, for the partial report if the budget is exhausted
+	runRecovered := false // the one provider-error retry this run gets
+	lastText := ""        // last interim note, for the partial report if the budget is exhausted
 	for turn := 1; turn <= turnCap+wrapUpTurns; turn++ {
 		result.Turns = turn
 		// The user can redirect a run that is already in flight. This rides the
@@ -405,6 +406,17 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		// must too.
 		previousShape = &shape
 		if err != nil {
+			// One recovery before the run dies, same reasoning as the main loop:
+			// a dropped request should not discard an executor's completed work,
+			// and the retry rides the prefix the provider just cached.
+			if !runRecovered && ctx.Err() == nil && recoverableChatError(err) {
+				runRecovered = true
+				e.recordHarnessEvent(ctx, contract.HarnessRecovery, "subagent-chat-retry", err.Error())
+				if sleepErr := sleepContext(ctx, turnRecoveryDelay); sleepErr == nil {
+					turn-- // the retried turn is the same turn
+					continue
+				}
+			}
 			// Feature 014: subagent reports surface the shared friendly mapping,
 			// never a raw transport error ("Post .../chat/completions: context
 			// canceled" was a live user-visible incident).

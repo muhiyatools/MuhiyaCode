@@ -39,21 +39,21 @@ const (
 )
 
 var (
-	toolListFilesText  = Register(Text{ID: "tool.list_files.desc", Audience: MainStatic, Cache: Prefix, Body: ToolListFilesDescription})
-	toolReadFileText   = Register(Text{ID: "tool.read_file.desc", Audience: MainStatic, Cache: Prefix, Body: ToolReadFileDescription})
-	toolGrepText       = Register(Text{ID: "tool.grep.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGrepDescription})
-	toolSearchTextText = Register(Text{ID: "tool.search_text.desc", Audience: MainStatic, Cache: Prefix, Body: ToolSearchTextDescription})
-	toolGlobText       = Register(Text{ID: "tool.glob.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGlobDescription})
-	toolEditFileText   = Register(Text{ID: "tool.edit_file.desc", Audience: MainStatic, Cache: Prefix, Body: ToolEditFileDescription})
-	toolMultiEditText  = Register(Text{ID: "tool.multi_edit.desc", Audience: MainStatic, Cache: Prefix, Body: ToolMultiEditDescription})
-	toolWriteFileText  = Register(Text{
+	_ = Register(Text{ID: "tool.list_files.desc", Audience: MainStatic, Cache: Prefix, Body: ToolListFilesDescription})
+	_ = Register(Text{ID: "tool.read_file.desc", Audience: MainStatic, Cache: Prefix, Body: ToolReadFileDescription})
+	_ = Register(Text{ID: "tool.grep.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGrepDescription})
+	_ = Register(Text{ID: "tool.search_text.desc", Audience: MainStatic, Cache: Prefix, Body: ToolSearchTextDescription})
+	_ = Register(Text{ID: "tool.glob.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGlobDescription})
+	_ = Register(Text{ID: "tool.edit_file.desc", Audience: MainStatic, Cache: Prefix, Body: ToolEditFileDescription})
+	_ = Register(Text{ID: "tool.multi_edit.desc", Audience: MainStatic, Cache: Prefix, Body: ToolMultiEditDescription})
+	_ = Register(Text{
 		ID: "tool.write_file.desc", Audience: MainStatic, Cache: Prefix, Body: ToolWriteFileDescription,
 		StatesRule: RuleWriteFilePermission, MentionsTools: []string{"write_file", "edit_file", "multi_edit"}, AllowlistCtx: "main-loop",
 	})
-	toolApplyPatchText = Register(Text{ID: "tool.apply_patch.desc", Audience: MainStatic, Cache: Prefix, Body: ToolApplyPatchDescription})
-	toolRunShellText   = Register(Text{ID: "tool.run_shell.desc", Audience: MainStatic, Cache: Prefix, Body: ToolRunShellDescription})
-	toolGitStatusText  = Register(Text{ID: "tool.git_status.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGitStatusDescription})
-	toolGitDiffText    = Register(Text{ID: "tool.git_diff.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGitDiffDescription})
+	_ = Register(Text{ID: "tool.apply_patch.desc", Audience: MainStatic, Cache: Prefix, Body: ToolApplyPatchDescription})
+	_ = Register(Text{ID: "tool.run_shell.desc", Audience: MainStatic, Cache: Prefix, Body: ToolRunShellDescription})
+	_ = Register(Text{ID: "tool.git_status.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGitStatusDescription})
+	_ = Register(Text{ID: "tool.git_diff.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGitDiffDescription})
 )
 
 // Synthetic main-loop tool descriptions (engine.go sessionDefinitions).
@@ -63,8 +63,8 @@ const (
 )
 
 var (
-	toolAskUserText        = Register(Text{ID: "tool.ask_user.desc", Audience: MainStatic, Cache: Prefix, Body: ToolAskUserDescription})
-	toolProposeChangesText = Register(Text{ID: "tool.propose_changes.desc", Audience: MainStatic, Cache: Prefix, Body: ToolProposeChangesDescription})
+	_ = Register(Text{ID: "tool.ask_user.desc", Audience: MainStatic, Cache: Prefix, Body: ToolAskUserDescription})
+	_ = Register(Text{ID: "tool.propose_changes.desc", Audience: MainStatic, Cache: Prefix, Body: ToolProposeChangesDescription})
 )
 
 // run_subagent (engine.go runSubagentDefinition) is the richest tool
@@ -90,11 +90,11 @@ const ToolRunSubagentTaskPropertyDescription = "What the agent must accomplish. 
 	"Research reports use " + ReportFormatResearch + " Implementation reports use " + ReportFormatImplementation + " Review reports use " + ReportFormatReview
 
 var (
-	toolRunSubagentText = Register(Text{
+	_ = Register(Text{
 		ID: "tool.run_subagent.desc", Audience: MainStatic, Cache: Prefix, Body: ToolRunSubagentDescription,
 		Example: ExampleDelegationTask.ID, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
 	})
-	toolRunSubagentTaskPropertyText = Register(Text{
+	_ = Register(Text{
 		ID: "tool.run_subagent.task-property", Audience: MainStatic, Cache: Prefix, Body: ToolRunSubagentTaskPropertyDescription,
 		Example: ExampleDelegationTask.ID,
 	})
@@ -103,7 +103,7 @@ var (
 // web_search (gateway/web.go).
 const ToolWebSearchDescription = "Search the live web for current or niche facts and return citable sources."
 
-var toolWebSearchText = Register(Text{ID: "tool.web_search.desc", Audience: MainStatic, Cache: Prefix, Body: ToolWebSearchDescription, MentionsTools: []string{"web_search"}, AllowlistCtx: "main-loop"})
+var _ = Register(Text{ID: "tool.web_search.desc", Audience: MainStatic, Cache: Prefix, Body: ToolWebSearchDescription, MentionsTools: []string{"web_search"}, AllowlistCtx: "main-loop"})
 
 // save_memory (orchestrator/memory.go). The description carries the
 // what-belongs-in-memory teaching (feature 008 MT-2): durable conventions,
@@ -119,7 +119,7 @@ const ToolSaveMemoryDescription = "Save one durable project fact to project memo
 	"Never save task progress, speculation, transcript recaps, or secrets. " +
 	"Saves should be rare and concise; repeats deduplicate and report \"already known\"."
 
-var toolSaveMemoryText = Register(Text{ID: "tool.save_memory.desc", Audience: MainStatic, Cache: Prefix, Body: ToolSaveMemoryDescription, MentionsTools: []string{"save_memory", "edit_memory"}, AllowlistCtx: "main-loop"})
+var _ = Register(Text{ID: "tool.save_memory.desc", Audience: MainStatic, Cache: Prefix, Body: ToolSaveMemoryDescription, MentionsTools: []string{"save_memory", "edit_memory"}, AllowlistCtx: "main-loop"})
 
 // recall_memory (orchestrator/memory.go, Experience Overhaul B3): read one topic
 // file whose pointer appears in the always-loaded index, instead of guessing its
@@ -129,7 +129,7 @@ const ToolRecallMemoryDescription = "Read one project-memory topic file. " +
 	"Returns the topic's full saved text; entries may reference related topics as [[topic]] links, which you recall the same way. " +
 	"Only topics that appear in the index exist."
 
-var toolRecallMemoryText = Register(Text{ID: "tool.recall_memory.desc", Audience: MainStatic, Cache: Prefix, Body: ToolRecallMemoryDescription, MentionsTools: []string{"recall_memory"}, AllowlistCtx: "main-loop"})
+var _ = Register(Text{ID: "tool.recall_memory.desc", Audience: MainStatic, Cache: Prefix, Body: ToolRecallMemoryDescription, MentionsTools: []string{"recall_memory"}, AllowlistCtx: "main-loop"})
 
 // edit_memory (orchestrator/memory.go, Memory Parity N2): the update/correct/
 // consolidate half of durable memory. save_memory is append-only, so this is
@@ -141,7 +141,7 @@ const ToolEditMemoryDescription = "Update or delete one saved project-memory ent
 	"Use it to keep memory truthful: update an entry the moment you verify it changed, delete one proven wrong, and consolidate a topic that grew stale or full. " +
 	"Deleting a topic's last entry removes the topic file and its index pointer."
 
-var toolEditMemoryText = Register(Text{ID: "tool.edit_memory.desc", Audience: MainStatic, Cache: Prefix, Body: ToolEditMemoryDescription, MentionsTools: []string{"edit_memory"}, AllowlistCtx: "main-loop"})
+var _ = Register(Text{ID: "tool.edit_memory.desc", Audience: MainStatic, Cache: Prefix, Body: ToolEditMemoryDescription, MentionsTools: []string{"edit_memory"}, AllowlistCtx: "main-loop"})
 
 // ToolRunSubagentRolePropertyDescription teaches the model to NAME each
 // dispatch for the job it does. The role is display-and-handoff only: the
@@ -150,6 +150,6 @@ var toolEditMemoryText = Register(Text{ID: "tool.edit_memory.desc", Audience: Ma
 // fragment the provider cache.
 const ToolRunSubagentRolePropertyDescription = "What this agent IS for this task, in 2-4 words — \"auth-flow-mapper\", \"settings-page-builder\", \"migration-reviewer\". Name it for the job, never a generic label. Expected on every dispatch."
 
-var toolRunSubagentRolePropertyText = Register(Text{
+var _ = Register(Text{
 	ID: "tool.run_subagent.role-property", Audience: MainStatic, Cache: Prefix, Body: ToolRunSubagentRolePropertyDescription,
 })

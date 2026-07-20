@@ -159,11 +159,13 @@ func (r *Registry) Execute(ctx context.Context, name string, arguments json.RawM
 		// clear message instead of the generic "unknown tool" so the model
 		// does not waste turns retrying it.
 		if strings.HasPrefix(name, "mcp__") {
+			//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
 			return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
 		}
 		// 004 US3 (T034): point a hallucinated tool name at the closest real one so
 		// the model corrects in one step instead of guessing again.
 		if suggestion := r.nearestToolName(name, allowed); suggestion != "" {
+			//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
 			return "", fmt.Errorf("unknown tool %s. Closest available: %s.", name, suggestion)
 		}
 		return "", fmt.Errorf("unknown tool %s", name)

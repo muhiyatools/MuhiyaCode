@@ -233,38 +233,10 @@ func (a *Application) currentSessionID() string {
 	return a.runtime.Session.ID
 }
 
-func (a *Application) setModel(ctx context.Context, role, id string) error {
-	var selected contract.Model
-	found := false
-	for _, model := range a.settings.Provider.Models {
-		if model.ID == id {
-			selected, found = model, true
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("unknown model %q", id)
-	}
-	a.mu.Lock()
-	engine := a.runtime.Engine
-	a.mu.Unlock()
-	if engine == nil {
-		return errors.New("runtime engine is unavailable")
-	}
-	addendum := ""
-	if role != "subagent" {
-		role = "main"
-		addendum = gateway.ResolveModelProfile(selected.ID + " " + selected.Name).PromptAddendum
-	}
-	if err := engine.SwitchModel(ctx, role, selected.ID, selected.Name, addendum); err != nil {
-		return err
-	}
-	if err := state.SaveSettings(*a.settings, a.paths); err != nil {
-		return err
-	}
-	a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
-	return nil
-}
+// The interactive model switcher lived here until v1.1.0 removed /model: users
+// no longer manage models mid-session, and freezing the pairing for the whole
+// session is what keeps both prefix caches warm. Engine.SwitchModel remains the
+// entry point for the CLI config path and the session advisor.
 
 func (a *Application) switchSession(ctx context.Context, session contract.Session) (tui.Runtime, []contract.Event, error) {
 	bundle, err := a.buildRuntime(ctx, session)

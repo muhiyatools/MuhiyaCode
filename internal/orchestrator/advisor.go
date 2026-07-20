@@ -93,6 +93,88 @@ func advisorCatalog(models []contract.Model) string {
 	return strings.Join(lines, "\n")
 }
 
+// reconcileCatalog checks, once before the session's first request, that the
+// models this session is configured to use actually exist in the live catalog.
+//
+// The gateway's model rows are managed directly in its production database, so
+// a row can be renamed, deactivated, or (because the visibility migration
+// defaults new rows to hidden) simply not returned to this client. Any of those
+// used to surface as a 404 on the FIRST REAL REQUEST — mid-task, after the user
+// had already described what they wanted.
+//
+// Substituting happens through the same applyModelSwitch the advisor uses, so
+// it runs before RolesPinned and before any cached bytes exist. Silent when the
+// catalog is fine, which is the overwhelmingly common case.
+func (e *Engine) reconcileCatalog() {
+	if len(e.settings.Provider.Models) == 0 || e.UsageAggregate().Requests > 0 {
+		return // nothing to check against, or too late to change anything
+	}
+	known := make(map[string]bool, len(e.settings.Provider.Models))
+	for _, model := range e.settings.Provider.Models {
+		known[model.ID] = true
+	}
+	for _, role := range []struct {
+		name, configured string
+	}{
+		{"main", e.settings.Provider.ActiveModelID},
+		{"subagent", e.settings.Provider.SubagentModelID},
+	} {
+		if role.configured == "" || known[role.configured] {
+			continue
+		}
+		replacement := e.substituteFor(role.name)
+		if replacement.ID == "" {
+			e.callbacks.EmitNotice(fmt.Sprintf("The %s model %q is not available on this gateway and no substitute was found — requests will fail until the catalog or your config is corrected.", role.name, role.configured))
+			continue
+		}
+		addendum := ""
+		if role.name == "main" {
+			addendum = gateway.ResolveModelProfile(replacement.ID + " " + replacement.Name).PromptAddendum
+		}
+		if err := e.applyModelSwitch(context.Background(), role.name, replacement.ID, replacement.Name, addendum); err != nil {
+			continue
+		}
+		e.callbacks.EmitNotice(fmt.Sprintf("The %s model %q is not available on this gateway; using %s for this session.", role.name, role.configured, replacement.Name))
+	}
+}
+
+// substituteFor picks the best available stand-in for a missing role.
+//
+// For the EXECUTOR: keep it distinct from the planner first (the design is a
+// cheap executor under an expensive planner — collapsing both roles onto the
+// big model would work but would quietly multiply the session's cost), then
+// prefer a family that supports continuation, since the session-long cache
+// chain is built on it, and only then the larger window.
+//
+// For the PLANNER: the largest window, which is what planning needs.
+//
+// Ties break on ID so a broken catalog produces the same choice every run.
+func (e *Engine) substituteFor(role string) contract.Model {
+	models := append([]contract.Model(nil), e.settings.Provider.Models...)
+	main := e.settings.Provider.ActiveModelID
+	sort.Slice(models, func(i, j int) bool {
+		left, right := models[i], models[j]
+		if role == "subagent" {
+			if leftIsMain, rightIsMain := left.ID == main, right.ID == main; leftIsMain != rightIsMain {
+				return rightIsMain // the planner's own model sorts last
+			}
+			leftChain := gateway.ResolveModelProfile(left.ID+" "+left.Name).ContinuationLinking == gateway.ContinuationSupported
+			rightChain := gateway.ResolveModelProfile(right.ID+" "+right.Name).ContinuationLinking == gateway.ContinuationSupported
+			if leftChain != rightChain {
+				return leftChain
+			}
+		}
+		if left.ContextLimit != right.ContextLimit {
+			return left.ContextLimit > right.ContextLimit
+		}
+		return left.ID < right.ID
+	})
+	if len(models) == 0 {
+		return contract.Model{}
+	}
+	return models[0]
+}
+
 // runSessionAdvisor consults the utility model once and applies its choice.
 // Every failure mode — disabled, no catalog, timeout, malformed answer,
 // unknown id, apply error — keeps the configured models silently. The advisor

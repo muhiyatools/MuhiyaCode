@@ -64,6 +64,10 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	// execution chain's continuation. On every later task this is a no-op, and
 	// the fresh-session advisory takes over for work that has outgrown the
 	// session (it switches nothing and costs no model call).
+	// Catalog first: a model that is not in the catalog at all would 404 the
+	// first real request, so it must be substituted before the advisor reasons
+	// about the pairing.
+	e.reconcileCatalog()
 	e.runSessionAdvisor(ctx, userPrompt, e.workspaceSignal())
 	e.maybeAdviseFreshSession(assessment, userPrompt)
 	modelPrompt := userPrompt
@@ -227,6 +231,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	autoReviewNudged := false // DG-7: the max-effort review nudge fires at most once per task
 	allFailedTurnStreak := 0  // B7: consecutive turns where EVERY tool call failed (reset at Run start via this local)
 	overBudgetNoted := false
+	turnRecovered := false // G2.2: the one provider-error retry this task gets
 	for {
 		turns++
 		if err := ctx.Err(); err != nil {
@@ -398,6 +403,29 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			// exhausted; record the friction (T011). The error string already
 			// carries the HTTP status; T051 renders it into user guidance.
 			e.recordHarnessEvent(ctx, contract.HarnessProvider, "chat-error", err.Error())
+			// One turn-level recovery before the task dies. Aborting throws away
+			// every completed step of a long task over a single failed request —
+			// and the request is cheap to repeat: identical bytes against a prefix
+			// the provider just cached. Bounded at ONE per task so a genuinely
+			// down upstream still surfaces quickly, and skipped entirely when the
+			// user cancelled or the error is one repeating will not fix.
+			// A 429 needs its cause named before anything else: "slow down" and
+			// "out of budget" arrive as the same status, and only one of them is
+			// worth waiting through.
+			if explanation := e.explainRateLimit(ctx, err); explanation != "" {
+				e.callbacks.EmitNotice(explanation)
+				return "", stats, err
+			}
+			if !turnRecovered && ctx.Err() == nil && recoverableChatError(err) {
+				turnRecovered = true
+				e.callbacks.EmitStatus("Provider hiccup — retrying this step...")
+				e.recordHarnessEvent(ctx, contract.HarnessRecovery, "chat-retry", err.Error())
+				if sleepErr := sleepContext(ctx, turnRecoveryDelay); sleepErr != nil {
+					return "", stats, err
+				}
+				turns-- // the retried step is the same step, not a new one
+				continue
+			}
 			return "", stats, err
 		}
 		observation := mainUsageObservation{model: e.settings.Provider.ActiveModelID, usage: response.Usage, changeReasons: changeReasons, messageCount: len(messages), durationMS: elapsedMS(requestStart)}

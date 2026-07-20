@@ -20,14 +20,24 @@ import (
 )
 
 type Config struct {
-	Settings         contract.Settings
-	APIKey           string
-	Client           *http.Client
-	IdleTimeout      time.Duration
-	RequestLifetime  time.Duration
-	MaxRetries       int
-	RawUsageObserver RawUsageObserver
+	Settings        contract.Settings
+	APIKey          string
+	Client          *http.Client
+	IdleTimeout     time.Duration
+	RequestLifetime time.Duration
+	MaxRetries      int
+	// StreamRetryObserver, when set, is called once per mid-stream retry so the
+	// harness can telemeter transport friction that would otherwise be invisible
+	// (the retry itself is silent to the user by design — a 2s recovery should
+	// not become a notification).
+	StreamRetryObserver func(error)
+	RawUsageObserver    RawUsageObserver
 }
+
+// streamRetryDelay is short on purpose: the connection dropped, it did not rate
+// limit us. Long enough to let a transient blip clear, short enough that the
+// user reads it as a pause rather than a stall.
+const streamRetryDelay = 2 * time.Second
 
 // RawUsagePayload exposes the provider's unmodified usage object for benchmark
 // ground-truth logs. It contains no authorization headers or API key.
@@ -84,6 +94,7 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 	}
 	profile := ResolveModelProfile(model.ID + " " + model.Name)
 	var last error
+	streamRetried := false
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
 		response, streamed, retryAfter, err := p.chatOnce(ctx, cfg, model, profile, input)
 		if err == nil {
@@ -91,9 +102,36 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 		}
 		last = err
 		var httpErr *HTTPError
-		retryable := errors.As(err, &httpErr) && httpErr.Retryable
-		if !retryable && !streamed && isNetworkError(err) {
+		isStatusError := errors.As(err, &httpErr)
+		retryable := isStatusError && httpErr.Retryable
+		// A TRANSPORT failure before any bytes arrived is retryable. The
+		// !isStatusError term matters: isNetworkError only excludes cancellation,
+		// so without it an explicitly non-retryable status (400, 401, 404) was
+		// promoted back to retryable and re-sent three times — a bad API key
+		// hammered the gateway, and a malformed request burned the user's clock
+		// reproducing the same 400.
+		if !retryable && !streamed && !isStatusError && isNetworkError(err) {
 			retryable = true
+		}
+		// A stream that DIED after headers is retried exactly once. It used to be
+		// terminal, which meant one dropped connection killed the whole task —
+		// the turn loop's only move on a Chat error is to abort.
+		//
+		// The retry is close to free: the partial is discarded, the request bytes
+		// are identical, and the prefix we just sent is still warm in the
+		// provider's cache, so the second attempt pays cache-hit input rates.
+		// Bounded at one so a genuinely dead upstream still surfaces promptly, and
+		// never attempted for an HTTP-status failure (that body already landed;
+		// re-sending would just repeat it).
+		if streamed && !streamRetried && !isStatusError && isNetworkError(err) && ctx.Err() == nil {
+			streamRetried = true
+			if cfg.StreamRetryObserver != nil {
+				cfg.StreamRetryObserver(err)
+			}
+			if sleepErr := sleepContext(ctx, streamRetryDelay); sleepErr != nil {
+				return contract.ChatResponse{}, sleepErr
+			}
+			continue
 		}
 		if streamed || !retryable || attempt == cfg.MaxRetries || ctx.Err() != nil {
 			return contract.ChatResponse{}, err

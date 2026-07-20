@@ -235,7 +235,7 @@ func (e *Engine) recordDegradedPrefixGuard(_ context.Context, reason string) {
 		// Keep this lossy, single-line, and unambiguous; it must never carry
 		// request bytes (which would mutate cached content) and is operator
 		// facing in cache logs only.
-		fmt.Fprintf(testWriterOrStdout(), "prefix-guard degraded: %s (session=%s)\n", reason, e.session.ID)
+		fmt.Fprintf(degradedGuardSink(), "prefix-guard degraded: %s (session=%s)\n", reason, e.session.ID)
 	}
 	e.taskMu.Lock()
 	e.lastShape = nil // force the next-guard loop into the relaxed branch
@@ -246,7 +246,11 @@ func (e *Engine) recordDegradedPrefixGuard(_ context.Context, reason string) {
 // on the test output rather than disappearing into process stderr.
 var degradedGuardWriter func() io.Writer
 
-func testWriterOrStdout() io.Writer {
+// degradedGuardSink is where the prefix-guard degradation marker goes: stderr in
+// production, a test writer when one is installed. (Named testWriterOrStdout
+// until v1.1.0, which was wrong twice over — it is not test-only, and it returns
+// stderr.)
+func degradedGuardSink() io.Writer {
 	if degradedGuardWriter != nil {
 		return degradedGuardWriter()
 	}

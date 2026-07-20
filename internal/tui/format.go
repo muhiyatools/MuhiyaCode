@@ -171,20 +171,8 @@ func headlineTokens(usage contract.Usage) (int, string) {
 	return usage.TotalTokens, "cache unavailable"
 }
 
-func modelDisplay(settings *contract.Settings, id string) string {
-	if settings == nil {
-		return "model unset"
-	}
-	for _, model := range settings.Provider.Models {
-		if model.ID == id {
-			return model.Name
-		}
-	}
-	if id != "" {
-		return id
-	}
-	return "model unset"
-}
+// modelDisplay went with the model chip: v1.1.0 stopped showing the active
+// model, because users no longer choose or manage one.
 
 // fitLine truncates a possibly styled line to the given visible width. It is
 // ANSI-aware so escape sequences are measured as zero width and never cut in

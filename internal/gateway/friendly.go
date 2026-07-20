@@ -54,6 +54,46 @@ func FriendlyRequestError(err error) string {
 	return err.Error()
 }
 
+// Recoverable reports whether repeating the identical request could plausibly
+// succeed. It is the gate on the harness's one-shot turn retry, so it must be
+// conservative in BOTH directions: retrying a bad API key or an exhausted
+// budget just wastes the user's time on a failure that will repeat, while
+// refusing to retry a dropped connection throws away a whole task's completed
+// work over a blip.
+//
+// Cancellation is never recoverable — the user asked to stop.
+func Recoverable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "context canceled") {
+		return false
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		// 5xx and 408 are transient by definition. 401/402/403/429 are states,
+		// not blips: they need a key, a top-up, or a wait, and the friendly text
+		// already tells the user which.
+		return httpErr.Status >= 500 || httpErr.Status == 408
+	}
+	// Timeouts and transport failures: the request never landed, or the answer
+	// never arrived. Both are worth exactly one more try.
+	return errors.Is(err, context.DeadlineExceeded) || looksLikeConnectionError(err) || isNetErr(err)
+}
+
+func isNetErr(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+// IsRateLimited reports a 429 from the gateway. The caller still has to work out
+// WHICH limit (throughput or budget) — the gateway uses one status and one error
+// type for both, which is why explainRateLimit has to consult /v1/usage.
+func IsRateLimited(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && httpErr.Status == 429
+}
+
 // looksLikeConnectionError catches connection failures that aren't typed as
 // net.Error by the time they surface (DNS, refused, reset).
 func looksLikeConnectionError(err error) bool {

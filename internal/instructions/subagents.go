@@ -41,7 +41,7 @@ var ReadOnlyShellExamples = []struct {
 // (EnforcesRule) for the stated-in-advance audit (IS-4).
 const RuleReadOnlyShell = "rule.read-only-shell"
 
-var readOnlyShellAllowlistText = Register(Text{
+var _ = Register(Text{
 	ID: "rule.read-only-shell.allowlist", Audience: Subagent, Cache: Sidecar,
 	Body: ReadOnlyShellAllowlistBody, StatesRule: RuleReadOnlyShell, MentionsTools: []string{"run_shell"}, AllowlistCtx: "subagent.read-only",
 })
@@ -51,7 +51,7 @@ var readOnlyShellAllowlistText = Register(Text{
 // before any call, not only on rejection.
 const SubagentReadOnlyShellNoticeBody = "Your run_shell only runs read-only commands: " + ReadOnlyShellAllowlistBody
 
-var subagentReadOnlyShellNoticeText = Register(Text{
+var _ = Register(Text{
 	ID: "subagent.read-only.run_shell-notice", Audience: Subagent, Cache: Sidecar,
 	Body: SubagentReadOnlyShellNoticeBody, StatesRule: RuleReadOnlyShell, MentionsTools: []string{"run_shell"}, AllowlistCtx: "subagent.read-only",
 })
@@ -87,18 +87,18 @@ const (
 )
 
 var (
-	subagentExploreDescText   = Register(Text{ID: "subagent.explore.description", Audience: Subagent, Cache: Sidecar, Body: SubagentExploreDescription})
-	subagentExploreSystemText = Register(Text{
+	_ = Register(Text{ID: "subagent.explore.description", Audience: Subagent, Cache: Sidecar, Body: SubagentExploreDescription})
+	_ = Register(Text{
 		ID: "subagent.explore.system", Audience: Subagent, Cache: Sidecar, Body: SubagentExploreSystem,
 		StatesRule: RuleReadOnlyShell, MentionsTools: []string{"list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"}, AllowlistCtx: "subagent.explore",
 	})
-	subagentReviewDescText   = Register(Text{ID: "subagent.review.description", Audience: Subagent, Cache: Sidecar, Body: SubagentReviewDescription})
-	subagentReviewSystemText = Register(Text{
+	_ = Register(Text{ID: "subagent.review.description", Audience: Subagent, Cache: Sidecar, Body: SubagentReviewDescription})
+	_ = Register(Text{
 		ID: "subagent.review.system", Audience: Subagent, Cache: Sidecar, Body: SubagentReviewSystem,
 		StatesRule: RuleReadOnlyShell, MentionsTools: []string{"list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"}, AllowlistCtx: "subagent.review",
 	})
-	subagentGeneralDescText   = Register(Text{ID: "subagent.general.description", Audience: Subagent, Cache: Sidecar, Body: SubagentGeneralDescription, AllowlistCtx: "subagent.general"})
-	subagentGeneralSystemText = Register(Text{ID: "subagent.general.system", Audience: Subagent, Cache: Sidecar, Body: SubagentGeneralSystem, AllowlistCtx: "subagent.general"})
+	_ = Register(Text{ID: "subagent.general.description", Audience: Subagent, Cache: Sidecar, Body: SubagentGeneralDescription, AllowlistCtx: "subagent.general"})
+	_ = Register(Text{ID: "subagent.general.system", Audience: Subagent, Cache: Sidecar, Body: SubagentGeneralSystem, AllowlistCtx: "subagent.general"})
 )
 
 // Report-format field lists (IS-5's canonical-copy discipline, fix c). Each
@@ -120,9 +120,9 @@ const (
 )
 
 var (
-	reportFormatResearchText       = Register(Text{ID: "subagent.report-format.research", Audience: Subagent, Cache: Sidecar, Body: ReportFormatResearch})
-	reportFormatImplementationText = Register(Text{ID: "subagent.report-format.implementation", Audience: Subagent, Cache: Sidecar, Body: ReportFormatImplementation})
-	reportFormatReviewText         = Register(Text{ID: "subagent.report-format.review", Audience: Subagent, Cache: Sidecar, Body: ReportFormatReview})
+	_ = Register(Text{ID: "subagent.report-format.research", Audience: Subagent, Cache: Sidecar, Body: ReportFormatResearch})
+	_ = Register(Text{ID: "subagent.report-format.implementation", Audience: Subagent, Cache: Sidecar, Body: ReportFormatImplementation})
+	_ = Register(Text{ID: "subagent.report-format.review", Audience: Subagent, Cache: Sidecar, Body: ReportFormatReview})
 )
 
 // HandoffDeliverable bodies, one per handoff role.
@@ -154,7 +154,7 @@ const (
 // continuation (gate.continuation-review.mutation) enforces exactly this.
 const SubagentReviewReadOnlyNoticeBody = "You review; you never edit. Report verified findings with file:line and end with a VERDICT line."
 
-var subagentReviewReadOnlyNoticeText = Register(Text{
+var _ = Register(Text{
 	ID: "subagent.review.read-only-notice", Audience: Subagent, Cache: Sidecar, Body: SubagentReviewReadOnlyNoticeBody,
 	StatesRule: RuleContinuationReviewOnly, AllowlistCtx: "subagent.review",
 })
@@ -166,7 +166,7 @@ var subagentReviewReadOnlyNoticeText = Register(Text{
 // user message), so it never touches the cached prefix.
 const SubagentInterjectionPrefix = "[user interjection] The user sent this while you were working. Fold it into the task you are on — it is a course correction, not a new assignment. Keep valid work you have already completed.\n\n"
 
-var subagentInterjectionText = Register(Text{
+var _ = Register(Text{
 	ID: "subagent.interjection.prefix", Audience: Subagent, Cache: Sidecar, Body: SubagentInterjectionPrefix,
 	AllowlistCtx: "subagent.interjection",
 })
@@ -195,7 +195,7 @@ Rules:
 - Choose ONLY from AVAILABLE MODELS and copy ids exactly.
 - Never propose a premium model for a session that starts with chat, questions, or a small fix.`
 
-var advisorSystemText = Register(Text{ID: "advisor.system", Audience: Subagent, Cache: Sidecar, Body: AdvisorSystemBody})
+var _ = Register(Text{ID: "advisor.system", Audience: Subagent, Cache: Sidecar, Body: AdvisorSystemBody})
 
 // EditDisciplineBody is the editing half of the old CONTEXT AND EDIT
 // DISCIPLINE section, delivered to the agent that actually edits files. Under
@@ -206,7 +206,7 @@ var advisorSystemText = Register(Text{ID: "advisor.system", Audience: Subagent, 
 const EditDisciplineBody = "Change existing files with surgical edit_file/multi_edit edits only. " + WriteFilePermissionRuleBody +
 	" edit_file oldString must be exact, unique, and different from newString; if it is ambiguous extend the surrounding context, and if it is not found use the returned nearest region. Batch same-file changes with multi_edit."
 
-var editDisciplineText = Register(Text{
+var _ = Register(Text{
 	ID: "subagent.edit-discipline", Audience: Subagent, Cache: Sidecar, Body: EditDisciplineBody,
 	StatesRule: RuleWriteFilePermission, MentionsTools: []string{"edit_file", "multi_edit", "write_file"}, AllowlistCtx: "subagent.general",
 })

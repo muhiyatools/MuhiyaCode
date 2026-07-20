@@ -323,37 +323,8 @@ func executeOne(opts options, workload workloadSpec, sourcePaths state.Paths, se
 	return result, nil
 }
 
-func combineBenchmarkStats(first, second contract.TaskStats) contract.TaskStats {
-	combined := second
-	combined.DurationMS += first.DurationMS
-	combined.Usage = first.Usage.Add(second.Usage)
-	combined.AgentUsage = first.AgentUsage.Add(second.AgentUsage)
-	combined.PeakContextPercent = max(first.PeakContextPercent, second.PeakContextPercent)
-	combined.ToolCalls += first.ToolCalls
-	combined.AgentRuns += first.AgentRuns
-	combined.AgentRunsReused += first.AgentRunsReused
-	combined.Turns += first.Turns
-	combined.ChecksRun += first.ChecksRun
-	combined.FoldedTokens += first.FoldedTokens
-	combined.LinesAdded += first.LinesAdded
-	combined.LinesRemoved += first.LinesRemoved
-	combined.Invalidations = append(append([]contract.InvalidationEvent(nil), first.Invalidations...), second.Invalidations...)
-	seenFiles := make(map[string]bool)
-	combined.FilesChanged = nil
-	for _, path := range append(append([]string(nil), first.FilesChanged...), second.FilesChanged...) {
-		if !seenFiles[path] {
-			seenFiles[path] = true
-			combined.FilesChanged = append(combined.FilesChanged, path)
-		}
-	}
-	if combined.TaskClass == "" {
-		combined.TaskClass = first.TaskClass
-	}
-	if combined.Effort == "" {
-		combined.Effort = first.Effort
-	}
-	return combined
-}
+// combineBenchmarkStats was removed with the multi-prompt workload it served:
+// each benchmark run now reports one task's stats directly.
 
 func finalize(result *runResult, stats contract.TaskStats, app *command.Application, auditor *toolAuditor, observer *benchmarkObserver, sessionsDir, workspace string, preHashes map[string]string, checks []workloadCheck, started time.Time) {
 	engine := app.Runtime().Engine

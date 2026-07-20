@@ -15,8 +15,8 @@ const (
 )
 
 var (
-	gatewayDeepSeekAddendumText = Register(Text{ID: "gateway.addendum.deepseek", Audience: MainStatic, Cache: Prefix, Body: GatewayDeepSeekAddendumBody})
-	gatewayMiniMaxAddendumText  = Register(Text{ID: "gateway.addendum.minimax", Audience: MainStatic, Cache: Prefix, Body: GatewayMiniMaxAddendumBody})
-	gatewayGLMAddendumText      = Register(Text{ID: "gateway.addendum.glm", Audience: MainStatic, Cache: Prefix, Body: GatewayGLMAddendumBody})
-	gatewayGenericAddendumText  = Register(Text{ID: "gateway.addendum.generic", Audience: MainStatic, Cache: Prefix, Body: GatewayGenericAddendumBody})
+	_ = Register(Text{ID: "gateway.addendum.deepseek", Audience: MainStatic, Cache: Prefix, Body: GatewayDeepSeekAddendumBody})
+	_ = Register(Text{ID: "gateway.addendum.minimax", Audience: MainStatic, Cache: Prefix, Body: GatewayMiniMaxAddendumBody})
+	_ = Register(Text{ID: "gateway.addendum.glm", Audience: MainStatic, Cache: Prefix, Body: GatewayGLMAddendumBody})
+	_ = Register(Text{ID: "gateway.addendum.generic", Audience: MainStatic, Cache: Prefix, Body: GatewayGenericAddendumBody})
 )

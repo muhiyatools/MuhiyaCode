@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/gateway"
 )
 
 func (e *Engine) drainSteering(ctx context.Context) bool {
@@ -32,6 +33,58 @@ func (e *Engine) hasSteering() bool {
 	has := len(e.steering) > 0
 	e.mu.Unlock()
 	return has
+}
+
+// turnRecoveryDelay paces the single in-loop retry of a failed provider call.
+// Longer than the provider's own stream retry (that one recovers a dropped
+// connection; this one recovers after the provider's whole retry ladder has
+// already been exhausted, so the upstream deserves a moment).
+const turnRecoveryDelay = 3 * time.Second
+
+// recoverableChatError decides whether a failed turn is worth exactly one more
+// attempt. Delegated to the gateway so the retry policy and the user-facing
+// error text (FriendlyRequestError) are derived from the same classification —
+// they used to be able to disagree about whether a failure was transient.
+func recoverableChatError(err error) bool { return gateway.Recoverable(err) }
+
+// explainRateLimit turns a 429 into an honest statement of WHICH limit was hit.
+// The gateway sends one shape for "slow down" and for "out of budget", so
+// without this the user is told to wait for a window that will never open, and
+// any retry loop hammers a permanent condition. /v1/usage is the only surface
+// that separates them; failing to reach it degrades to the generic text rather
+// than guessing.
+func (e *Engine) explainRateLimit(ctx context.Context, err error) string {
+	if !gateway.IsRateLimited(err) {
+		return ""
+	}
+	usage, usageErr := gateway.FetchUsage(ctx, *e.settings, e.secrets.ProviderAPIKey)
+	if usageErr != nil || usage == nil {
+		return ""
+	}
+	if !usage.BudgetExhausted() {
+		return ""
+	}
+	message := "Your plan's budget window is used up, so this is not a wait-and-retry limit."
+	if reset := strings.TrimSpace(usage.NextReset()); reset != "" {
+		message += " It resets at " + reset + "."
+	}
+	if usage.Credits.ExtraRemaining <= 0 {
+		message += " Top up credits to continue sooner."
+	}
+	return message
+}
+
+// sleepContext waits, but stays cancellable: a user pressing stop during a
+// retry backoff must not have to wait it out.
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // takeSteering drains the queue for a RUNNING SUBAGENT. Without it a message

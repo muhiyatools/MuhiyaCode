@@ -60,6 +60,7 @@ func (t *forwardingTool) Execute(ctx context.Context, arguments json.RawMessage)
 	// server on demand so an unused MCP server still costs nothing at boot.
 	server := serverForTool(name)
 	if server == "" {
+		//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
 		return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
 	}
 	if err := t.manager.EnsureLive(ctx, server); err != nil {
@@ -69,6 +70,7 @@ func (t *forwardingTool) Execute(ctx context.Context, arguments json.RawMessage)
 	live = t.manager.tools[name]
 	t.manager.mu.RUnlock()
 	if live == nil {
+		//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
 		return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
 	}
 	return live.Execute(ctx, arguments)
