@@ -159,6 +159,18 @@ var subagentReviewReadOnlyNoticeText = Register(Text{
 	StatesRule: RuleContinuationReviewOnly, AllowlistCtx: "subagent.review",
 })
 
+// SubagentInterjectionPrefix leads a message the user typed WHILE this run was
+// in flight. It must read as a course correction to the work in progress, not
+// as a replacement task: the run keeps its handoff contract and its completed
+// work, and folds the new direction into what remains. Dynamic tail (per-run
+// user message), so it never touches the cached prefix.
+const SubagentInterjectionPrefix = "[user interjection] The user sent this while you were working. Fold it into the task you are on — it is a course correction, not a new assignment. Keep valid work you have already completed.\n\n"
+
+var subagentInterjectionText = Register(Text{
+	ID: "subagent.interjection.prefix", Audience: Subagent, Cache: Sidecar, Body: SubagentInterjectionPrefix,
+	AllowlistCtx: "subagent.interjection",
+})
+
 // AdvisorSystemBody is the session advisor's system prompt (v1.1.0). It runs
 // ONCE per session on the utility model, before any cached work exists, and
 // its expected answer is "keep" — the configured pairing covers almost

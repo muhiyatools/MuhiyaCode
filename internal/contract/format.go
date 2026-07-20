@@ -68,6 +68,36 @@ func TruncateEllipsis(value string, maxChars int) string {
 	return string(runes[:maxChars-1]) + "…"
 }
 
+// TruncateMiddle bounds value while preserving BOTH ends, dropping from the
+// middle. It exists because a subagent report's most load-bearing content is at
+// its END: the verification section and the machine-read STATUS line. Tail-
+// cutting truncation silently deleted exactly those on any long report, so the
+// caller read "no verification shown" and re-dispatched work that was already
+// verified — the trust protocol failing precisely when a run had been most
+// productive.
+//
+// Head keeps 60% of the budget and tail 40%: the head carries what the run did,
+// the tail carries whether it worked. The elision is explicit, never silent.
+func TruncateMiddle(value string, maxChars int) string {
+	runes := []rune(value)
+	if maxChars <= 0 || len(runes) <= maxChars {
+		return value
+	}
+	// Below this the marker dominates and a plain tail-cut is more useful.
+	const minSplit = 40
+	if maxChars < minSplit {
+		return TruncateEllipsis(value, maxChars)
+	}
+	dropped := len(runes) - maxChars
+	marker := fmt.Sprintf("\n…[%d characters trimmed from the middle]…\n", dropped)
+	budget := maxChars - len([]rune(marker))
+	if budget < 2 {
+		return TruncateEllipsis(value, maxChars)
+	}
+	head := budget * 6 / 10
+	return string(runes[:head]) + marker + string(runes[len(runes)-(budget-head):])
+}
+
 // Digest collapses value's whitespace to single spaces (folding multi-line
 // text into one line) then applies TruncateEllipsis — the shared wrapper
 // every "show a compact one-line summary" call site uses (feature 010 T036:

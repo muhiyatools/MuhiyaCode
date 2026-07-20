@@ -104,13 +104,13 @@ func TestRoleGateCarveOuts(t *testing.T) {
 		}
 	})
 	t.Run("reads are always open", func(t *testing.T) {
-		if workspaceMutation(contract.NewToolCall("c", "read_file", `{"path":"main.go"}`)) {
+		if engine.workspaceMutation(contract.NewToolCall("c", "read_file", `{"path":"main.go"}`)) {
 			t.Fatal("read_file classified as a workspace mutation")
 		}
 	})
 	t.Run("memory writes are planning, not execution", func(t *testing.T) {
 		for _, name := range []string{"save_memory", "edit_memory"} {
-			if workspaceMutation(contract.NewToolCall("c", name, `{}`)) {
+			if engine.workspaceMutation(contract.NewToolCall("c", name, `{}`)) {
 				t.Fatalf("%s classified as a workspace mutation", name)
 			}
 		}
@@ -120,10 +120,49 @@ func TestRoleGateCarveOuts(t *testing.T) {
 // An unparseable shell command must fail closed — treated as execution rather
 // than waved through.
 func TestRoleGateUnparseableShellFailsClosed(t *testing.T) {
-	if !workspaceMutation(contract.NewToolCall("c", "run_shell", `{not json`)) {
+	engine, _ := scriptedEngine(t, "unparseable-shell")
+	if !engine.workspaceMutation(contract.NewToolCall("c", "run_shell", `{not json`)) {
 		t.Fatal("unparseable run_shell arguments were treated as read-only")
 	}
 }
+
+// An MCP tool is execution unless its server declared it read-only. A doc
+// search or log read is planning work, and refusing it cost the planner a whole
+// executor dispatch to answer a question it could answer itself.
+func TestRoleGateHonorsMCPReadOnlyDeclaration(t *testing.T) {
+	engine, _ := scriptedEngine(t, "mcp-readonly")
+	engine.registry.Add(declaredTool{name: "mcp__docs__search", readOnly: true})
+	engine.registry.Add(declaredTool{name: "mcp__deploy__ship", readOnly: false})
+	engine.registry.Add(&recordingTool{name: "mcp__legacy__unannotated"})
+
+	if engine.workspaceMutation(contract.NewToolCall("c", "mcp__docs__search", `{}`)) {
+		t.Fatal("a declared read-only MCP tool is still refused to the planner")
+	}
+	if !engine.workspaceMutation(contract.NewToolCall("c", "mcp__deploy__ship", `{}`)) {
+		t.Fatal("an MCP tool declaring itself NOT read-only must count as execution")
+	}
+	// The fail-closed case: no declaration at all (an older server, or one whose
+	// connection has not come up yet) must stay execution.
+	if !engine.workspaceMutation(contract.NewToolCall("c", "mcp__legacy__unannotated", `{}`)) {
+		t.Fatal("an unannotated MCP tool must fail closed, not be assumed harmless")
+	}
+	// An MCP name that was never registered at all is likewise execution.
+	if !engine.workspaceMutation(contract.NewToolCall("c", "mcp__ghost__gone", `{}`)) {
+		t.Fatal("an unknown MCP tool must fail closed")
+	}
+}
+
+// declaredTool implements the optional contract.ReadOnlyDeclaring half of Tool.
+type declaredTool struct {
+	name     string
+	readOnly bool
+}
+
+func (t declaredTool) Definition() contract.ToolDefinition {
+	return definition(t.name, "declared test tool", map[string]any{}, nil)
+}
+func (t declaredTool) Execute(context.Context, json.RawMessage) (string, error) { return "ok", nil }
+func (t declaredTool) DeclaresReadOnly() bool                                   { return t.readOnly }
 
 // TestNoClassCanBeStarvedOfDelegation is the deadlock guard, now proved by
 // construction rather than by arithmetic: under the split the main model

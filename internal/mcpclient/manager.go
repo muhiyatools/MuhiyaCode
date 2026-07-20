@@ -317,7 +317,12 @@ func (m *Manager) connect(parent context.Context, server state.MCPServer, secret
 	used := make(map[string]bool)
 	for _, remote := range listed.Tools {
 		name := deterministicToolName("mcp__"+safeName(server.Name)+"__"+safeName(remote.Name), used)
-		tool := &mcpTool{manager: m, connection: connection, exposedName: name, remoteName: remote.Name, definition: canonicalDefinition(contract.ToolDefinition{Type: "function", Function: contract.FunctionDefinition{Name: name, Description: "[MCP:" + server.Name + "] " + firstNonempty(remote.Description, remote.Name), Parameters: normalizeSchema(remote.InputSchema)}})}
+		// readOnlyHint is advisory. The SDK decodes it as a plain bool, so an
+		// absent annotation and an explicit false are the same value — which is
+		// the behavior we want: only an explicit true opens the tool to the
+		// planner (contract.ReadOnlyDeclaring explains why trusting it is safe).
+		readOnly := remote.Annotations != nil && remote.Annotations.ReadOnlyHint
+		tool := &mcpTool{manager: m, connection: connection, exposedName: name, remoteName: remote.Name, readOnly: readOnly, definition: canonicalDefinition(contract.ToolDefinition{Type: "function", Function: contract.FunctionDefinition{Name: name, Description: "[MCP:" + server.Name + "] " + firstNonempty(remote.Description, remote.Name), Parameters: normalizeSchema(remote.InputSchema)}})}
 		connection.tools = append(connection.tools, tool)
 	}
 	fingerprint := state.MCPServerFingerprint(server, secrets.Env[server.Name])

@@ -290,6 +290,20 @@ type Tool interface {
 	Execute(context.Context, json.RawMessage) (string, error)
 }
 
+// ReadOnlyDeclaring is the OPTIONAL half of Tool: a tool that can say it does
+// not change anything. Only MCP tools implement it today, from their server's
+// readOnlyHint annotation — the built-in workspace tools are classified
+// structurally instead (rolesplit.go), which is stronger than a declaration.
+//
+// The plan/execute role gate is the consumer: it refuses main-loop mutations,
+// and an MCP doc-search or log-reader is not a mutation. A server that lies
+// here gains nothing dangerous — the tool runs either way, via the executor;
+// the only difference is which model invokes it. Absent or false means
+// "treat as mutating", so an unannotated server stays fail-closed.
+type ReadOnlyDeclaring interface {
+	DeclaresReadOnly() bool
+}
+
 type PlanStatus string
 
 const (

@@ -276,8 +276,10 @@ func (e *Engine) planDispatch(input subagentInput, spec subagentSpec, modelID st
 	}
 	if decision.CarryForward != "" {
 		// Digest fallback (CL-3): the predecessor digest leads; any scope-matched
-		// briefing rides behind it within the same bound.
-		shared = contract.TruncateEllipsis(decision.CarryForward+"\n"+shared, 2200)
+		// briefing rides behind it within the same bound. Middle-cut for the same
+		// reason as the parent report — a predecessor's verification state lives at
+		// the end of its digest, and a successor that cannot see it re-does work.
+		shared = contract.TruncateMiddle(decision.CarryForward+"\n"+shared, 2200)
 	}
 	handoff := handoffFor(input, shared)
 	system := e.subagentSystemMessage(streamSpec)
@@ -292,7 +294,7 @@ func (e *Engine) planDispatch(input subagentInput, spec subagentSpec, modelID st
 		if shape, err := NewPrefixShape(system, definitions, 0, modelID); err != nil || shape.SystemHash != pred.SystemHash || shape.ToolsHash != pred.ToolsHash {
 			decision = linkDecision{Decision: linkDigestSeeded, Reason: "replay-drift", Predecessor: pred, CarryForward: digestCarryForward(pred, e.session.WorkspacePath)}
 			streamSpec = spec
-			handoff = handoffFor(input, contract.TruncateEllipsis(decision.CarryForward, 2200))
+			handoff = handoffFor(input, contract.TruncateMiddle(decision.CarryForward, 2200))
 			system = e.subagentSystemMessage(spec)
 			definitions = e.registry.Definitions(spec.Allowed)
 			messages = []contract.Message{{Role: contract.RoleSystem, Content: system}, {Role: contract.RoleUser, Content: subagentUserMessage(handoff, input.Task)}}

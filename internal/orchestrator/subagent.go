@@ -104,7 +104,10 @@ func handoffFor(input subagentInput, context string) HandoffContract {
 	if named := strings.TrimSpace(input.Role); named != "" {
 		role = named + " (" + role + ")"
 	}
-	return HandoffContract{Role: role, Scope: contract.TruncateEllipsis(input.Task, 1200), Context: context, Deliverable: deliverable, OutputFormat: format}
+	// Scope is a one-line LABEL, not a second copy of the task: subagentUserMessage
+	// appends the full task under TASK: immediately below this contract. Sending
+	// 1200 chars of it here too made every dispatch pay for the same text twice.
+	return HandoffContract{Role: role, Scope: contract.Digest(input.Task, 160), Context: context, Deliverable: deliverable, OutputFormat: format}
 }
 
 // displayRole is what the transcript chip shows: the model's role name, then
@@ -209,7 +212,11 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 	// transcript inside the main conversation. D7: when the bound truncates, say
 	// so explicitly and point at the banked full report — the main context never
 	// receives content above the bound, and never silently loses it either.
-	parentReport := contract.TruncateEllipsis(result.Report, 2200)
+	// TruncateMiddle, not TruncateEllipsis: the report's TAIL carries the
+	// verification section and the STATUS line the trust rule reads. Cutting the
+	// tail made every long report look unverified, so the caller re-ran work that
+	// was already done — the exact waste the trust protocol exists to prevent.
+	parentReport := contract.TruncateMiddle(result.Report, 2200)
 	truncNote := ""
 	if len(result.Report) > 2200 {
 		truncNote = fmt.Sprintf("\n[digest: %d-char full report banked to knowledge; later phases receive it via their briefing]", len(result.Report))
@@ -341,6 +348,16 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 	lastText := "" // last interim note, for the partial report if the budget is exhausted
 	for turn := 1; turn <= turnCap+wrapUpTurns; turn++ {
 		result.Turns = turn
+		// The user can redirect a run that is already in flight. This rides the
+		// run's TAIL as a user message (prefix-safe), and mirrors a notice into the
+		// parent so the planner learns on resume that its dispatch was steered.
+		if queued := e.takeSteering(); len(queued) > 0 {
+			joined := strings.Join(queued, "\n")
+			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: instructions.SubagentInterjectionPrefix + joined})
+			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[steering] The user sent this to the running agent, which is folding it in now: " + contract.Digest(joined, 300)})
+			e.callbacks.EmitStatus("Forwarding your message to the running agent...")
+			e.emitAgent(contract.AgentEvent{Kind: "text", RunID: runID, Content: "[user interjection] " + contract.Digest(joined, 200)})
+		}
 		shape, shapeErr := NewPrefixShape(system, definitions, 0, modelID)
 		if shapeErr != nil {
 			result.Status = "failed"

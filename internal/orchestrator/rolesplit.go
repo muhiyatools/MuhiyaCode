@@ -34,7 +34,7 @@ import (
 // counts only when the command is not read-only: builds, tests, and status
 // probes are how the main model verifies a report, and blocking those would
 // leave it unable to check the executor's work.
-func workspaceMutation(call contract.ToolCall) bool {
+func (e *Engine) workspaceMutation(call contract.ToolCall) bool {
 	name := call.ToolName()
 	switch name {
 	case "edit_file", "multi_edit", "write_file", "apply_patch":
@@ -48,8 +48,14 @@ func workspaceMutation(call contract.ToolCall) bool {
 		}
 		return !IsReadOnlyShell(args.Command)
 	}
-	// MCP tools can do anything, including writing files, so they are execution.
-	return strings.HasPrefix(name, "mcp__")
+	if !strings.HasPrefix(name, "mcp__") {
+		return false
+	}
+	// An MCP tool can do anything, so it counts as execution UNLESS its server
+	// declared it read-only. Without this exception the planner was refused a
+	// documentation search or a log read and had to spend a whole executor
+	// dispatch on a question it could have answered itself.
+	return e.registry == nil || !e.registry.DeclaresReadOnly(name)
 }
 
 // executionRoleGate blocks workspace mutations attempted from the MAIN loop.
@@ -65,7 +71,7 @@ func workspaceMutation(call contract.ToolCall) bool {
 // a gate that returns the same sentence forever is indistinguishable from a
 // loop, which the fault-injection invariant treats as a liveness failure.
 func (e *Engine) executionRoleGate(ctx context.Context, sc dispatchScope, call contract.ToolCall) (toolOutcome, bool) {
-	if !sc.trackStats || !workspaceMutation(call) {
+	if !sc.trackStats || !e.workspaceMutation(call) {
 		return toolOutcome{}, false
 	}
 	// The checklist is the main model's own artifact.
