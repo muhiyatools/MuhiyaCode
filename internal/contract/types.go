@@ -47,11 +47,25 @@ type Model struct {
 type Settings struct {
 	Version  int `json:"version"`
 	Provider struct {
-		Type            string  `json:"type"`
-		BaseURL         string  `json:"baseUrl"`
+		Type    string `json:"type"`
+		BaseURL string `json:"baseUrl"`
+		// ActiveModelID / SubagentModelID are the session's two roles: the main
+		// model plans and instructs, the subagent model executes. They are FROZEN
+		// for the life of a session (caching is the priority — see the session
+		// advisor); the user sets them with `muhiyacode config set model`.
 		ActiveModelID   string  `json:"activeModelId"`
 		SubagentModelID string  `json:"subagentModelId"`
 		Models          []Model `json:"models"`
+		// ModelsRefreshedAt is when the gateway catalog was last discovered
+		// (RFC3339). It drives the TTL refresh that keeps the model list current
+		// now that the interactive refresh command is gone; empty means never.
+		ModelsRefreshedAt string `json:"modelsRefreshedAt,omitempty"`
+		// RolesPinned records that the user chose the models explicitly, so the
+		// session advisor never overrides them.
+		RolesPinned bool `json:"rolesPinned,omitempty"`
+		// Advisor controls the session-start model advisor: "auto" (default) or
+		// "off" (always use the configured pairing).
+		Advisor string `json:"advisor,omitempty"`
 	} `json:"provider"`
 	PermissionMode PermissionMode `json:"permissionMode"`
 	Effort         EffortLevel    `json:"effort"`

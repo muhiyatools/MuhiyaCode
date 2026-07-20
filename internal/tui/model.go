@@ -44,7 +44,6 @@ type UsageWindow struct {
 
 type Actions struct {
 	SaveSettings  func(context.Context, *contract.Settings) error
-	SetModel      func(context.Context, string, string) error
 	SetPermission func(context.Context, contract.PermissionMode) error
 	Rewind        func(context.Context) (string, error)
 	NewSession    func(context.Context) (Runtime, []contract.Event, error)
@@ -389,10 +388,10 @@ func (m *Model) ensureTick() tea.Cmd {
 }
 
 var commands = []commandEntry{
-	{"/reasoning", "Set reasoning effort (low–max)"}, {"/goal", "Set an autonomous goal"},
+	{"/reasoning", "Set reasoning effort (low–max)"},
 	{"/resume", "Resume a workspace session"}, {"/new", "Start a new session"},
 	{"/context", "Inspect context usage"}, {"/errors", "Show harness friction this session"}, {"/compact", "Compact conversation"},
-	{"/model", "Choose or refresh models"}, {"/login", "Store API key"}, {"/logout", "Clear API key"},
+	{"/login", "Store API key"}, {"/logout", "Clear API key"},
 	{"/usage", "View account usage"},
 	{"/permissions", "Change permission mode"}, {"/skills", "Assign skills to next prompt"}, {"/mcp", "Manage MCP servers"},
 	{"/paste", "Inspect or remove pasted blocks"},

@@ -276,15 +276,24 @@ func TestCommandPaletteNeverOverflows(t *testing.T) {
 	}
 }
 
-func TestHeaderShowsBothModelsAndNoticeStaysOutOfTranscript(t *testing.T) {
+// TestHeaderIsModelFreeAndNoticeStaysOutOfTranscript: v1.1.0 removed model
+// names from the ambient chrome — users do not manage models, so naming them
+// on every frame was noise. The header keeps brand, version, and the context
+// meter; /context remains the surface that discloses the current pairing.
+func TestHeaderIsModelFreeAndNoticeStaysOutOfTranscript(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "1.0.0", Notice: "Set an API key with /login."})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 90, Height: 30})
 	view := m.View().Content
-	// The header shows both model names; the footer shows the key hints (the
-	// quiet "normal" permission mode intentionally has no badge now — A1 T012).
-	for _, want := range []string{"Main", "Fast", "Esc stop", "Set an API key"} {
+	for _, want := range []string{"MuhiyaCode", "context", "Esc stop", "Set an API key"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q", want)
+		}
+	}
+	// The fixture's model names ("Main", "Fast") must not appear anywhere in
+	// the ambient chrome.
+	for _, forbidden := range []string{"Main", "Fast"} {
+		if strings.Contains(view, forbidden) {
+			t.Fatalf("model name %q still rendered in the chrome", forbidden)
 		}
 	}
 	if len(m.items) != 0 {

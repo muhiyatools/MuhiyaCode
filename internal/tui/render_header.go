@@ -15,19 +15,13 @@ func (m *Model) renderHeader() string {
 	if hasLimit {
 		contextLabel = fmt.Sprintf("context %.1f%%", m.context.Percent)
 	}
-	main := modelDisplay(m.runtime.Settings, m.runtime.Settings.Provider.ActiveModelID)
-	sub := modelDisplay(m.runtime.Settings, m.runtime.Settings.Provider.SubagentModelID)
 	dot := m.palette.border.Render(m.glyphs.bullet)
-	// Header segments as a slice so a narrow width can drop the subagent segment
-	// (visual-system.md §4) before the path is truncated. The reasoning level moved
-	// to the mode-line effort chip (Experience Overhaul A1) and is no longer here.
+	// Header segments as a slice so a narrow width can drop trailing segments
+	// (visual-system.md §4) before the path is truncated. Model names are
+	// deliberately absent: models are chosen for the session, not managed by the
+	// user, so naming them here would be noise. /context discloses them.
 	seg := []string{
 		" " + m.palette.brand.Render(m.glyphs.brand+" MuhiyaCode") + " " + m.palette.faint.Render("v"+m.version),
-		dot + " " + m.palette.faint.Render("model") + " " + m.palette.text.Render(main),
-	}
-	subSeg := m.palette.faint.Render("sub") + " " + m.palette.muted.Render(sub)
-	if m.width >= m.theme.WideWidth {
-		seg = append(seg, subSeg)
 	}
 	seg = append(seg, dot+" "+contextMeterStyle(m.palette, m.context.Percent, hasLimit).Render(contextLabel))
 	line1 := strings.Join(seg, "  ")

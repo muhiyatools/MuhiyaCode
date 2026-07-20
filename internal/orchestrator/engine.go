@@ -370,15 +370,32 @@ func (e *Engine) SetEffort(level contract.EffortLevel) {
 	e.effortMu.Unlock()
 }
 
-// SwitchModel applies a user-requested model change only at an idle task
-// boundary, refreshes the model-dependent prompt fields, and records the
-// invalidation before the next request can transmit the new prefix.
+// SwitchModel applies a user-requested model change from OUTSIDE a task (the
+// CLI config path). It refuses while a task runs, then delegates to the shared
+// apply path.
 func (e *Engine) SwitchModel(ctx context.Context, role, id, name, addendum string) error {
 	e.mu.Lock()
-	if e.cancel != nil {
-		e.mu.Unlock()
+	busy := e.cancel != nil
+	e.mu.Unlock()
+	if busy {
 		return errors.New("cannot switch models while a task is running")
 	}
+	return e.applyModelSwitch(ctx, role, id, name, addendum)
+}
+
+// applyModelSwitch carries the whole cache-correctness discipline of a model
+// change: refresh the model-dependent prompt fields, record the invalidation
+// BEFORE the next request can transmit the new prefix, roll everything back if
+// that record fails, and re-arm prefix-shape persistence.
+//
+// It deliberately omits the busy check. Engine.Run claims the task slot before
+// its prologue runs, so a session-start advisor calling through SwitchModel
+// would be refused on EVERY session and — under a silent-fallback policy —
+// would never switch anything, with no visible symptom. The prologue is safe
+// because it executes before the session's first Chat, which is the hazard the
+// busy check exists to prevent.
+func (e *Engine) applyModelSwitch(ctx context.Context, role, id, name, addendum string) error {
+	e.mu.Lock()
 	oldPrompt := e.prompt
 	oldMain, oldSubagent := e.settings.Provider.ActiveModelID, e.settings.Provider.SubagentModelID
 	old := oldMain

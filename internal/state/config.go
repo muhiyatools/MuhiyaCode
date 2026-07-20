@@ -263,10 +263,14 @@ func SetConfig(key, value string, settings *contract.Settings, secrets *contract
 	case "model":
 		UpsertModel(settings, contract.Model{ID: value, Name: value, Source: "manual"}, true)
 		AutoAssignModels(settings)
+		// An explicit choice pins the roles: the session advisor proposes, but it
+		// never overrides what the user asked for.
+		settings.Provider.RolesPinned = true
 	case "subagentModel":
 		for _, model := range settings.Provider.Models {
 			if model.ID == value || model.Name == value {
 				settings.Provider.SubagentModelID = model.ID
+				settings.Provider.RolesPinned = true
 				return nil
 			}
 		}
@@ -300,6 +304,16 @@ func SetConfig(key, value string, settings *contract.Settings, secrets *contract
 			settings.ReviewGating = normalized
 		default:
 			return fmt.Errorf("reviewGating must be off, conservative, or default")
+		}
+	case "advisor":
+		// The session-start model advisor: "auto" (default) proposes a pairing on
+		// the first prompt of a session; "off" always uses the configured models.
+		normalized := strings.TrimSpace(strings.ToLower(value))
+		switch normalized {
+		case "", "auto", "off":
+			settings.Provider.Advisor = normalized
+		default:
+			return fmt.Errorf("advisor must be auto or off")
 		}
 	case "contextLinking":
 		// Feature 012 FR-017: "off" restores pre-012 dispatch behavior exactly

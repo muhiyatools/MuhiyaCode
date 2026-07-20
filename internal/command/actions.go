@@ -28,7 +28,6 @@ func (a *Application) Actions() tui.Actions {
 			a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
 			return nil
 		},
-		SetModel: func(ctx context.Context, role, id string) error { return a.setModel(ctx, role, id) },
 		SetPermission: func(_ context.Context, mode contract.PermissionMode) error {
 			a.mu.Lock()
 			active := a.activeWorkspace
@@ -114,12 +113,13 @@ func (a *Application) Actions() tui.Actions {
 				return nil, err
 			}
 			stranded := addDiscoveredModels(a.settings, models)
+			a.settings.Provider.ModelsRefreshedAt = time.Now().UTC().Format(time.RFC3339)
 			if err := state.SaveSettings(*a.settings, a.paths); err != nil {
 				return nil, err
 			}
 			a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
 			if len(stranded) > 0 && a.callbacks.Notice != nil {
-				a.callbacks.Notice("No longer offered by the gateway (still selected — pick a new one with /model): " + strings.Join(stranded, ", "))
+				a.callbacks.Notice("No longer offered by the gateway (still selected — pick a new one with `muhiyacode config set model <id>`): " + strings.Join(stranded, ", "))
 			}
 			return a.settings.Provider.Models, nil
 		},

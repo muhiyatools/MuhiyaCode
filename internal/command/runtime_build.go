@@ -107,18 +107,25 @@ func openApplicationCore(options ApplicationOptions) (*Application, error) {
 	app.provider = gateway.NewOpenAICompatible(gateway.Config{Settings: settings, APIKey: secrets.ProviderAPIKey, RawUsageObserver: options.RawUsageObserver})
 	if secrets.ProviderAPIKey != "" {
 		active, ok := state.ActiveModel(settings)
-		if !ok || active.ContextLimit <= 0 {
+		// Discover when there is nothing usable yet, OR when the catalog has gone
+		// stale. The staleness path matters now that the interactive refresh is
+		// gone: without it the catalog would freeze at its first-run snapshot and
+		// a model added to the gateway later would never be selectable.
+		if !ok || active.ContextLimit <= 0 || catalogStale(settings.Provider.ModelsRefreshedAt) {
 			discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			models, discoveryErr := app.provider.ListModels(discoveryCtx)
 			cancel()
 			if discoveryErr == nil && len(models) > 0 {
 				addDiscoveredModels(app.settings, models)
+				app.settings.Provider.ModelsRefreshedAt = time.Now().UTC().Format(time.RFC3339)
 				if saveErr := state.SaveSettings(*app.settings, paths); saveErr != nil {
 					_ = db.Close()
 					return nil, saveErr
 				}
 				app.provider.UpdateConfig(*app.settings, secrets.ProviderAPIKey)
 			}
+			// A failed refresh is silent: a stale catalog still works, and an
+			// offline start must never block the session.
 		}
 	}
 
@@ -648,7 +655,7 @@ func (a *Application) setAPIKey(ctx context.Context, key string) error {
 	models, err := a.provider.ListModels(ctx)
 	if err != nil {
 		if a.callbacks.Status != nil {
-			a.callbacks.Status("API key saved; add a model with /model or `muhiyacode config set model <id>`.")
+			a.callbacks.Status("API key saved; run `muhiyacode config discover` to load the model catalog.")
 		}
 		return nil
 	}
@@ -658,4 +665,23 @@ func (a *Application) setAPIKey(ctx context.Context, key string) error {
 	}
 	a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
 	return nil
+}
+
+// catalogRefreshTTL bounds how long a discovered model catalog is trusted.
+// One day keeps a newly added gateway model reachable by the next session
+// without paying a network round trip at every start.
+const catalogRefreshTTL = 24 * time.Hour
+
+// catalogStale reports whether the recorded discovery time is missing or older
+// than the TTL. An unparseable timestamp is treated as stale so a corrupted
+// value self-heals on the next start.
+func catalogStale(refreshedAt string) bool {
+	if strings.TrimSpace(refreshedAt) == "" {
+		return true
+	}
+	at, err := time.Parse(time.RFC3339, refreshedAt)
+	if err != nil {
+		return true
+	}
+	return time.Since(at) > catalogRefreshTTL
 }
