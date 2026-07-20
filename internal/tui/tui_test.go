@@ -801,3 +801,54 @@ func TestUpdateAvailableSegment(t *testing.T) {
 		}
 	}
 }
+
+// TestHeaderLayoutOrder pins the v1.1.0 field-test layout: line 1 runs
+// brand+version, then the workspace path, then the context meter. The path is
+// the flexible segment — a long path truncates rather than pushing the context
+// meter off the line.
+func TestHeaderLayoutOrder(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "1.1.0"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	line1 := strings.Split(ansi.Strip(m.View().Content), "\n")[1]
+	versionAt := strings.Index(line1, "v1.1.0")
+	pathAt := strings.Index(line1, "muhiya")
+	contextAt := strings.Index(line1, "context")
+	if versionAt < 0 || pathAt < 0 || contextAt < 0 {
+		t.Fatalf("header line 1 missing a segment (version=%d path=%d context=%d):\n%q", versionAt, pathAt, contextAt, line1)
+	}
+	if !(versionAt < pathAt && pathAt < contextAt) {
+		t.Fatalf("header order must be version → path → context:\n%q", line1)
+	}
+}
+
+func TestHeaderKeepsContextMeterOnNarrowTerminals(t *testing.T) {
+	runtime := testRuntime(t)
+	runtime.Session.WorkspacePath = `C:\a\very\deeply\nested\workspace\path\that\keeps\going\and\going\project`
+	m := NewModel(Options{Runtime: runtime, Version: "1.1.0"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 62, Height: 24})
+	line1 := strings.Split(ansi.Strip(m.View().Content), "\n")[1]
+	if !strings.Contains(line1, "context") {
+		t.Fatalf("a long path pushed the context meter off line 1:\n%q", line1)
+	}
+	if !strings.Contains(line1, "project") {
+		t.Fatalf("path truncation dropped the most-specific segment:\n%q", line1)
+	}
+}
+
+// TestFormatDurationSpacesMinutesAndSeconds pins the requested "3m 07s" shape.
+func TestFormatDurationSpacesMinutesAndSeconds(t *testing.T) {
+	for _, row := range []struct {
+		seconds int
+		want    string
+	}{
+		{42, "42.0s"},
+		{61, "1m 01s"},
+		{90, "1m 30s"},
+		{187, "3m 07s"},
+		{3599, "59m 59s"},
+	} {
+		if got := formatDuration(time.Duration(row.seconds) * time.Second); got != row.want {
+			t.Errorf("formatDuration(%ds) = %q, want %q", row.seconds, got, row.want)
+		}
+	}
+}

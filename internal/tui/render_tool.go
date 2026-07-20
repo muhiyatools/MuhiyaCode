@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -79,8 +80,14 @@ func (m *Model) renderTool(tool *toolView, width int) string {
 		// expand just that tool's detail block.
 		return lines[0]
 	}
-	// Expanded: uniform detail block. A diff renders colorized; any other output
-	// renders in the same gutter-prefixed style.
+	// Expanded: uniform detail block. An ask_user exchange renders as the
+	// question and the choice the user made; a diff renders colorized; any other
+	// output renders in the same gutter-prefixed style.
+	if tool.name == "ask_user" {
+		if answers, ok := parseUserAnswers(tool.output); ok {
+			return strings.Join(append(lines, m.renderUserAnswers(answers, width)...), "\n")
+		}
+	}
 	if diff := diffLines(tool.output); len(diff) > 0 {
 		for _, source := range diff {
 			lines = append(lines, "  "+m.diffLineStyle(source).Render(oneLine(source, width-2)))
@@ -160,6 +167,15 @@ func (m *Model) toolOutcome(tool *toolView) string {
 		}
 	case "run_shell":
 		return shellOutcome(tool.output)
+	case "ask_user":
+		// The collapsed row counts the exchange; the raw JSON payload is never a
+		// useful summary line.
+		if answers, ok := parseUserAnswers(tool.output); ok {
+			if len(answers) == 1 {
+				return "1 answered"
+			}
+			return fmt.Sprintf("%d answered", len(answers))
+		}
 	}
 	return summarizeTool(tool.output)
 }
@@ -368,4 +384,66 @@ func isFailure(output string) bool {
 
 func diffLines(output string) []string {
 	return contract.DiffLines(output)
+}
+
+// answerView is one question/answer pair from an ask_user result, for display.
+type answerView struct {
+	question    string
+	label       string
+	description string
+}
+
+// parseUserAnswers decodes the ask_user tool result. That result is the
+// MODEL-facing payload (orchestrator.encodeAnswers) — deliberately verbose JSON
+// the model reads well and a person does not. Rendering it verbatim put a wall
+// of braces in the transcript, so the TUI parses it back into the exchange it
+// represents. ok is false for any other output, which falls back to the generic
+// rendering rather than guessing.
+func parseUserAnswers(output string) ([]answerView, bool) {
+	var payload struct {
+		Type    string `json:"type"`
+		Answers []struct {
+			Question    string `json:"question"`
+			Label       string `json:"selected_label"`
+			Description string `json:"selected_description"`
+		} `json:"answers"`
+	}
+	if json.Unmarshal([]byte(output), &payload) != nil || payload.Type != "user_answers" {
+		return nil, false
+	}
+	views := make([]answerView, 0, len(payload.Answers))
+	for _, answer := range payload.Answers {
+		views = append(views, answerView{
+			question:    strings.TrimSpace(answer.Question),
+			label:       strings.TrimSpace(answer.Label),
+			description: strings.TrimSpace(answer.Description),
+		})
+	}
+	return views, len(views) > 0
+}
+
+// renderUserAnswers renders the ask_user exchange as a conversation: the
+// question, then the choice the user made. Nothing else from the payload is
+// surfaced — selected_index and recommended are model bookkeeping.
+func (m *Model) renderUserAnswers(answers []answerView, width int) []string {
+	var lines []string
+	for i, answer := range answers {
+		if i > 0 {
+			lines = append(lines, "")
+		}
+		if answer.question != "" {
+			for _, wrapped := range wrapPlain(answer.question, max(10, width-6)) {
+				lines = append(lines, "  "+m.palette.faint.Render(m.rtl(wrapped)))
+			}
+		}
+		chosen := answer.label
+		if chosen == "" {
+			chosen = "(no answer)"
+		}
+		lines = append(lines, "  "+m.palette.brandSoft.Render(m.glyphs.todoActive+" ")+m.palette.text.Render(m.rtl(chosen)))
+		for _, wrapped := range wrapPlain(answer.description, max(10, width-8)) {
+			lines = append(lines, "    "+m.palette.muted.Render(m.rtl(wrapped)))
+		}
+	}
+	return lines
 }

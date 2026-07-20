@@ -450,5 +450,5 @@ func formatDuration(duration time.Duration) string {
 	if duration < time.Minute {
 		return fmt.Sprintf("%.1fs", duration.Seconds())
 	}
-	return fmt.Sprintf("%dm%02ds", int(duration.Minutes()), int(duration.Seconds())%60)
+	return fmt.Sprintf("%dm %02ds", int(duration.Minutes()), int(duration.Seconds())%60)
 }

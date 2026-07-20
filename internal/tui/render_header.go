@@ -17,29 +17,35 @@ func (m *Model) renderHeader() string {
 		contextLabel = fmt.Sprintf("context %.1f%%", m.context.Percent)
 	}
 	dot := m.palette.border.Render(m.glyphs.bullet)
-	// Header segments as a slice so a narrow width can drop trailing segments
-	// (visual-system.md §4) before the path is truncated. Model names are
-	// deliberately absent: models are chosen for the session, not managed by the
-	// user, so naming them here would be noise. /context discloses them.
-	seg := []string{
-		" " + m.palette.brand.Render(m.glyphs.brand+" MuhiyaCode") + " " + m.palette.faint.Render("v"+m.version),
-	}
-	// A newer published version is worth one quiet segment. It renders nothing
-	// when current, unknown, or offline, and sits before the context meter so a
-	// narrow terminal drops it first.
+	// Line 1 carries identity, location, and pressure: brand+version, the
+	// workspace path, an update notice when there is one, and the context meter.
+	// Model names are deliberately absent — models are chosen for the session,
+	// not managed by the user, so naming them here would be noise (/context
+	// discloses them).
+	brand := " " + m.palette.brand.Render(m.glyphs.brand+" MuhiyaCode") + " " + m.palette.faint.Render("v"+m.version)
+	update := ""
 	if updatecheck.Newer(m.latestVersion, m.version) {
-		seg = append(seg, dot+" "+m.palette.brandSoft.Render("Update available "+m.latestVersion)+" "+m.palette.faint.Render("(you have "+m.version+")"))
+		update = dot + " " + m.palette.brandSoft.Render("Update available "+m.latestVersion) + " " + m.palette.faint.Render("(you have "+m.version+")")
 	}
-	seg = append(seg, dot+" "+contextMeterStyle(m.palette, m.context.Percent, hasLimit).Render(contextLabel))
-	line1 := strings.Join(seg, "  ")
-	// Full workspace path, left-truncated (leading ellipsis) only when it cannot
-	// fit — the rightmost, most-specific segments stay visible (FR-021).
+	meter := dot + " " + contextMeterStyle(m.palette, m.context.Percent, hasLimit).Render(contextLabel)
+	// The path is the FLEXIBLE segment: the fixed segments are measured first and
+	// the path takes whatever is left, left-truncated (leading ellipsis) so the
+	// most-specific directories survive (FR-021). The context meter is never
+	// pushed off by a long path.
 	workspace := m.runtime.Session.WorkspacePath
 	if workspace == "" {
 		workspace = "."
 	}
-	workspace = truncateLeft(workspace, max(10, m.width-2), m.glyphs.ellipsis)
-	parts := []string{m.palette.muted.Render(workspace)}
+	fixed := lipgloss.Width(brand) + lipgloss.Width(meter) + lipgloss.Width(update) + 6 // separators
+	workspace = truncateLeft(workspace, max(12, m.width-fixed), m.glyphs.ellipsis)
+	seg := []string{brand, dot + " " + m.palette.muted.Render(workspace)}
+	if update != "" {
+		seg = append(seg, update)
+	}
+	seg = append(seg, meter)
+	line1 := strings.Join(seg, "  ")
+	// Line 2 is the agent cluster only; it renders empty when nothing is running.
+	var parts []string
 	if m.viewAgent != "" {
 		if agent := m.agentByID[m.viewAgent]; agent != nil {
 			parts = append(parts, m.palette.faint.Render("· view"), m.palette.brandSoft.Render(fmt.Sprintf("%s [%d]", agent.agent, agent.index)), m.palette.muted.Render(agent.title), m.palette.faint.Render(agent.status))

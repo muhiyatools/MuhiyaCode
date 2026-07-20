@@ -73,8 +73,8 @@ func TestContextReportSessionPanelContent(t *testing.T) {
 	report := formatContextReport(contextPanelReport())
 	for _, expected := range []string{
 		"  Credits used: unavailable (1 of 3 requests priced)",
-		"  API time:    1m23s",
-		"  Active time: 12m34s (this session)",
+		"  API time:    1m 23s",
+		"  Active time: 12m 34s (this session)",
 		"  Lines: +120 −45",
 		"  Prompt / output tokens: 945.0k / 9.2k",
 		"  Cache read / uncached: 900.0k / 45.0k",

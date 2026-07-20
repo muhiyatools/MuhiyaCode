@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // TestToolOutcomeDerivation (003 T023/T025) checks the per-tool collapsed outcome
@@ -58,5 +59,59 @@ func TestToolCollapsedIsOneLineExpandedShowsDetail(t *testing.T) {
 	expanded := m.renderTool(tool, 90)
 	if !strings.Contains(stripANSI(expanded), "new line") {
 		t.Fatalf("expanded entry missing diff detail:\n%s", expanded)
+	}
+}
+
+// TestAskUserRendersTheExchangeNotItsJSON is the field-test regression: the
+// ask_user tool result is the MODEL-facing payload (verbose JSON the model
+// reads well), and rendering it verbatim put a wall of braces in the
+// transcript. The row now shows the question and the choice the user made.
+func TestAskUserRendersTheExchangeNotItsJSON(t *testing.T) {
+	payload := `{"type":"user_answers","answers":[` +
+		`{"question":"What kind of Excel online tool do you want?","selected_index":0,"selected_label":"View & edit uploaded xlsx","selected_description":"A web app that opens .xlsx files.","recommended":false},` +
+		`{"question":"How should it be served?","selected_index":1,"selected_label":"Single HTML + SheetJS","selected_description":"Zero install.","recommended":false}]}`
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	tool := &toolView{name: "ask_user", state: "ok", output: payload}
+
+	collapsed := ansi.Strip(m.renderTool(tool, 100))
+	if !strings.Contains(collapsed, "2 answered") {
+		t.Fatalf("collapsed row does not summarize the exchange:\n%s", collapsed)
+	}
+	if strings.Contains(collapsed, "{") || strings.Contains(collapsed, "selected_index") {
+		t.Fatalf("raw JSON leaked into the collapsed row:\n%s", collapsed)
+	}
+
+	tool.expanded = true
+	expanded := ansi.Strip(m.renderTool(tool, 100))
+	for _, want := range []string{
+		"What kind of Excel online tool do you want?",
+		"View & edit uploaded xlsx",
+		"A web app that opens .xlsx files.",
+		"How should it be served?",
+		"Single HTML + SheetJS",
+	} {
+		if !strings.Contains(expanded, want) {
+			t.Fatalf("expanded row missing %q:\n%s", want, expanded)
+		}
+	}
+	// Model bookkeeping must never reach the screen.
+	for _, forbidden := range []string{"selected_index", "selected_label", "recommended", `"type"`, "{"} {
+		if strings.Contains(expanded, forbidden) {
+			t.Fatalf("payload internals leaked into the expanded row (%q):\n%s", forbidden, expanded)
+		}
+	}
+}
+
+// TestAskUserFallsBackOnUnparseableOutput: an unexpected payload must degrade
+// to the generic rendering, never crash or render a half-parsed exchange.
+func TestAskUserFallsBackOnUnparseableOutput(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	for _, output := range []string{"", "not json at all", `{"type":"something_else"}`, `{"type":"user_answers","answers":[]}`} {
+		tool := &toolView{name: "ask_user", state: "ok", output: output, expanded: true}
+		if got := m.renderTool(tool, 100); got == "" {
+			t.Fatalf("renderTool produced nothing for output %q", output)
+		}
 	}
 }
