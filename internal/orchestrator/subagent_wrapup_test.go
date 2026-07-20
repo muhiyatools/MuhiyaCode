@@ -12,10 +12,16 @@ import (
 // directive: a subagent that burns its whole turn budget on tool calls is not
 // failed — it gets a wrap-up prompt telling it to stop calling tools, and the
 // text it returns on the extra turn is accepted as a "done" report.
+// v1.1.0: "budget exhausted" now means STALLED. The turn cap is a ladder rung —
+// a run still opening new files earns another rung — so the way to reach the
+// wrap-up is to stop producing new evidence, which is what turns 3-4 below do by
+// re-reading files the run already has.
 func TestBudgetExhaustedSubagentReportsViaWrapUp(t *testing.T) {
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
-		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c1", "read_file", `{"path":"a.go"}`)}},   // turn 1
-		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c2", "read_file", `{"path":"b.go"}`)}},   // turn 2 — budget exhausted
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c1", "read_file", `{"path":"a.go"}`)}},   // turn 1: new file
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c2", "read_file", `{"path":"b.go"}`)}},   // turn 2: new file — earns a rung
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c3", "read_file", `{"path":"a.go"}`)}},   // turn 3: nothing new
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c4", "read_file", `{"path":"b.go"}`)}},   // turn 4: nothing new — stalled, wrap up
 		{Content: "Partial findings: a.go wires the loader; b.go holds defaults. Not fully verified."}, // wrap-up turn
 	}}
 	settings := engineSettings() // EffortMedium: AgentTurnScale 1, so MaxTurns is used as-is
@@ -27,13 +33,13 @@ func TestBudgetExhaustedSubagentReportsViaWrapUp(t *testing.T) {
 	spec.MaxTurns = 2
 	result := engine.executeSubagent(context.Background(), "r1", subagentInput{Agent: "explore", Title: "wrap-up", Task: "find the config loader"}, spec)
 	if result.Status != "done" {
-		t.Fatalf("budget-exhausted subagent must succeed via wrap-up: status=%q report=%q", result.Status, result.Report)
+		t.Fatalf("stalled subagent must succeed via wrap-up: status=%q report=%q", result.Status, result.Report)
 	}
 	if !strings.Contains(result.Report, "Partial findings") {
 		t.Fatalf("wrap-up text was not accepted as the report: %q", result.Report)
 	}
-	if result.Turns != 3 || result.ToolCalls != 2 {
-		t.Fatalf("expected 2 budget turns + 1 wrap-up turn (2 tool calls), got turns=%d toolCalls=%d", result.Turns, result.ToolCalls)
+	if result.Turns != 5 || result.ToolCalls != 4 {
+		t.Fatalf("expected 2 rungs of work + 1 wrap-up turn (4 tool calls), got turns=%d toolCalls=%d", result.Turns, result.ToolCalls)
 	}
 	// The wrap-up nudge must have been appended as a user message before the
 	// final request.
@@ -58,7 +64,9 @@ func TestBudgetExhaustedSubagentReportsViaWrapUp(t *testing.T) {
 func TestWrapUpStillEmptyReturnsGuidedPartialNotForbiddenString(t *testing.T) {
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
 		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c1", "read_file", `{"path":"a.go"}`)}},
-		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c2", "read_file", `{"path":"b.go"}`)}},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c2", "read_file", `{"path":"b.go"}`)}}, // earns one rung
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c3", "read_file", `{"path":"a.go"}`)}},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c4", "read_file", `{"path":"b.go"}`)}}, // stalled → wrap up
 		{Content: "   "}, // wrap-up turn: still nothing
 	}}
 	settings := engineSettings()

@@ -75,7 +75,7 @@ func TestSubagentTailCarriesTheReportContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := string(data)
-	for _, wrapUp := range []string{"Turn budget reached", "Token budget reached"} {
+	for _, wrapUp := range []string{"Turn budget reached", "Context window nearly full"} {
 		index := strings.Index(source, wrapUp)
 		if index < 0 {
 			t.Fatalf("wrap-up prompt %q not found — did it move?", wrapUp)

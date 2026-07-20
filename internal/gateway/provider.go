@@ -49,11 +49,17 @@ func NewOpenAICompatible(config Config) *OpenAICompatible {
 	if config.Client == nil {
 		config.Client = &http.Client{}
 	}
+	// These are PAIRED with the gateway's own bounds (gateway repo
+	// proxy/handler.go:22 httpClient.Timeout, :49 streamIdleTimeout). Each CLI
+	// value sits just INSIDE its gateway counterpart so the CLI — the side that
+	// can actually recover, via the stream retry in Chat below — is the one that
+	// times out first. Inverting this would surface the gateway's hard close as
+	// an unrecoverable transport error instead of a retried turn.
 	if config.IdleTimeout <= 0 {
-		config.IdleTimeout = 90 * time.Second
+		config.IdleTimeout = 110 * time.Second // gateway cuts a silent stream at 120s
 	}
 	if config.RequestLifetime <= 0 {
-		config.RequestLifetime = 10 * time.Minute
+		config.RequestLifetime = 14 * time.Minute // gateway's total upstream bound is 15m
 	}
 	if config.MaxRetries <= 0 {
 		config.MaxRetries = 3

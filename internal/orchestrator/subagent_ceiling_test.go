@@ -2,85 +2,157 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
-// Feature 011 D3/D4/D7 conformance (contracts/subagent-handoff.md §2–§4).
+// Feature 011 D4/D7 conformance (contracts/subagent-handoff.md §2–§4), plus the
+// v1.1.0 bounds: the token BUDGET is gone (a quota), replaced by the context
+// WINDOW (physics) and a progress ladder.
 
-// A subagent whose provider-reported consumption crosses its TokenCeiling gets
-// exactly one wrap-up instruction, its next response is accepted as the final
-// report, and the result is labeled partial — never silent truncation, never a
-// continued spend (contract §7.3 / SC-004 mechanism).
-func TestSubagentTokenCeilingWrapsUpAndLabelsPartial(t *testing.T) {
-	// Turn 1 burns 5000 tokens on a tool call (over the 4000 ceiling); the next
-	// turn MUST be the wrap-up. The scripted turn-2 response returns the report.
-	provider := &scriptedProvider{responses: []contract.ChatResponse{
-		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c1", "read_file", `{"path":"a.go"}`)}, Usage: contract.Usage{PromptTokens: 4000, CompletionTokens: 1000, TotalTokens: 5000}},
-		{Content: "Covered: a.go. Not covered: everything else.", Usage: contract.Usage{PromptTokens: 100, CompletionTokens: 50}},
-	}}
+// windowEngine builds an engine whose subagent model has a deliberately tiny
+// context window, so a scripted prompt-token count can cross the pressure
+// threshold without fabricating a 100k-token fixture.
+func windowEngine(t *testing.T, id string, window int, responses ...contract.ChatResponse) (*Engine, *scriptedProvider) {
+	t.Helper()
+	provider := &scriptedProvider{responses: responses}
 	settings := engineSettings()
+	settings.Provider.Models = []contract.Model{{ID: "main", Name: "Test", ContextLimit: window}}
 	engine, err := NewEngine(EngineConfig{
-		Settings: &settings, Session: contract.Session{ID: "ceiling", WorkspacePath: t.TempDir()},
-		Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}),
+		Settings: &settings, Session: contract.Session{ID: id, WorkspacePath: t.TempDir()},
+		// grep is registered alongside read_file because it is a SUCCESSFUL tool
+		// call that touches no path — the shape a run takes when it is busy but no
+		// longer gathering durable evidence, which is what the ladder must not
+		// reward with another rung.
+		Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}, &recordingTool{name: "grep"}),
 		Prompt: PromptContext{Model: "Test"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	spec := engine.subagentSpecs()["review"]
-	result := engine.executeSubagent(context.Background(), "r1", subagentInput{Agent: "review", Title: "t", Task: "review the diff", TokenCeiling: 4000}, spec)
+	return engine, provider
+}
 
-	if !strings.HasPrefix(result.Status, "partial") {
-		t.Fatalf("status = %q, want partial (token ceiling)", result.Status)
+// A run whose provider-reported prompt tokens cross the window-pressure
+// threshold gets exactly one wrap-up instruction, its next response is accepted
+// as the final report, and the result is labeled partial so the parent
+// dispatches a continuation instead of mistaking bounded coverage for complete
+// coverage. This is a PHYSICAL bound — the alternative is dying on a
+// context-length 400 with no report at all.
+func TestSubagentWindowPressureWrapsUpAndLabelsPartial(t *testing.T) {
+	// Window 10000 ⇒ threshold 8500. Turn 1 reports 9000 prompt tokens.
+	engine, provider := windowEngine(t, "window", 10_000,
+		contract.ChatResponse{ToolCalls: []contract.ToolCall{contract.NewToolCall("c1", "read_file", `{"path":"a.go"}`)}, Usage: contract.Usage{PromptTokens: 9000, CompletionTokens: 100}},
+		contract.ChatResponse{Content: "Covered: a.go. Not covered: everything else.", Usage: contract.Usage{PromptTokens: 100, CompletionTokens: 50}},
+	)
+	spec := engine.subagentSpecs()["review"]
+	result := engine.executeSubagent(context.Background(), "r1", subagentInput{Agent: "review", Title: "t", Task: "review the diff"}, spec)
+
+	if result.Status != "partial (context window)" {
+		t.Fatalf("status = %q, want partial (context window)", result.Status)
 	}
 	if !strings.Contains(result.Report, "Covered: a.go") {
 		t.Fatalf("wrap-up report lost: %q", result.Report)
 	}
-	// The wrap-up instruction must have been injected after the breach.
 	sawWrapUp := false
 	for _, request := range provider.requests {
 		for _, message := range request.Messages {
-			if strings.Contains(message.Content, "Token budget reached") {
+			if strings.Contains(message.Content, "Context window nearly full") {
 				sawWrapUp = true
 			}
 		}
 	}
 	if !sawWrapUp {
-		t.Fatal("token-ceiling wrap-up instruction never sent")
+		t.Fatal("window-pressure wrap-up instruction never sent")
 	}
 	if result.Turns != 2 {
-		t.Fatalf("turns = %d, want 2 (breach turn + wrap-up)", result.Turns)
+		t.Fatalf("turns = %d, want 2 (pressure turn + wrap-up)", result.Turns)
 	}
 }
 
-// TokenCeiling 0 means uncapped (the pre-baseline rollout default): no wrap-up
-// fires from token accounting alone.
-func TestSubagentZeroCeilingIsUncapped(t *testing.T) {
-	provider := &scriptedProvider{responses: []contract.ChatResponse{
-		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c1", "read_file", `{"path":"a.go"}`)}, Usage: contract.Usage{TotalTokens: 500_000}},
-		{Content: "Findings: none.", Usage: contract.Usage{TotalTokens: 100}},
-	}}
-	settings := engineSettings()
-	engine, err := NewEngine(EngineConfig{
-		Settings: &settings, Session: contract.Session{ID: "uncapped", WorkspacePath: t.TempDir()},
-		Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}),
-		Prompt: PromptContext{Model: "Test"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+// Below the threshold nothing fires, however many tokens the run has spent in
+// TOTAL: consumption is not a budget any more, only the live prompt size against
+// the window matters.
+func TestSubagentBelowWindowPressureIsUnbounded(t *testing.T) {
+	engine, provider := windowEngine(t, "nopressure", 1_000_000,
+		contract.ChatResponse{ToolCalls: []contract.ToolCall{contract.NewToolCall("c1", "read_file", `{"path":"a.go"}`)}, Usage: contract.Usage{PromptTokens: 20_000, CompletionTokens: 500_000}},
+		contract.ChatResponse{Content: "Findings: none.", Usage: contract.Usage{PromptTokens: 21_000}},
+	)
 	spec := engine.subagentSpecs()["explore"]
 	result := engine.executeSubagent(context.Background(), "r2", subagentInput{Agent: "explore", Title: "t", Task: "survey"}, spec)
 	if result.Status != "done" {
-		t.Fatalf("status = %q, want done (uncapped)", result.Status)
+		t.Fatalf("status = %q, want done", result.Status)
 	}
 	for _, request := range provider.requests {
 		for _, message := range request.Messages {
-			if strings.Contains(message.Content, "Token budget reached") {
-				t.Fatal("uncapped run must never see the token wrap-up instruction")
+			if strings.Contains(message.Content, "Context window nearly full") {
+				t.Fatal("a run well inside its window must never see the pressure wrap-up")
+			}
+		}
+	}
+}
+
+// THE LADDER (G0.1). A run still touching new files when it reaches its first
+// rung earns another rung instead of being wrapped up. Before this, a healthy
+// executor was stopped mid-build purely for having taken N turns.
+func TestSubagentLadderExtendsWhileWorkLands(t *testing.T) {
+	spec := subagentSpec{Name: "general", Allowed: map[string]bool{"read_file": true}, MaxTurns: 2, System: "test"}
+	// Every turn reads a DISTINCT file, so touchedCount keeps growing and the
+	// ladder keeps extending past the 2-turn first rung.
+	var responses []contract.ChatResponse
+	for i := 0; i < 8; i++ {
+		responses = append(responses, contract.ChatResponse{ToolCalls: []contract.ToolCall{
+			contract.NewToolCall(fmt.Sprintf("c%d", i), "read_file", fmt.Sprintf(`{"path":"file%d.go"}`, i)),
+		}})
+	}
+	responses = append(responses, contract.ChatResponse{Content: "Done reading. STATUS: COMPLETE"})
+	engine, provider := windowEngine(t, "ladder", 1_000_000, responses...)
+	result := engine.executeSubagent(context.Background(), "r3", subagentInput{Agent: "general", Title: "t", Task: "read everything"}, spec)
+
+	if result.Turns <= 2+2 { // first rung + wrapUpTurns
+		t.Fatalf("turns = %d: the ladder did not extend for a run that kept landing work", result.Turns)
+	}
+	sawExtension := false
+	for _, request := range provider.requests {
+		for _, message := range request.Messages {
+			if strings.Contains(message.Content, "[governor] Run extended") {
+				sawExtension = true
+			}
+		}
+	}
+	if !sawExtension {
+		t.Fatal("no extension rider was sent")
+	}
+}
+
+// The ladder's other half, and the liveness proof: a run that has STOPPED
+// touching anything new does not earn rungs. Without this the ladder would be
+// an unbounded loop rather than a progress-gated one.
+func TestSubagentLadderDoesNotExtendWithoutProgress(t *testing.T) {
+	spec := subagentSpec{Name: "general", Allowed: map[string]bool{"grep": true}, MaxTurns: 2, System: "test"}
+	// Every turn is a successful grep with a distinct pattern: real calls, no
+	// repeat-limiter trigger, but no file ever opened — touchedCount stays 0, so
+	// the run never earns a rung and must wrap up at its first one.
+	var responses []contract.ChatResponse
+	for i := 0; i < 12; i++ {
+		responses = append(responses, contract.ChatResponse{ToolCalls: []contract.ToolCall{
+			contract.NewToolCall(fmt.Sprintf("c%d", i), "grep", fmt.Sprintf(`{"pattern":"p%d"}`, i)),
+		}})
+	}
+	responses = append(responses, contract.ChatResponse{Content: "Nothing new. STATUS: COMPLETE"})
+	engine, provider := windowEngine(t, "noladder", 1_000_000, responses...)
+	result := engine.executeSubagent(context.Background(), "r4", subagentInput{Agent: "general", Title: "t", Task: "spin"}, spec)
+
+	if result.Turns > 2+2 {
+		t.Fatalf("turns = %d: a run making no progress must wrap up at its first rung", result.Turns)
+	}
+	for _, request := range provider.requests {
+		for _, message := range request.Messages {
+			if strings.Contains(message.Content, "[governor] Run extended") {
+				t.Fatal("a stalled run must never earn another rung")
 			}
 		}
 	}

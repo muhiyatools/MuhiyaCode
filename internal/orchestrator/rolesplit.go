@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
@@ -84,6 +85,15 @@ func (e *Engine) executionRoleGate(ctx context.Context, sc dispatchScope, call c
 		sc.onEnd(call, output)
 	}
 	return toolOutcome{Call: call, Output: output, Failed: true}, true
+}
+
+// hardTurnCeiling is the task's absolute liveness backstop, scaled by effort so
+// a max-effort task — which legitimately climbs the runway ladder further — is
+// not stopped by a bound calibrated for medium. It is the ONLY remaining
+// unconditional turn bound in the main loop: everything below it extends while
+// real work lands.
+func (e *Engine) hardTurnCeiling() int {
+	return int(math.Ceil(hardTurnCeiling * Profile(e.effort()).AgentTurnScale))
 }
 
 // noteChangedFiles records a successful mutation's targets on the task ledger.

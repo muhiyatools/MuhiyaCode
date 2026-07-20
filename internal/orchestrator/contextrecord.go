@@ -130,6 +130,17 @@ func (c *agentRunCapture) note(name, argumentsJSON string) {
 	}
 }
 
+// touchedCount is the run's progress signal: how many distinct paths it has
+// read or written so far. Only SUCCESSFUL calls reach note(), so this counts
+// evidence gathered and work landed, never attempts. The turn ladder extends a
+// run whose count is still growing and wraps up one whose count has stalled.
+func (c *agentRunCapture) touchedCount() int {
+	if c == nil {
+		return 0
+	}
+	return len(c.reads) + len(c.writes)
+}
+
 // statFingerprint is the ONE staleness primitive: the current mtime+size of a
 // normalized touched-set path, zero when the file is absent (a later existence
 // change still reads as "changed"). Capture, staleness comparison, and tests

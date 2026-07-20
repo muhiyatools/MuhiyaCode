@@ -17,8 +17,22 @@ import (
 type subagentSpec struct {
 	Name, Description, System string
 	Allowed                   map[string]bool
-	MaxTurns                  int
+	// MaxTurns is the ladder's FIRST RUNG, not a budget: a run still producing
+	// evidence earns further rungs (executeSubagent). See subagentHardCeiling.
+	MaxTurns int
 }
+
+const (
+	// subagentWindowPressureRatio is the share of the model's context window at
+	// which a run wraps up gracefully. Below the provider's own hard limit, so
+	// the run reports instead of dying on a context-length 400.
+	subagentWindowPressureRatio = 0.85
+	// subagentHardCeiling is the liveness backstop, mirroring hardTurnCeiling in
+	// the main loop. The ladder and the window guard are the real bounds; this
+	// exists only because a provider that reports no usage would leave the window
+	// guard blind, and every loop in this system must terminate.
+	subagentHardCeiling = 150
+)
 
 type subagentInput struct {
 	Agent string `json:"agent"`
@@ -29,12 +43,6 @@ type subagentInput struct {
 	Role  string `json:"role"`
 	Title string `json:"title"`
 	Task  string `json:"task"`
-	// TokenCeiling (feature 011 D3, contracts/subagent-handoff.md §3) bounds this
-	// run's total provider-reported token consumption. 0 = uncapped. Harness-set
-	// only (review-tier dispatches copy the gate's absolute cap here); the json
-	// tag keeps it out of the model-facing tool schema so a model call can never
-	// raise its own budget.
-	TokenCeiling int `json:"-"`
 }
 
 type subagentResult struct {
@@ -292,12 +300,16 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		},
 	}
 	var previousShape *PrefixShape
-	// D3: token-ceiling enforcement uses provider-REPORTED usage accumulated per
-	// turn (never estimates — Constitution VI). Breaching the ceiling triggers the
-	// same graceful wrap-up as turn exhaustion: one instruction to report what was
-	// covered, then the next response is final and the result is marked partial.
-	consumedTokens := 0
-	ceilingHit := false
+	// The run ends on PHYSICS, not on a quota: the model's context window (below,
+	// from provider-REPORTED prompt tokens — never estimates, Constitution VI).
+	// Breaching it triggers the same graceful wrap-up turn exhaustion always did:
+	// one instruction to report what was covered, then the next response is final
+	// and the result is labeled partial so the parent can dispatch a continuation.
+	windowPressure := false
+	contextWindow := e.modelContextLimit(modelID)
+	if contextWindow <= 0 {
+		contextWindow = gateway.ResolveModelProfile(modelID).DefaultContextWindow
+	}
 	// Feature 012: the wire pin and reasoning tier belong to the STREAM. A
 	// continuation reuses the predecessor's exact pin (gateway model routing +
 	// OpenRouter stickiness, R-F11) and — on EffortPinned families — inherits
@@ -312,7 +324,14 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 	lastPromptTokens, lastCompletionTokens := 0, 0
 	var firstTurnShare *float64
 	firstTurnCacheReported := false
-	maxTurns := max(2, int(math.Ceil(float64(spec.MaxTurns)*Profile(e.effort()).AgentTurnScale)))
+	// The per-kind MaxTurns is now a LADDER RUNG, not a budget. A run that is
+	// still doing real work earns another rung; a run that has stopped producing
+	// evidence wraps up at the current one. The old flat cap forced a graceful
+	// wrap-up on a healthy executor mid-build purely because it had taken N turns
+	// — the last capacity quota in the system.
+	baseTurns := max(2, int(math.Ceil(float64(spec.MaxTurns)*Profile(e.effort()).AgentTurnScale)))
+	turnCap := baseTurns
+	progressMark := capture.touchedCount()
 	// Exhausting the turn budget is NOT a hard failure: the subagent is told to
 	// stop calling tools and gets up to wrapUpTurns extra provider turns to
 	// return whatever it found (verified or partial) as its report. Only a
@@ -320,7 +339,7 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 	const wrapUpTurns = 2
 	wrapUp := false
 	lastText := "" // last interim note, for the partial report if the budget is exhausted
-	for turn := 1; turn <= maxTurns+wrapUpTurns; turn++ {
+	for turn := 1; turn <= turnCap+wrapUpTurns; turn++ {
 		result.Turns = turn
 		shape, shapeErr := NewPrefixShape(system, definitions, 0, modelID)
 		if shapeErr != nil {
@@ -378,11 +397,6 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 		}
 		result.Usage = result.Usage.Add(response.Usage)
 		e.emitAgent(contract.AgentEvent{Kind: "usage", RunID: runID, Usage: result.Usage})
-		turnTokens := response.Usage.TotalTokens
-		if turnTokens == 0 {
-			turnTokens = response.Usage.PromptTokens + response.Usage.CompletionTokens
-		}
-		consumedTokens += turnTokens
 		calls := response.ToolCalls
 		text := response.Content
 		// During wrap-up the text IS the report — never let the rescue path
@@ -433,7 +447,7 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 				messages = append(messages, contract.Message{Role: contract.RoleTool, ToolCallID: call.ID, Content: outcome.Output})
 			}
 		}
-		if turn == maxTurns+wrapUpTurns {
+		if turn == turnCap+wrapUpTurns {
 			// Both wrap-up turns burned on tool calls with no text (INV-3): return a
 			// guided partial, never the forbidden "bounded turn limit" string.
 			result.Status = "failed"
@@ -441,28 +455,40 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			e.recordHarnessEvent(ctx, contract.HarnessRecovery, "subagent-turn-budget", input.Agent)
 			break
 		}
-		if !wrapUp && input.TokenCeiling > 0 && consumedTokens >= input.TokenCeiling {
-			// Ceiling breach → graceful wrap-up, never silent truncation or
-			// overspend: the subagent reports what it covered and what remains.
+		// Window pressure is the run's PHYSICAL bound. Provider-reported prompt
+		// tokens against the model's real window; at the threshold the run wraps
+		// up gracefully and its partial label tells the parent to continue it in
+		// a fresh window (the session chain replays the digest, so no work is lost).
+		if !wrapUp && contextWindow > 0 && lastPromptTokens >= int(float64(contextWindow)*subagentWindowPressureRatio) {
 			wrapUp = true
-			ceilingHit = true
-			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Token budget reached: stop calling tools and return your report NOW — state exactly what you covered and what you did NOT get to, and end with the STATUS line."})
+			windowPressure = true
+			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Context window nearly full: stop calling tools and return your report NOW — state exactly what you completed and what remains, and end with the STATUS line."})
 		}
-		if !wrapUp && turn >= maxTurns {
-			wrapUp = true
-			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Turn budget reached: stop calling tools and return your complete report NOW with everything you found, verified or partial, ending with the STATUS line."})
+		if !wrapUp && turn >= turnCap {
+			// The ladder: extend while the run is still producing evidence (new
+			// files read or written since the last rung), wrap up when it is not.
+			// A run that has stopped touching anything has stopped working, and
+			// that — not an arbitrary turn count — is what ends it.
+			if touched := capture.touchedCount(); touched > progressMark && turnCap < subagentHardCeiling {
+				progressMark = touched
+				turnCap = min(subagentHardCeiling, turnCap+max(2, baseTurns/2))
+				messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "[governor] Run extended: real work is still landing. Keep going while you are making progress; wrap up when the task is done or nothing new is being learned."})
+			} else {
+				wrapUp = true
+				messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Turn budget reached: stop calling tools and return your complete report NOW with everything you found, verified or partial, ending with the STATUS line."})
+			}
 		}
 	}
-	if ceilingHit && result.Status == "done" {
-		// A ceiling-bounded run that still reported is a PARTIAL result, labeled
-		// so the parent (and the benchmark record's ceiling_hit flag) never
-		// mistake bounded coverage for complete coverage.
-		result.Status = "partial (token ceiling)"
+	if windowPressure && result.Status == "done" {
+		// A window-bounded run that still reported is a PARTIAL result, labeled so
+		// the parent (and the benchmark record) never mistake bounded coverage for
+		// complete coverage — and so it dispatches the continuation.
+		result.Status = "partial (context window)"
 	}
 	// Feature 012 R-D4: stamp the terminal shape, then bank the run's context
 	// record (any shape — non-linkable shapes still feed the digest fallback
 	// and diagnostics) and its link-ledger outcome (FR-003/FR-015).
-	result.TerminalShape = terminalShapeFor(result.Status, wrapUp, ceilingHit)
+	result.TerminalShape = terminalShapeFor(result.Status, wrapUp, windowPressure)
 	if e.contextLinkingEnabled() {
 		record := &SubagentContextRecord{
 			RunID: runID, Kind: streamSpec.Name, ModelID: modelID,

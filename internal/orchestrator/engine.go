@@ -12,7 +12,10 @@ import (
 )
 
 const (
-	outputReserveTokens      = 12_000
+	outputReserveTokens = 12_000
+	// hardTurnCeiling is the liveness backstop at MEDIUM effort; the effective
+	// bound scales with the effort profile (see Engine.hardTurnCeiling). Tests
+	// that assert against this constant run at medium, where the two are equal.
 	hardTurnCeiling          = 120
 	maintenanceFloorRatio    = 0.60
 	maintenanceHardFoldRatio = 0.80 // C4: hard fold boundary

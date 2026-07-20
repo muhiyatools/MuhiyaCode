@@ -234,9 +234,10 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		}
 		live := Profile(e.effort())
 		liveBudget := BudgetFor(Assessment{Class: currentClass, Risky: assessment.Risky, ScopeGuard: assessment.ScopeGuard}, live)
-		turnCap = min(hardTurnCeiling, max(turnCap, liveBudget.MaxTurns))
+		ceiling := e.hardTurnCeiling()
+		turnCap = min(ceiling, max(turnCap, liveBudget.MaxTurns))
 		if e.drainSteering(ctx) {
-			turnCap = min(hardTurnCeiling, max(turnCap, turns-1+liveBudget.MaxTurns))
+			turnCap = min(ceiling, max(turnCap, turns-1+liveBudget.MaxTurns))
 			convergeNoted, finalNoted = false, false
 		}
 		// Fold in the executor's writes BEFORE the runway check reads them.
@@ -257,7 +258,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		if turns >= turnCap && len(filesChanged) > 0 && currentClass != ClassEpic {
 			currentClass = EscalateClass(currentClass)
 			bigger := BudgetFor(Assessment{Class: currentClass, Risky: assessment.Risky}, live)
-			turnCap = min(hardTurnCeiling, max(turnCap+6, bigger.MaxTurns))
+			turnCap = min(ceiling, max(turnCap+6, bigger.MaxTurns))
 			convergeNoted, finalNoted = false, false
 			e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[governor] Task outgrew its brief; class=%s and runway extended. Keep going if work remains; otherwise complete, verify once, and report.", currentClass)})
 		}
