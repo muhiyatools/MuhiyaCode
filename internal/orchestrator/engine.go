@@ -230,8 +230,7 @@ type toolOutcome struct {
 	Call   contract.ToolCall
 	Output string
 	Failed bool
-	// Err carries the underlying dispatch error when Failed is true. P2 uses
-	// this to notify the main loop that exit_plan_mode was called.
+	// Err carries the underlying dispatch error when Failed is true.
 	Err error
 }
 

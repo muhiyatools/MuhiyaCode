@@ -61,7 +61,7 @@ var subagentReadOnlyShellNoticeText = Register(Text{
 // loop's cached prefix). Read-only kinds (explore/review) each end with
 // the read-only-shell advance notice (fix b); general's schema is the real
 // workspace-tool registry filtered by its Allowed map, so its Description
-// deliberately does not claim run_subagent/exit_plan_mode/ask_user/
+// deliberately does not claim run_subagent/ask_user/
 // propose_changes — see internal/instructions/audit_test.go's capability-
 // reference check and internal/orchestrator/instructions_wiring_test.go,
 // which wires the real subagentSpecs() allowlists against every Text naming
@@ -74,7 +74,7 @@ const (
 	SubagentReviewSystem      = "Review the diff and surrounding code. Report only verified correctness, security, or reliability issues ranked by severity with file:line and a failure scenario. No style nits; do not edit. " + SubagentReadOnlyShellNoticeBody
 
 	// SubagentGeneralDescription deliberately says only "full-tool" over the
-	// workspace registry — it never names run_subagent, exit_plan_mode,
+	// workspace registry — it never names run_subagent,
 	// ask_user, or propose_changes, none of which are in the general
 	// subagent's real Allowed map (subagent.go subagentSpecs: Allowed is
 	// built from e.registry.Names(), and those four are dispatched only

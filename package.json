@@ -1,6 +1,6 @@
 {
   "name": "muhiyacode",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "description": "MuhiyaCode — an interactive terminal coding agent.",
   "bin": {
     "muhiyacode": "bin/muhiyacode.js"

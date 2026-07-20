@@ -20,7 +20,8 @@ import (
 // pins the exact rendered result). Prior baselines: 3642 (feature 004), 4522
 // (feature 008), 5709 (feature 009), 5789 (feature 010).
 //
-// v1.1.0 (native agent) baseline 5440 against an actual 5428 — twelve chars of
+// v1.1.0 (native agent) baseline 5440 against an actual 5428 in THIS context
+// (HasWeb+HasSubagents; the recorded wire golden composes 5421 without web) —
 // headroom, deliberately tight. It is still BELOW the 5789 it replaced, which
 // is the point: this release ADDED a plan/execute contract, a tasks.md
 // checklist convention, and a PLANNING section, and still ships a smaller

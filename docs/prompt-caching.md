@@ -6,7 +6,8 @@ latest user message. MCP schemas are pinned at the session boundary; a changed M
 is applied at the next deliberate boundary and recorded as an invalidation event.
 
 Use a concrete model such as `deepseek-v4-flash` instead of a router that may choose a different
-backing model per request. Model changes intentionally start a new provider cache scope.
+backing model per request. Model changes intentionally start a new provider cache scope — which is
+why the session's models are frozen once work begins (see "Session-stable models" below).
 
 ## Session routing pin (C1)
 
@@ -21,16 +22,79 @@ The live wire pins (feature 011 D4 per-kind pins; corrected here by feature 012 
 the source of truth):
 
 - Main loop: `<sessionID>:main`
-- Subagent runs, per kind: `<sessionID>:sub:explore`, `:sub:plan`, `:sub:review`, `:sub:general`
+- Subagent runs, per capability class: `<sessionID>:sub:explore`, `:sub:general`, `:sub:review`
 - Onboarding: `<sessionID>:sub:onboarding`
+- Session advisor: `<sessionID>:sub:advisor` (one utility-model call on the session's first
+  prompt; ledgers under the `:sub:advisor` label)
 - Compaction: `<sessionID>:main` on the wire (same `ActiveModelID` as main — shares the routing
   pin) while its usage record ledgers under the `:aux` label — wire pins and ledger pins are not
   1:1 for this stream
 - There is no `:aux` wire pin: task classification is a local heuristic and sends no request
 
+There is no `:sub:plan` pin: v1.1.0 removed the planning pipeline and its dedicated agent kind.
+Planning is now a section of the main model's cached prefix, not a delegated run. The three
+capability classes above are the complete set.
+
 The value is header-only; it is never serialized into the JSON request body. Two consecutive
 requests of the same stream carry an identical header, and the per-kind suffixes keep each
 kind's prefix-cache identity independent.
+
+`run_subagent` accepts an optional `role` ("auth-flow-mapper") that names a run in the transcript,
+but the pin, the per-kind system message, and the context record's `Kind` all stay keyed on the
+fixed capability class. A free-form name is display and handoff only, so it can never fragment the
+provider cache into one namespace per invented role.
+
+## Session-stable models (v1.1.0)
+
+Three roles carry a session: MAIN plans, analyzes, and instructs (default MiniMax M3); EXECUTION
+makes every workspace change from inside subagents (default DeepSeek V4 Pro); UTILITY serves cheap
+auxiliary calls such as the advisor and onboarding (DeepSeek V4 Flash, resolved from the catalog by
+name with a fallback to the configured subagent model). There is no `/model` command and no model
+name in the TUI chrome — the user does not manage models.
+
+The roles are **frozen for the session** once work begins. A mid-session switch would pay twice: it
+cold-starts the main prefix under a new provider cache scope, and it fails the context linker's
+stream-identity check (`model-changed`), collapsing the execution chain to a digest-seeded start.
+Freezing is what lets both the main prefix and the session-long execution chain hold for a whole
+session rather than only until the next model decision.
+
+A session advisor enforces that mechanically. It runs at most once, on the session's first prompt,
+before the first main request — the only moment when a switch is free because nothing is cached
+yet. It runs on the utility model, is bounded to a small JSON answer, and its expected outcome is
+to keep the configured pairing. An unavailable, malformed, or unknown-id answer keeps the
+configured models and records a recovery event. Every later task in the session is a hard no.
+
+Genuinely different large work arriving mid-session gets a one-line advisory that `/new` would give
+it a clean start; nothing switches underneath a warm session. To take manual control,
+`muhiyacode config set model <id>` and `config set subagentModel <id>` pin the roles (the advisor
+proposes, it never overrides an explicit choice), and `config set advisor off` disables it
+entirely. A 24h TTL refresh keeps the gateway model catalog current so the advisor and the
+resolvers are choosing from real entries.
+
+## The cached prefix (v1.1.0 epoch)
+
+The stable prefix is the system prompt plus the serialized tool definitions, composed once per
+session. The v1.1.0 prompt sections are: OPERATING CONTRACT, CONTEXT AND EDIT DISCIPLINE, CACHE
+DISCIPLINE, PLANNING, TOOLS AND RECOVERY, DELEGATION, COMMUNICATION, SAFETY, ENVIRONMENT.
+
+Relative to v1.0.6 this epoch removed the planning-pipeline prose and its tools (`update_plan`,
+`exit_plan_mode`, `read_plan`) and added a plan/execute contract, a `tasks.md` checklist
+convention, and the PLANNING section. It still came out smaller: the system prompt went 5777 →
+5421 chars and the tool JSON 20317 → 18134 bytes. A compile-time ratchet caps the prompt at 5440
+chars and a wire golden pins the exact prefix bytes, so every addition has to be paid for by
+tightening something else.
+
+Two things deliberately stay **out** of the prefix:
+
+- **`tasks.md`** — the model's multi-step checklist lives at the workspace root and is written with
+  ordinary file tools. It changes constantly; injecting it would invalidate the prefix every turn.
+  The harness instead observes writes to that path in the shared dispatch gate (so main-loop and
+  subagent edits both count), re-parses it, and feeds the to-do panel. The model reads it on
+  demand like any other file.
+- **Per-turn dynamics** — date, task class, and budgets still ride the newest user message.
+
+Resumed sessions pay one attributed cold start the first time they run on v1.1.0, then the new
+prefix is byte-stable.
 
 ## Subagent context linking (feature 012)
 
@@ -44,6 +108,27 @@ dispatches of a kind share the cached system+tools prefix. Continuation records 
 change replayed bytes). Every dispatch's link decision, reason, and provider-verified cache
 share appear in the task summary and bench records; `contextLinking=off` restores pre-012
 dispatch behavior exactly.
+
+### The session-long execution chain
+
+CL-1 originally required a relatedness predicate before continuing a chain across task
+boundaries. v1.1.0 drops that bar for the **execution** class only: a `general` dispatch continues
+the session's most recent linkable `general` record across tasks unconditionally, and the decision
+is recorded with reason `session-chain` instead of `eligible`.
+
+The justification is the plan/execute split. The main model no longer changes files, so `general`
+makes every workspace change in the session — the workspace is its shared subject by construction,
+and the session-frozen executor model keeps stream identity intact for the whole session. That is
+what lets one warm sub-agent context survive across prompts rather than being rebuilt per task.
+
+`explore` and `review` keep the relatedness requirement. Research context is topic-specific, and
+carrying an unrelated investigation forward pollutes the reasoning instead of saving tokens.
+
+Every other CL-1 criterion is unchanged and still evaluated in order for a cross-task chain: kind
+pair, terminal shape, model identity, pin derivation, staleness against end-of-run fingerprints,
+window fit, and provider support. Any failure falls back to a digest-seeded start with the failing
+criterion as the reason, exactly as before. The distinct `session-chain` reason exists so the
+ledger and bench JSON can measure cross-task reuse rather than assume it.
 
 ## Maintenance scheduling and the anti-thrash latch (C4)
 

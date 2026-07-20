@@ -1,11 +1,11 @@
 package instructions
 
 // Tool descriptions: the top-level natural-language description shown to
-// the model for each of the 21 tools (12 workspace registry tools wired by
-// internal/workspace/registry.go, all eight synthetic main-loop tools wired by
-// internal/orchestrator's sessionDefinitions — update_plan, ask_user,
-// propose_changes, exit_plan_mode, run_subagent, save_memory, recall_memory,
-// edit_memory — and web_search wired by internal/gateway/web.go). All
+// the model for each live tool (12 workspace registry tools wired by
+// internal/workspace/registry.go, the synthetic main-loop tools wired by
+// internal/orchestrator's sessionDefinitions — ask_user, propose_changes,
+// run_subagent, save_memory, recall_memory, edit_memory — and web_search
+// wired by internal/gateway/web.go). All
 // Prefix-class: they are part of the session-stable tool JSON block.
 //
 // Property-level (per-field) schema description strings — short UI hints
@@ -15,9 +15,9 @@ package instructions
 // exists to run, and registering several dozen one-line hints would dilute
 // the review surface without adding audit value. They stay inline at their
 // call sites in workspace/registry.go and orchestrator/engine.go. The
-// exceptions are the update_plan "note"/"steps[].title" and run_subagent
-// "task" property descriptions, which DO carry format rules the audit must
-// see (IS-4/IS-7) — those are registered below alongside their tool.
+// exceptions are the run_subagent "task" and "role" property descriptions,
+// which DO carry rules the audit must see (IS-4/IS-7) — those are registered
+// below alongside their tool.
 const (
 	ToolListFilesDescription  = "List a directory. Use once to map a workspace."
 	ToolReadFileDescription   = "Read a UTF-8 file with line numbers. Use offset/limit for large files."

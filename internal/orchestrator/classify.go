@@ -56,11 +56,11 @@ var (
 	bulletRE       = regexp.MustCompile(`^\s*([-*]|[0-9]+[.)])\s`)
 	// planRequestRE (P3b): the user is asking the agent to CREATE a plan (not execute
 	// one). Matches "create/make/write/draft a plan", "plan out/first/before", "plan
-	// how to". Routes to the pipeline so the agent proposes a plan and pauses.
+	// how to". Only used to keep such a request out of the chat class.
 	planRequestRE = regexp.MustCompile(`(?i)\b(create|make|write|draft|prepare|design|outline|come up with|need|want|give me)\b[^.!?\n]{0,30}\bplan\b|\bplan\b\s+(this\s+|the\s+|it\s+)?(out|first|before|how)\b|^\s*plan\s+(out|how|the|this)\b`)
 	// planDocRE (P3a): the user is asking to EXECUTE/USE an existing plan document.
 	// Requires a co-occurring .md path (planDocPathRE) so a plain "run the plan" does
-	// not steal a pipeline "proceed"; execution of a named file beats plan-creation.
+	// not steal a plain continuation; execution of a named file beats plan-creation.
 	planDocRE     = regexp.MustCompile(`(?i)\b(execute|run|follow|implement|apply|use|do|start|continue)\b[^.!?\n]{0,70}\bplan\b|\bplan\b[^.!?\n]{0,40}\.md\b`)
 	planDocPathRE = regexp.MustCompile(`(?i)([\w./\\-]+\.md)\b`)
 )
@@ -106,9 +106,9 @@ func Classify(raw string, previous TaskClass) Assessment {
 	breadth := len(breadthRE.FindAllStringIndex(text, 21))
 	// Large escalation requires TWO independent size signals (feature 011 D2/F2):
 	// a single breadth word ("audit", "migrate", "all") or merely naming four
-	// file paths used to force the full pipeline — and with it an unconditional
+	// file paths used to force the heaviest class — and with it an unconditional
 	// review — on prompts that were otherwise ordinary. Corroboration keeps the
-	// full pipeline for genuinely broad work; the review gate is the authoritative
+	// heaviest class for genuinely broad work; the review gate is the authoritative
 	// backstop either way.
 	largeSignals := 0
 	for _, signal := range []bool{len(text) > 1200, breadth > 0, bullets >= 8, paths >= 4} {

@@ -23,14 +23,13 @@ package orchestrator
 //
 //	Gate                         a  b  c  d  e   notes
 //	read-only shell gate         ✓  ✓  ✓  ✓  ✓   arg-position false positives fixed (D1/T031); sync test T034
-//	plan content bar             ✓  ✓  ✓  ✓  ✓   NON-BLOCKING (planbar.go): accepts first call, records gaps
-//	empty-plan structural gate   ✓  ✓  ✓  ✓  ✓   the one hard stop; fix is always mechanical (call update_plan)
-//	update_plan step-cap         ✓  ✓  ✓  ✓  ✓   guide ≤12, accept ≤24 w/ degradation, >24 bounded (D5/T032)
+//	execution role gate          ✓  ✓  ✓  ✓  ✓   v1.1.0: main-loop mutations delegate; escalates after 3 (never repeats one line forever)
+//	continuation review mask     ✓  ✓  ✓  ✓  ✓   R-D2: review continuations carry the implementer's tool array but refuse mutations
 //	repeat limiter               ✓  ✓  ✓  ✓  ✓   blocks a specific repeated call, never the task (T033)
 //	duplicate-read dedupe        ✓  ✓  ✓  n/a ✓   benign optimization (Failed:false), NOT telemetered as friction (T033)
 //	dispatch arg-validation      ✓  ✓  ✓  ✓  ✓   H1: re-emit with well-formed args
 //	failed-call short-circuit    ✓  ✓  ✓  ✓  ✓   H2: change approach; telemetered as gate/repeat-failed-call
-//	plan-mode / pipeline mutation✓  ✓  ✓  ✓  ✓   names the allowed alternative; escalates then holds
+//	subagent budget              ✓  ✓  ✓  ✓  ✓   states remaining allowance; escalates to a closed door
 //	subagent turn-cap            ✓  ✓  ✓  ✓  ✓   forced wrap-up, never a fatal error (INV-3/T035)
 //	H5 failure terminator        ✓  ✓  ✓  ✓  ✓   windowed breaker; clean terminate reason, stats stamped
 //

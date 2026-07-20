@@ -42,10 +42,12 @@ You can also sign in from inside the app with `/login`.
 - **Browser sign-in** — one command, no API keys or endpoints to manage.
 - **Guarded agentic tools** — read, search, exact edits, patches, and shell, with a permission mode you control.
 - **DeepSeek prefix-cache optimized** — byte-stable prompts keep the cache warm across a whole session.
-- **Autonomous goals** — the agent works toward a goal across bounded, self-continuing turns.
-- **Concurrent subagents** — `explore`, `plan`, `review`, and `general` run in parallel for research, planning, and review, each on its own cache pin with optional token ceilings.
-- **Subagent context linking** — a continuation subagent resumes its predecessor's conversation stream, so the provider bills the shared prefix as cache reads instead of re-reading everything from zero; staleness-checked, provider-verified, and visible per dispatch (`contextLinking`: off/default).
-- **Right-sized reviews** — a deterministic gate decides when an automatic review is warranted and at what depth (`review_gating`: off/conservative/default); trivial changes skip with a visible rationale, risk-area changes always review, and explicit review requests always run.
+- **Plan and execute, split** — the main model plans, analyzes, and instructs; every change to your workspace is carried out by an execution sub-agent it dispatches.
+- **A checklist you can read** — for multi-step work the agent keeps a plain `tasks.md` at your workspace root (`- [ ]` lines, ordinary markdown, yours to edit) and the live to-do panel follows it.
+- **Session-stable models** — three roles (main, execution, utility) are settled once at the start of a session and then frozen, so the cache never cold-starts mid-task. Nothing to choose in the UI.
+- **Scoped subagents** — `explore`, `general`, and `review`, each on its own cache pin with optional token ceilings and an optional role name you'll see in the transcript.
+- **Subagent context linking** — a continuation subagent resumes its predecessor's conversation stream, so the provider bills the shared prefix as cache reads instead of re-reading everything from zero; the execution agent keeps one chain for the whole session. Staleness-checked, provider-verified, and visible per dispatch (`contextLinking`: off/default).
+- **Right-sized reviews** — a deterministic gate decides when an automatic review is warranted and at what depth (`reviewGating`: off/conservative/default); trivial changes skip with a visible rationale, risk-area changes always review, and explicit review requests always run.
 - **MCP servers** — stdio and Streamable HTTP, with OAuth and per-tool permissions.
 - **Persistent project memory** — root-local `MEMORY.md` and `MUHIYA.md` travel with your repo.
 
@@ -58,10 +60,8 @@ Commands are typed inside MuhiyaCode (not your shell).
 | `/login` | Sign in through your browser |
 | `/logout` | Sign out and clear the credential |
 | `/usage` | View account usage |
-| `/model` | Choose or refresh models |
 | `/reasoning` (`/effort`) | Set reasoning effort (low–max) |
 | `/permissions` (`/mode`) | Change permission mode |
-| `/goal` | Set an autonomous goal |
 | `/context` | Inspect context usage & model capability |
 | `/compact` | Compact the conversation |
 | `/skills` | Assign skills to the next prompt |
@@ -73,16 +73,37 @@ Commands are typed inside MuhiyaCode (not your shell).
 | `/rewind` | Restore the latest checkpoint |
 | `/errors` | Inspect recent harness events |
 
+## How a task runs
+
+Ask for something and the agent does it — there is no mode to enter and no plan to approve first. What happens under the hood:
+
+- **The main model plans and instructs; it does not edit.** It reads, searches, runs read-only commands, and then hands the actual work to an execution sub-agent. If it tries to change a file itself, a gate stops it and tells it to delegate.
+- **Planning is applied when it's warranted** — genuinely large work, or when you ask for a plan. It recalls what it already knows about the project before designing and saves the durable decisions afterward. If you asked for a plan, the plan *is* the answer: the agent stops there instead of starting to build.
+- **Multi-step work gets a checklist.** The agent writes `tasks.md` at your workspace root as plain markdown and updates it as it goes; the to-do panel reflects it, and a finished task tells you what's still open.
+
 ## Configuration
 
 Signing in sets up your endpoint and credential for you — there's nothing to wire up by hand. Beyond that, tune the agent with `muhiyacode config set <key> <value>` or the matching in-app command:
 
 ```sh
-muhiyacode config set model deepseek-v4-pro    # or /model
 muhiyacode config set effort high              # or /reasoning
 ```
 
+**Models are not something you manage.** Three roles — main (plans), execution (does the work in sub-agents), and utility (cheap auxiliary calls) — are decided once per session and then held fixed, so the models never change out from under a running task. The TUI no longer displays or selects them, and `/model` is gone. On the first prompt of each session a short advisor check either keeps the configured pairing or proposes a better one; from then on the session is frozen. If a later request is a genuinely different piece of large work, you'll get a one-line note that `/new` would give it a clean start.
+
+To take manual control:
+
+```sh
+muhiyacode config set model <model-id>          # pin the main model
+muhiyacode config set subagentModel <model-id>  # pin the execution model
+muhiyacode config set advisor off               # never propose a pairing
+```
+
+Setting either model pins both roles — the advisor proposes, but it never overrides what you asked for.
+
 Settings live under `~/.muhiya` (or `$MUHIYA_HOME`). See [docs/](docs/) for the full reference, including advanced overrides.
+
+The header shows a one-line notice when a newer version is on npm (one cached check per day, silent if it fails). Set `MUHIYACODE_NO_UPDATE_CHECK=1` to turn it off.
 
 ## Documentation
 
