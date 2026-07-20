@@ -296,3 +296,34 @@ func TaskKey(agent, task string) string {
 	}
 	return fmt.Sprintf("%s:%s#%s", agent, string(utf16.Decode(prefix)), strconv.FormatUint(uint64(hash), 36))
 }
+
+// RelatedToSession reports whether a prompt shares scope terms with anything
+// this session has already worked on — banked reports or touched files. It is
+// the cheap, model-free signal behind the fresh-session advisory: a large task
+// with no overlap is probably different work, and a new session would give it
+// a clean model choice and an uncluttered cache.
+//
+// An empty knowledge bank returns true (not related-unknown): with nothing to
+// compare against, the harness must not nag.
+func (k *Knowledge) RelatedToSession(prompt string) bool {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if len(k.facts) == 0 && len(k.files) == 0 {
+		return true
+	}
+	terms := scopeTerms(prompt)
+	if len(terms) == 0 {
+		return true
+	}
+	for _, fact := range k.facts {
+		if termsOverlap(terms, fact.Title+" "+fact.Scope+" "+fact.Text) {
+			return true
+		}
+	}
+	for path := range k.files {
+		if termsOverlap(terms, path) {
+			return true
+		}
+	}
+	return false
+}

@@ -59,6 +59,13 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	assessment := Classify(userPrompt, e.previous)
 	e.previous = assessment.Class
 	budget := BudgetFor(assessment, profile)
+	// The session's models are decided HERE, before the first request, and never
+	// again: a mid-session switch cold-starts the main prefix and breaks the
+	// execution chain's continuation. On every later task this is a no-op, and
+	// the fresh-session advisory takes over for work that has outgrown the
+	// session (it switches nothing and costs no model call).
+	e.runSessionAdvisor(ctx, userPrompt, e.workspaceSignal())
+	e.maybeAdviseFreshSession(assessment, userPrompt)
 	modelPrompt := userPrompt
 	if profile.Onboarding && ShouldConsiderOnboarding(userPrompt) && e.callbacks.Ask != nil {
 		e.callbacks.EmitStatus("Clarifying the task...")

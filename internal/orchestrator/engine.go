@@ -202,7 +202,10 @@ type Engine struct {
 	// taskFilesChanged is the scope-agnostic tally of files this task changed —
 	// the execution agent's writes count exactly like the main loop's would.
 	taskFilesChanged map[string]bool
-	runCounter       int
+	// freshSessionAdvised bounds the "start a new session" advisory to once per
+	// session — it is guidance, not nagging.
+	freshSessionAdvised bool
+	runCounter          int
 	// harnessEvents is the bounded (harnessEventRingCap) in-memory ring of
 	// harness-caused friction events (T010), guarded by taskMu. It backs /errors
 	// and the task-summary friction marker without a DB read; the same events are

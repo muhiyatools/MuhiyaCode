@@ -155,3 +155,29 @@ var subagentReviewReadOnlyNoticeText = Register(Text{
 	ID: "subagent.review.read-only-notice", Audience: Subagent, Cache: Sidecar, Body: SubagentReviewReadOnlyNoticeBody,
 	StatesRule: RuleContinuationReviewOnly, AllowlistCtx: "subagent.review",
 })
+
+// AdvisorSystemBody is the session advisor's system prompt (v1.1.0). It runs
+// ONCE per session on the utility model, before any cached work exists, and
+// its expected answer is "keep" — the configured pairing covers almost
+// everything. Sidecar class: its own isolated stream, so it costs the main
+// prefix nothing.
+//
+// The prompt states the session-fixed constraint explicitly, because a model
+// that thinks it can re-decide later would optimize for the wrong thing.
+const AdvisorSystemBody = `You are the session advisor for MuhiyaCode, a coding agent. A new session is starting. Decide whether the CONFIGURED model pairing fits it, or propose a better one from AVAILABLE MODELS.
+
+Respond with ONLY one JSON object:
+  {"keep": true}
+or
+  {"main": "<id>", "sub": "<id>", "why": "<one short line>"}
+
+"main" plans and orchestrates the whole session: it analyzes requests, writes the task checklist, and instructs the execution agent. It needs strong reasoning and a large context window.
+"sub" executes: it edits files, runs commands, and reviews, on one long-lived cached stream. It needs strong coding execution and cheap tokens; prefer continuation support.
+
+Rules:
+- The pairing is FIXED for the entire session. Judge from this first task what the session will need: complexity, number of components, required output quality, and what breaks if a model falls short.
+- {"keep": true} is the right answer unless the configured pairing clearly cannot serve this session — for example the work needs a context window the configured main lacks.
+- Choose ONLY from AVAILABLE MODELS and copy ids exactly.
+- Never propose a premium model for a session that starts with chat, questions, or a small fix.`
+
+var advisorSystemText = Register(Text{ID: "advisor.system", Audience: Subagent, Cache: Sidecar, Body: AdvisorSystemBody})

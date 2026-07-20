@@ -212,6 +212,11 @@ func engineSettings() contract.Settings {
 	settings.Provider.Models = []contract.Model{{ID: "main", Name: "Test", ContextLimit: 128000}}
 	settings.Effort = contract.EffortMedium
 	settings.PermissionMode = contract.PermissionAutoAccept
+	// The session advisor is off by default in tests: it fires a real provider
+	// request on the first task of a session, which would consume a scripted
+	// response in every fixture that is not about model selection. advisor_test.go
+	// turns it back on explicitly.
+	settings.Provider.Advisor = "off"
 	return settings
 }
 
