@@ -62,7 +62,6 @@ func TestDelegateBatchAnnouncesAllToolStartsUpFront(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			engine.taskAgentCap = 4
 			engine.taskCounters = newCallCounters()
 			calls := make([]contract.ToolCall, len(tc.kinds))
 			for i, kind := range tc.kinds {
@@ -131,7 +130,6 @@ func TestSingleAndMixedBatchesKeepInPlaceToolStarts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.taskAgentCap = 4
 	engine.taskCounters = newCallCounters()
 	calls := []contract.ToolCall{
 		contract.NewToolCall("c1", "read_file", `{"path":"a.txt"}`),

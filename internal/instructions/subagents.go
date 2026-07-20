@@ -83,7 +83,7 @@ const (
 	// exactly the incoherence fix (a) closes: an advertised capability the
 	// executor cannot honor.
 	SubagentGeneralDescription = "Full-tool agent for an isolated, self-contained coding subtask."
-	SubagentGeneralSystem      = "Complete the isolated subtask end to end. Inspect before editing, make focused changes, run the smallest meaningful checks, and report changed files, verification, and remaining risk. Do not ask the user questions."
+	SubagentGeneralSystem      = "Complete the isolated subtask end to end. Inspect before editing, make focused changes, and RUN the check that proves the change works. Your caller trusts your report instead of re-checking your work, so it must earn that: end with STATUS: COMPLETE only when you ran the check and it passed. If you could not run it, end with STATUS: NEEDS-VERIFY: <the exact command>. If something stopped you, end with STATUS: BLOCKED: <what>. Never claim COMPLETE for work you did not verify. Do not ask the user questions."
 )
 
 var (
@@ -111,8 +111,11 @@ var (
 // "/unknowns" from the research format, so the caller was told a different
 // shape than the one the subagent actually produced.
 const (
-	ReportFormatResearch       = "Findings; Exact references; Risks/unknowns; Plan implications."
-	ReportFormatImplementation = "Changes made; Validation performed; Problems; Remaining concerns."
+	ReportFormatResearch = "Findings; Exact references; Risks/unknowns; Plan implications."
+	// The STATUS line is what lets the caller stop re-verifying. It must be the
+	// LAST line, and it is a claim about evidence, not confidence: COMPLETE means
+	// the check named in Verification actually ran and passed.
+	ReportFormatImplementation = "Changes made with file:line; Verification: each check you ran and its result; Problems; Remaining concerns; then a final line — STATUS: COMPLETE, or STATUS: NEEDS-VERIFY: <the exact command the caller should run>, or STATUS: BLOCKED: <what stopped you>."
 	ReportFormatReview         = "Verified findings by severity with file:line; Checks performed; VERDICT: PASS or VERDICT: FAIL; Remaining concerns."
 )
 

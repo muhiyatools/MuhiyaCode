@@ -81,10 +81,12 @@ const ToolRunSubagentDescription = "Run an agent in its own isolated session; on
 	"Example: '" + DelegationTaskExampleBody + "'. " +
 	"Kinds: explore = read-only investigation with grounded findings; " +
 	"review = read-only correctness/security review of changes; general = full-tool execution. " +
-	"The task brief's agents<=N is your allowance."
+	"Scale delegation to the real work — there is no run limit and no reason to pad."
 
-const ToolRunSubagentTaskPropertyDescription = "What the subagent must accomplish. It does not see this conversation — " +
-	"state the deliverable precisely, name the exact paths/symbols in scope, and say what the report must contain. " +
+const ToolRunSubagentTaskPropertyDescription = "What the agent must accomplish. It does not see this conversation and cannot ask you anything, " +
+	"and it runs on a cheaper model — so write it to be EXECUTED, not interpreted: the goal, the exact files and symbols, " +
+	"the specific change in each, the constraints it must not break, and the exact command that proves it worked. " +
+	"Any design decision you leave out is one it will make for you. " +
 	"Research reports use " + ReportFormatResearch + " Implementation reports use " + ReportFormatImplementation + " Review reports use " + ReportFormatReview
 
 var (

@@ -175,11 +175,6 @@ type Engine struct {
 	assemblyProjectChars int
 	taskAgentRuns        int
 	taskAgentReused      int
-	taskAgentCap         int
-	// taskAgentDenied counts run_subagent calls rejected because the budget was
-	// exhausted (or zero). It escalates the denial message so the model stops
-	// retrying and finishes the work directly.
-	taskAgentDenied int
 	// taskUsageStart snapshots sessionUsage at task start. Live Usage callbacks
 	// emit subtractUsage(sessionUsage, taskUsageStart) — the cumulative usage of
 	// EVERY request this task made (main + subagent + aux) — so the activity
@@ -347,11 +342,9 @@ func (e *Engine) resetTaskState(budget Budget) {
 	e.taskMu.Lock()
 	e.taskAgentUsage = contract.Usage{}
 	e.taskAgentRuns, e.taskAgentReused, e.taskDuplicates, e.taskOverBudget = 0, 0, 0, 0
-	e.taskAgentDenied = 0
 	e.taskReviewDecision, e.taskTerminalReads, e.taskRoleBlocks = nil, 0, 0
 	e.taskFilesChanged = nil
 	e.resetLinkTaskState()
-	e.taskAgentCap = budget.MaxAgentRuns
 	e.taskPeakContext = 0
 	e.taskCounters = newCallCounters()
 	e.taskFailures = nil // H5: reset the per-task failure window

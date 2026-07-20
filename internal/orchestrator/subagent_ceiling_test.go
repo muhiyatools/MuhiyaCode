@@ -132,7 +132,6 @@ func TestSubagentOversizedReportReturnsDigestNote(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine.taskAgentCap = 1
 	out, err := engine.runSubagentInput(context.Background(), subagentInput{Agent: "explore", Task: "survey the whole config surface"})
 	if err != nil {
 		t.Fatal(err)

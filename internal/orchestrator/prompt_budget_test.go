@@ -20,14 +20,29 @@ import (
 // pins the exact rendered result). Prior baselines: 3642 (feature 004), 4522
 // (feature 008), 5709 (feature 009), 5789 (feature 010).
 //
-// v1.1.0 (native agent) baseline 5440 against an actual 5428 in THIS context
-// (HasWeb+HasSubagents; the recorded wire golden composes 5421 without web) —
-// headroom, deliberately tight. It is still BELOW the 5789 it replaced, which
-// is the point: this release ADDED a plan/execute contract, a tasks.md
-// checklist convention, and a PLANNING section, and still ships a smaller
-// prompt than the pipeline prose it deleted. The ratchet is a ceiling, so
-// every addition had to be paid for by tightening something else.
-const promptBaselineChars = 5440
+// v1.1.0 (native agent) baseline 5700 against an actual 5685 in THIS context
+// (HasWeb+HasSubagents; the wire golden composes ~14 fewer without web).
+// Fifteen chars of headroom, deliberately tight.
+//
+// This release still ships SMALLER than the 5789 it replaced, while adding a
+// plan/execute contract, a tasks.md convention, a PLANNING section, and the
+// field-test fixes. The +257 over the mid-release 5428 buys exactly two
+// things, both of which stop recurring per-task waste:
+//
+//   - Trust-the-report (rule 5). The field test exposed a CONTRADICTION: the
+//     contract said "run the checks yourself" while DELEGATION said "treat its
+//     report as ground truth", and the model resolved it by re-reading every
+//     file an agent had just verified. A one-time prompt cost that removes a
+//     per-task re-verification loop is the cheapest trade available here.
+//   - The executor-ready standard (PLANNING step 3). Items must be runnable by
+//     a cheaper model without design decisions — that IS the plan/execute
+//     split's payoff, and an under-specified item costs far more in executor
+//     turns than the sentence costs in prefix.
+//
+// Paid for in part by deleting the old rule 5 (duplicated DELEGATION), the
+// agent-allowance clauses, and the handoff detail now stated once in
+// DELEGATION instead of twice.
+const promptBaselineChars = 5700
 
 func TestSystemPromptSizeWithinBudget(t *testing.T) {
 	ctx := PromptContext{

@@ -38,7 +38,7 @@ func TestDelegationSectionContent(t *testing.T) {
 	// extra agents earn a run and insists on chaining to keep the cache warm.
 	for _, want := range []string{
 		"DELEGATION",
-		"agents<=N",                              // brief semantics taught statically
+		"no run limit",                           // budgets are gone; judgment is the limit
 		"executes every workspace change",        // the split, stated positively
 		"Chain each follow-up",                   // continuation is the cheap path
 		"One agent at a time",                    // the serial directive
@@ -85,9 +85,9 @@ func TestRunSubagentDefinitionRichAndDeterministic(t *testing.T) {
 	}
 	// Check the description text pre-marshal (json.Marshal HTML-escapes "<").
 	description := runSubagentDefinition(specs).Function.Description
-	// The 'plan' kind is gone; only the surviving three are asserted. (The
-	// description text itself is rewritten in a later phase.)
-	for _, want := range []string{"Example:", "explore", "review", "general", "agents<=N"} {
+	// The 'plan' kind is gone; only the surviving three are asserted. The
+	// allowance clause is gone too — delegation scale is the model's judgment.
+	for _, want := range []string{"Example:", "explore", "review", "general", "no run limit"} {
 		if !strings.Contains(description, want) {
 			t.Fatalf("run_subagent description missing %q (DG-4)", want)
 		}
@@ -106,13 +106,14 @@ func TestPlanningSkillContent(t *testing.T) {
 	prompt := SystemPrompt(delegationPromptContext())
 	for _, want := range []string{
 		"PLANNING",
-		"or the user asks for a plan",   // explicit-request trigger
-		"not planned",                   // small tasks are executed, not ceremonied
-		"Recall project memory first",   // memory READ
-		"Save the durable decisions",    // memory WRITE — the deep half
-		"never plan against assumption", // grounded in real code
-		"as tasks.md items",             // the plan artifact is the checklist
-		"the plan IS the deliverable",   // plan-only requests stop at the plan
+		"or the user asks for a plan",      // explicit-request trigger
+		"not planned",                      // small tasks are executed, not ceremonied
+		"Recall project memory first",      // memory READ
+		"Save the durable decisions",       // memory WRITE — the deep half
+		"never plan against assumption",    // grounded in real code
+		"INTO tasks.md",                    // the plan is always written, never just spoken
+		"WITHOUT further design decisions", // the executor-ready standard
+		"the file is the deliverable",      // plan-only requests stop at the WRITTEN plan
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("PLANNING section missing %q", want)

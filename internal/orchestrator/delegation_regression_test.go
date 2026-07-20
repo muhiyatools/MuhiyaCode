@@ -70,13 +70,14 @@ func TestNearMissEditLoopIsBounded(t *testing.T) {
 	}
 }
 
-// TestDelegationDenialTextsUnchanged (T013): the budget-denial strings are a
-// compat surface for the model; they must stay byte-identical.
-func TestDelegationDenialTextsUnchanged(t *testing.T) {
-	// A chat-class prompt has agents=0; a run_subagent call must return the
-	// exact zero-budget denial.
+// TestChatTurnDelegationSucceeds (T013, revised v1.1.0): what used to be the
+// zero-budget denial path. A conversational prompt that nonetheless asks for
+// work must be able to dispatch — the denial texts it once pinned are gone,
+// because a refusal there left the agent with no legal action at all.
+func TestChatTurnDelegationSucceeds(t *testing.T) {
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
 		{ToolCalls: []contract.ToolCall{contract.NewToolCall("c1", "run_subagent", `{"agent":"explore","task":"look around"}`)}},
+		{Content: "a report from the explore agent describing what it found in the workspace layout"},
 		{Content: "done"},
 	}}
 	settings := engineSettings()
@@ -85,46 +86,41 @@ func TestDelegationDenialTextsUnchanged(t *testing.T) {
 		Provider: provider, Registry: NewRegistry(),
 		Prompt: PromptContext{},
 	})
-	if _, _, err := engine.Run(context.Background(), "hi"); err != nil {
+	_, stats, err := engine.Run(context.Background(), "hi")
+	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
+	if stats.AgentRuns != 1 {
+		t.Fatalf("a chat-class turn could not delegate: AgentRuns=%d", stats.AgentRuns)
+	}
 	for _, request := range provider.requests {
 		for _, message := range request.Messages {
-			if message.Role == contract.RoleTool && strings.Contains(message.Content, "no subagent budget for this task (agents=0)") {
-				found = true
+			if strings.Contains(message.Content, "no subagent budget") {
+				t.Fatal("a budget denial reached the model")
 			}
 		}
 	}
-	if !found {
-		t.Fatal("zero-budget denial text changed or missing")
-	}
 }
 
-// TestBriefAgentFormatAndClassCaps (T013): the tail brief's agents field format
-// and the per-class caps. v1.1.0 raised tiny/small from 0 to 1: under the
-// plan/execute split the main model cannot mutate files, so a class with no
-// agent budget could never apply its change (see TestEveryMutatingClassCan
-// AffordAnExecutionAgent). Chat stays at 0 — it never touches the workspace.
-func TestBriefAgentFormatAndClassCaps(t *testing.T) {
-	if got := classAgents; got[ClassChat] != 0 || got[ClassTiny] != 1 || got[ClassSmall] != 1 || got[ClassStandard] != 2 || got[ClassLarge] != 5 || got[ClassEpic] != 8 {
-		t.Fatalf("classAgents caps changed: %+v", got)
-	}
-	assessment := Classify("hi", "")
-	budget := BudgetFor(assessment, Profile(contract.EffortMax))
-	if !strings.Contains(budget.Brief, "agents=0 (no run_subagent)") {
-		t.Fatalf("zero-agent brief format changed: %q", budget.Brief)
-	}
-	assessment = Classify("please delegate parts of this refactor across the api and web packages", "")
-	budget = BudgetFor(assessment, Profile(contract.EffortMax))
-	if !strings.Contains(budget.Brief, "agents<=") {
-		t.Fatalf("agents ceiling brief format changed: %q", budget.Brief)
+// TestBriefCarriesNoAgentAllowance (T013, revised v1.1.0): the tail brief no
+// longer advertises an agent count. A cap plus the plan/execute split could
+// starve a turn into having no legal action at all, so delegation scale is now
+// the model's judgment and the brief says nothing about it.
+func TestBriefCarriesNoAgentAllowance(t *testing.T) {
+	for _, prompt := range []string{"hi", "please delegate parts of this refactor across the api and web packages"} {
+		brief := BudgetFor(Classify(prompt, ""), Profile(contract.EffortMax)).Brief
+		if strings.Contains(brief, "agents") {
+			t.Fatalf("brief still carries an agent allowance: %q", brief)
+		}
+		if !strings.Contains(brief, "turns<=") || !strings.Contains(brief, "verify=") {
+			t.Fatalf("brief lost its surviving fields: %q", brief)
+		}
 	}
 }
 
 // TestAutoReviewNudgeFiresOnceAtMax (DG-7): at max effort, a task that changed
-// two files and still has agent allowance gets exactly ONE review rider before
-// finalizing; the rider fits the ~50-token tail budget.
+// two files gets exactly ONE review rider before finalizing; the rider fits the
+// ~50-token tail budget.
 func TestAutoReviewNudgeFiresOnceAtMax(t *testing.T) {
 	// Feature 011: the nudge now consults the review gate first, so the changed
 	// files must be genuinely review-worthy — two auth-path files trip hard rule

@@ -22,7 +22,6 @@ func integrationEngine(t *testing.T, provider *scriptedProvider) *Engine {
 		t.Fatal(err)
 	}
 	engine.taskSeq = 1
-	engine.taskAgentCap = 8
 	return engine
 }
 

@@ -14,8 +14,15 @@ func TestHandoffContractCarriesAllFieldsPerRole(t *testing.T) {
 				t.Fatalf("%s handoff missing %s: %s", agent, field, rendered)
 			}
 		}
-		if agent == "general" && !strings.Contains(rendered, "Changes made; Validation performed; Problems; Remaining concerns") {
-			t.Fatalf("implementation output contract missing: %s", rendered)
+		// v1.1.0: the implementation format ends with a machine-readable STATUS
+		// line — that line is what lets the caller trust the report instead of
+		// re-verifying the work itself.
+		if agent == "general" {
+			for _, want := range []string{"Changes made with file:line", "Verification:", "STATUS: COMPLETE", "STATUS: NEEDS-VERIFY", "STATUS: BLOCKED"} {
+				if !strings.Contains(rendered, want) {
+					t.Fatalf("implementation output contract missing %q: %s", want, rendered)
+				}
+			}
 		}
 	}
 }

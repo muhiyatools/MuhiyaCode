@@ -141,8 +141,10 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		allEvents := e.InvalidationEvents()
 		if eventStart < len(allEvents) {
 			stats.Invalidations = append([]contract.InvalidationEvent(nil), allEvents[eventStart:]...)
-			e.mergeChangedFiles(filesChanged)
 		}
+		// Fold in the execution agent's writes unconditionally: under the
+		// plan/execute split they ARE the task's file changes.
+		e.mergeChangedFiles(filesChanged)
 		for file := range filesChanged {
 			stats.FilesChanged = append(stats.FilesChanged, file)
 		}
@@ -242,11 +244,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			currentClass = EscalateClass(currentClass)
 			bigger := BudgetFor(Assessment{Class: currentClass, Risky: assessment.Risky}, live)
 			turnCap = min(hardTurnCeiling, max(turnCap+6, bigger.MaxTurns))
-			e.taskMu.Lock()
-			if bigger.MaxAgentRuns > e.taskAgentCap {
-				e.taskAgentCap = bigger.MaxAgentRuns
-			}
-			e.taskMu.Unlock()
 			convergeNoted, finalNoted = false, false
 			e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[governor] Task outgrew its brief; class=%s and runway extended once. Complete, verify once, and report.", currentClass)})
 		}
@@ -459,7 +456,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			// Fold in the execution agent's writes: under the plan/execute split
 			// they ARE the task's file changes.
 			e.mergeChangedFiles(filesChanged)
-			if profile.AutoReview && !autoReviewNudged && len(filesChanged) >= 2 && e.taskAgentRuns < e.taskAgentCap {
+			if profile.AutoReview && !autoReviewNudged && len(filesChanged) >= 2 {
 				autoReviewNudged = true
 				// Feature 011 T019: the nudge consults the review gate first — a
 				// trivial two-file change (docs, renames, tiny low-risk edits) no

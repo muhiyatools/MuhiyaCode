@@ -42,24 +42,6 @@ var (
 	gateDuplicateReadText = Register(Text{ID: "gate.duplicate-read", Audience: Gate, Cache: Sidecar, Body: GateDuplicateReadTmpl, EnforcesRule: RuleNoDuplicateRead})
 )
 
-// RuleSubagentBudget is the rule ID for the per-task/per-phase run_subagent
-// allowance.
-const RuleSubagentBudget = "rule.subagent-budget"
-
-const (
-	GateSubagentBudgetExhaustedTmpl = "subagent budget exhausted (%d of %d run(s) used)"
-	GateSubagentBudgetZeroBody      = "no subagent budget for this task (agents=0)"
-	GateSubagentBudgetClosedTmpl    = "%s. run_subagent is closed for the rest of this task and every further call will fail — do NOT call it again. Continue the remaining work directly with your own read/edit tools now"
-	GateSubagentBudgetSoftTmpl      = "%s; complete the remaining work directly with your own tools instead of delegating"
-)
-
-var (
-	gateSubagentBudgetExhaustedText = Register(Text{ID: "gate.subagent-budget.exhausted", Audience: Gate, Cache: Sidecar, Body: GateSubagentBudgetExhaustedTmpl, EnforcesRule: RuleSubagentBudget, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop"})
-	gateSubagentBudgetZeroText      = Register(Text{ID: "gate.subagent-budget.zero", Audience: Gate, Cache: Sidecar, Body: GateSubagentBudgetZeroBody, EnforcesRule: RuleSubagentBudget, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop"})
-	gateSubagentBudgetClosedText    = Register(Text{ID: "gate.subagent-budget.closed", Audience: Gate, Cache: Sidecar, Body: GateSubagentBudgetClosedTmpl, EnforcesRule: RuleSubagentBudget, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop"})
-	gateSubagentBudgetSoftText      = Register(Text{ID: "gate.subagent-budget.soft", Audience: Gate, Cache: Sidecar, Body: GateSubagentBudgetSoftTmpl, EnforcesRule: RuleSubagentBudget, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop"})
-)
-
 // Read-only-agent run_shell rejection (subagent gate; distinct from the
 // main-loop plan-mode variant above because a subagent's readOnly flag
 // gates it directly rather than through the mutation-block lifecycle check).

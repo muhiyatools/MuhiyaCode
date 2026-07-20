@@ -33,7 +33,6 @@ type Budget struct {
 	Risky        bool
 	ToolCalls    int
 	MaxTurns     int
-	MaxAgentRuns int
 	Reasoning    contract.ReasoningTier
 	Verification string
 	Brief        string
@@ -152,12 +151,14 @@ func Classify(raw string, previous TaskClass) Assessment {
 var classToolBase = map[TaskClass]int{ClassChat: 3, ClassTiny: 8, ClassSmall: 15, ClassStandard: 30, ClassLarge: 60, ClassEpic: 100}
 var classTurns = map[TaskClass]int{ClassChat: 6, ClassTiny: 10, ClassSmall: 16, ClassStandard: 26, ClassLarge: 44, ClassEpic: 64}
 
-// classAgents is the per-class subagent allowance. Every class that can
-// involve a workspace change affords at least ONE run: under the plan/execute
-// split the main model cannot mutate files itself, so a tiny/small task with a
-// zero budget would be unfixable — the model would be told to delegate and
-// then denied. Only chat, which never touches the workspace, stays at zero.
-var classAgents = map[TaskClass]int{ClassChat: 0, ClassTiny: 1, ClassSmall: 1, ClassStandard: 2, ClassLarge: 5, ClassEpic: 8}
+// There is deliberately NO per-class subagent allowance. A cap plus the
+// plan/execute split was jointly incoherent: a turn classified as chat got
+// agents=0, the main model is forbidden from mutating files, and the agent
+// was left with no legal action at all — it asked the user to send another
+// message so the next turn might allow work. Delegation scale is now the
+// model's judgment, taught by the DELEGATION section, and bounded by the
+// liveness guards (turn ceiling, failure terminator, repeat limiter) rather
+// than by an arbitrary number.
 var classVerify = map[TaskClass]string{ClassChat: "none", ClassTiny: "targeted", ClassSmall: "targeted", ClassStandard: "standard", ClassLarge: "thorough", ClassEpic: "thorough"}
 var effortScale = map[contract.EffortLevel]float64{contract.EffortLow: .75, contract.EffortMedium: 1, contract.EffortHigh: 1.3, contract.EffortMax: 1.8}
 
@@ -172,7 +173,6 @@ func BudgetFor(a Assessment, effort EffortProfile) Budget {
 		Class: a.Class, Risky: a.Risky,
 		ToolCalls:    int(math.Max(2, math.Round(float64(classToolBase[a.Class])*effortScale[effort.Level]))),
 		MaxTurns:     min(effort.MaxTurns, classTurns[a.Class]),
-		MaxAgentRuns: min(effort.MaxAgentRuns, classAgents[a.Class]),
 		Reasoning:    ReasoningForEffort(effort.Level),
 		Verification: verification,
 	}
@@ -180,9 +180,7 @@ func BudgetFor(a Assessment, effort EffortProfile) Budget {
 	return b
 }
 
-// buildBrief renders the per-task tail brief from a computed budget. Kept as
-// its own function so WithAgentFloor can regenerate the brief after adjusting
-// the agent cap — the advertised budget must always match the enforced one.
+// buildBrief renders the per-task tail brief from a computed budget.
 func buildBrief(b Budget, a Assessment) string {
 	guard := ""
 	if a.ScopeGuard {
@@ -192,16 +190,10 @@ func buildBrief(b Budget, a Assessment) string {
 	if a.Class == ClassChat {
 		done = ""
 	}
-	// A zero budget is stated as an explicit prohibition, not a bare number:
-	// "agents<=0" reads like an estimate, and models kept calling run_subagent
-	// against it and burning turns on guaranteed failures. Kept terse — the
-	// brief rides every user-message tail under a ~50-token budget (SC-004,
-	// request-assembly.md §4), so the small-class brief must stay ≤181 chars.
-	agents := fmt.Sprintf("agents<=%d", b.MaxAgentRuns)
-	if b.MaxAgentRuns <= 0 {
-		agents = "agents=0 (no run_subagent)"
-	}
-	return fmt.Sprintf("[task-brief: date=%s; class=%s; tools~%d; turns<=%d; %s; reasoning=%s; verify=%s;%s%s keep tasks.md current]", time.Now().Format("2006-01-02"), b.Class, b.ToolCalls, b.MaxTurns, agents, b.Reasoning, b.Verification, guard, done)
+	// The brief rides every user-message tail under a ~50-token budget (SC-004,
+	// request-assembly.md §4). It carries no agent count: delegation scale is the
+	// model's judgment, not a number to spend down.
+	return fmt.Sprintf("[task-brief: date=%s; class=%s; tools~%d; turns<=%d; reasoning=%s; verify=%s;%s%s keep tasks.md current]", time.Now().Format("2006-01-02"), b.Class, b.ToolCalls, b.MaxTurns, b.Reasoning, b.Verification, guard, done)
 }
 
 func EscalateClass(value TaskClass) TaskClass {

@@ -161,29 +161,12 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 			return fmt.Sprintf("Subagent %q report (reused; workspace unchanged; zero tokens):\n%s", input.Agent, body), nil
 		}
 	}
+	// No allowance check. A cap here plus the plan/execute split left the model
+	// with no legal action on a chat-classified turn — it could neither edit nor
+	// delegate, and told the user to send another message. Delegation scale is
+	// the model's judgment (taught by DELEGATION); runaway loops are stopped by
+	// the liveness guards, not by a quota.
 	e.taskMu.Lock()
-	limit := e.taskAgentCap
-	used := e.taskAgentRuns
-	if limit <= 0 || used >= limit {
-		e.taskAgentDenied++
-		denied := e.taskAgentDenied
-		e.taskMu.Unlock()
-		// The denial must teach the model to stop delegating: state the reason,
-		// state the only useful next action, and escalate on repeat calls so a
-		// retry loop converges instead of burning turns on a closed door.
-		reason := fmt.Sprintf(instructions.GateSubagentBudgetExhaustedTmpl, used, limit)
-		if limit <= 0 {
-			reason = instructions.GateSubagentBudgetZeroBody
-		}
-		// 004 US3 (T035): when the task has NO subagent budget at all (agents=0),
-		// the door is closed from the very first call — say so immediately instead
-		// of inviting a second attempt. A mid-task exhaustion (limit>0) still gives
-		// the softer message first and escalates only on a repeat.
-		if denied > 1 || limit <= 0 {
-			return "", fmt.Errorf(instructions.GateSubagentBudgetClosedTmpl, reason)
-		}
-		return "", fmt.Errorf(instructions.GateSubagentBudgetSoftTmpl, reason)
-	}
 	e.taskAgentRuns++
 	e.runCounter++
 	runID := fmt.Sprintf("a%d-%x", e.runCounter, time.Now().UnixMilli())
@@ -206,22 +189,12 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 		e.updateTaskReviewOutcome(result.Report)
 	}
 	if e.persistence.AddEvent != nil {
-		summary, _ := json.Marshal(map[string]any{"runId": result.RunID, "agent": result.Agent, "title": result.Title, "status": result.Status, "terminalShape": result.TerminalShape, "turns": result.Turns, "toolCalls": result.ToolCalls, "usage": result.Usage, "task": contract.TruncateEllipsis(input.Task, 2000), "report": contract.TruncateEllipsis(result.Report, 4000)})
+		summary, _ := json.Marshal(map[string]any{"runId": result.RunID, "agent": result.Agent, "title": result.Title, "status": result.Status, "reportStatus": string(parseReportStatus(result.Report)), "terminalShape": result.TerminalShape, "turns": result.Turns, "toolCalls": result.ToolCalls, "usage": result.Usage, "task": contract.TruncateEllipsis(input.Task, 2000), "report": contract.TruncateEllipsis(result.Report, 4000)})
 		_ = e.persistence.AddEvent(ctx, "agent", "run_summary", e.redact(string(summary)), "")
 	}
 	status := ""
 	if result.Status != "done" {
 		status = " [status: " + result.Status + "]"
-	}
-	// Report the remaining budget with every run so the model can track it and
-	// switch to direct work BEFORE hitting the exhaustion error.
-	e.taskMu.Lock()
-	used = e.taskAgentRuns
-	remaining := max(0, e.taskAgentCap-used)
-	e.taskMu.Unlock()
-	budgetNote := fmt.Sprintf("%d subagent run(s) remaining", remaining)
-	if remaining == 0 {
-		budgetNote = "subagent budget now exhausted — do the remaining work directly"
 	}
 	// Full reports are durable in the agent event/knowledge sidecars. Return a
 	// bounded handoff to the parent so phase results do not become a second
@@ -233,7 +206,7 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 	if len(result.Report) > 2200 {
 		truncNote = fmt.Sprintf("\n[digest: %d-char full report banked to knowledge; later phases receive it via their briefing]", len(result.Report))
 	}
-	return fmt.Sprintf("Subagent %q report%s (%d turns, %d tool calls; %s):\n%s%s", result.Agent, status, result.Turns, result.ToolCalls, budgetNote, parentReport, truncNote), nil
+	return fmt.Sprintf("Subagent %q report%s (%d turns, %d tool calls):\n%s%s", result.Agent, status, result.Turns, result.ToolCalls, parentReport, truncNote), nil
 }
 
 // subagentSystemMessage composes the per-kind-per-session STABLE system

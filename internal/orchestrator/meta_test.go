@@ -22,12 +22,9 @@ func TestClassificationAndBudgets(t *testing.T) {
 			t.Errorf("Classify(%q) = %s, want %s", test.prompt, got, test.want)
 		}
 	}
-	// Chat still gets no agents, but reasoning effort is the user's chosen
-	// level sent raw (the gateway maps it per provider) — not capped by class.
+	// Reasoning effort is the user's chosen level sent raw (the gateway maps it
+	// per provider) — not capped by class.
 	budget := BudgetFor(Classify("hi", ""), Profile(contract.EffortMax))
-	if budget.MaxAgentRuns != 0 {
-		t.Fatalf("chat should never run agents: %+v", budget)
-	}
 	if budget.Reasoning != contract.ReasoningMax {
 		t.Fatalf("reasoning effort should pass through the user's level: %+v", budget)
 	}

@@ -125,19 +125,17 @@ func TestRoleGateUnparseableShellFailsClosed(t *testing.T) {
 	}
 }
 
-// The deadlock guard: under the split, a class with a zero agent budget could
-// neither mutate directly nor delegate. Only chat may be zero.
-func TestEveryMutatingClassCanAffordAnExecutionAgent(t *testing.T) {
-	for class, agents := range classAgents {
-		if class == ClassChat {
-			continue
+// TestNoClassCanBeStarvedOfDelegation is the deadlock guard, now proved by
+// construction rather than by arithmetic: under the split the main model
+// cannot mutate, so if ANY class could be denied a dispatch that class would
+// be unfixable. There is no allowance to check — dispatch succeeds for every
+// class, including chat.
+func TestNoClassCanBeStarvedOfDelegation(t *testing.T) {
+	for _, class := range []TaskClass{ClassChat, ClassTiny, ClassSmall, ClassStandard, ClassLarge, ClassEpic} {
+		engine, _ := roleSplitEngine(t)
+		engine.resetTaskState(BudgetFor(Assessment{Class: class}, Profile(contract.EffortLow)))
+		if _, err := engine.runSubagentInput(context.Background(), subagentInput{Agent: "general", Task: "apply the change"}); err != nil {
+			t.Errorf("class %q was denied a dispatch and could never apply a change: %v", class, err)
 		}
-		if agents < 1 {
-			t.Errorf("class %q affords %d subagent runs — under the plan/execute split it could never apply a change", class, agents)
-		}
-	}
-	budget := BudgetFor(Assessment{Class: ClassTiny}, Profile(contract.EffortLow))
-	if budget.MaxAgentRuns < 1 {
-		t.Fatalf("a tiny task at low effort affords %d runs; it must be able to delegate its one change", budget.MaxAgentRuns)
 	}
 }
