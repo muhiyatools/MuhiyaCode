@@ -41,6 +41,7 @@ func IsReadOnlyShell(command string) bool {
 	// prior flat scan blocked them. Destructive FLAGS (--fix, -delete, …) mutate
 	// wherever they appear, so they are checked at every position.
 	for _, segment := range shellCommandSegments(trimmed) {
+		markThroughWrappers(segment)
 		for i, token := range segment {
 			word := token.word
 			if shellDestructiveFlags[word] {
@@ -52,16 +53,125 @@ func IsReadOnlyShell(command string) bool {
 			if !token.commandPos {
 				continue
 			}
-			if shellDestructiveWords[word] {
+			// Normalize before the lookup: `\rm`, `/bin/rm`, and `RM.EXE` are all
+			// the same program, and each of them used to miss the map.
+			program := normalizeCommandWord(word)
+			if shellDestructiveWords[program] {
 				return false
 			}
-			// A mutating git subcommand is destructive only in `git <sub>` position.
-			if word == "git" && i+1 < len(segment) && gitMutatingSubcommands[segment[i+1].word] {
+			// An interpreter handed inline code is an arbitrary command this
+			// classifier cannot see into — the quoted payload is one opaque token
+			// by design, so `bash -c "rm -rf /"` looked like a single harmless
+			// argument. A read-only agent never needs it: it can run the program
+			// directly.
+			if shellInterpreters[program] && hasInlineCodeFlag(segment[i+1:]) {
+				return false
+			}
+			// A mutating git subcommand is destructive only in `git <sub>`
+			// position — but global flags come first, so `git -C . commit` hid
+			// the subcommand from a check that only looked at the next token.
+			if program == "git" && gitMutatingSubcommands[gitSubcommand(segment[i+1:])] {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// normalizeCommandWord reduces a command-position word to the bare program name
+// the destructive-word map is keyed on. A leading backslash (the shell idiom for
+// bypassing an alias), any directory prefix, and a Windows .exe suffix all name
+// the same program and must not be a way past the map.
+func normalizeCommandWord(word string) string {
+	word = strings.TrimPrefix(word, `\`)
+	if index := strings.LastIndexAny(word, `/\`); index >= 0 {
+		word = word[index+1:]
+	}
+	return strings.TrimSuffix(word, ".exe")
+}
+
+// markThroughWrappers re-marks the program a wrapper is about to run as command
+// position. `env rm -rf .`, `sudo rm -rf /`, and `xargs rm -rf` all put the real
+// verb at argument position, where the destructive-word check skips it. Chains
+// resolve naturally: marking a token that is itself a wrapper lets the same loop
+// see through the next one.
+func markThroughWrappers(segment []shellToken) {
+	for i := 0; i < len(segment); i++ {
+		if !segment[i].commandPos || !shellWrapperCommands[normalizeCommandWord(segment[i].word)] {
+			continue
+		}
+		for j := i + 1; j < len(segment); j++ {
+			word := segment[j].word
+			// Skip the wrapper's own flags, its VAR=value assignments (env), and
+			// its numeric arguments (nice 10, timeout 5).
+			if strings.HasPrefix(word, "-") || strings.Contains(word, "=") || isNumericToken(word) {
+				continue
+			}
+			segment[j].commandPos = true
+			break
+		}
+	}
+}
+
+func isNumericToken(word string) bool {
+	if word == "" {
+		return false
+	}
+	for _, r := range word {
+		if (r < '0' || r > '9') && r != '.' && r != 's' && r != 'm' && r != 'h' {
+			return false
+		}
+	}
+	return true
+}
+
+// hasInlineCodeFlag reports whether an interpreter's arguments carry code to
+// execute rather than a file to read.
+func hasInlineCodeFlag(rest []shellToken) bool {
+	for _, token := range rest {
+		switch token.word {
+		case "-c", "-e", "--command", "-command", "/c", "/k", "-encodedcommand", "-enc", "-ec", "-file":
+			return true
+		}
+	}
+	return false
+}
+
+// gitSubcommand finds the real subcommand past git's global flags. `-c` and `-C`
+// take a separate argument; the tokenizer lowercases, so one skip rule covers
+// both spellings.
+func gitSubcommand(rest []shellToken) string {
+	for i := 0; i < len(rest); i++ {
+		word := rest[i].word
+		if !strings.HasPrefix(word, "-") {
+			return word
+		}
+		if word == "-c" {
+			i++
+		}
+	}
+	return ""
+}
+
+// shellWrapperCommands run another program, so the token after them (past their
+// own flags) is the command that actually executes.
+var shellWrapperCommands = map[string]bool{
+	"env": true, "xargs": true, "sudo": true, "doas": true, "nice": true,
+	"nohup": true, "time": true, "timeout": true, "command": true,
+	"builtin": true, "exec": true, "stdbuf": true, "busybox": true, "setsid": true,
+	"watch": true, "script": true,
+}
+
+// shellInterpreters execute code passed inline. Combined with an inline-code
+// flag they are refused for read-only scopes outright: classifying the payload
+// would mean re-implementing a shell parser, and a read-only agent can always
+// invoke the program directly instead.
+var shellInterpreters = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "fish": true,
+	"pwsh": true, "powershell": true, "cmd": true,
+	"node": true, "deno": true, "bun": true,
+	"python": true, "python2": true, "python3": true, "py": true,
+	"perl": true, "ruby": true, "php": true, "lua": true, "tclsh": true,
 }
 
 // shellDestructiveWords are bare command words (or PowerShell cmdlets) that write,
@@ -211,16 +321,22 @@ func shellCommandSegments(command string) [][]shellToken {
 			inSingle = !inSingle
 		case inDouble || inSingle:
 			word.WriteByte(c) // quoted data belongs to the current word
-		case c == '|' || c == ';' || c == '&':
+		// A NEWLINE SEPARATES COMMANDS. It used to sit in the whitespace case
+		// below, which only flushes the word and leaves commandPending false — so
+		// every word after a line break was classified as an ARGUMENT, and the
+		// destructive-word check at IsReadOnlyShell skips arguments. That made
+		// "git status\nrm -rf ." read-only to this classifier while `sh -c` and
+		// `powershell -Command` execute it as two commands.
+		case c == '|' || c == ';' || c == '&' || c == '\n' || c == '\r':
 			flushSegment()
-			if i+1 < len(command) && command[i+1] == c { // consume the second char of && or ||
+			if (c == '|' || c == '&') && i+1 < len(command) && command[i+1] == c { // second char of && or ||
 				i++
 			}
 		case c == '$' || c == '`' || c == '(':
 			// substitution / subshell boundary: the next word is a nested command
 			flushWord()
 			commandPending = true
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ')' || c == '{' || c == '}':
+		case c == ' ' || c == '\t' || c == ')' || c == '{' || c == '}':
 			flushWord()
 		default:
 			word.WriteByte(c)
