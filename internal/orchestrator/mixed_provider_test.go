@@ -53,9 +53,6 @@ func TestMixedProviderRoutingAndPerStreamPrefixAffinity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The test targets stream routing rather than pipeline entry, so start at an
-	// already-approved light implementation phase as a resumed session would.
-	engine.lifecycle = Lifecycle{State: contract.LifecycleImplementing, Depth: PipelineDepthLight, ResearchCompleted: true, PlanWritten: true, Approved: true}
 	if _, _, err := engine.Run(context.Background(), "Inspect a.go with one focused subagent, then report the result."); err != nil {
 		t.Fatal(err)
 	}

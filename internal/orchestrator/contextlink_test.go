@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -253,101 +252,6 @@ func TestPairedCacheShare(t *testing.T) {
 	}
 }
 
-func TestReadPlanTool(t *testing.T) {
-	e := linkTestEngine(t)
-	tool := readPlanTool{engine: e}
-	if out, err := tool.Execute(context.Background(), []byte(`{}`)); err != nil || !strings.Contains(out, "No plan exists yet") {
-		t.Fatalf("empty plan: %q err=%v", out, err)
-	}
-	e.plan = contract.Plan{Steps: []contract.PlanStep{{Title: "step one", Status: contract.PlanPending}}, Note: "Verification: run go test"}
-	full, err := tool.Execute(context.Background(), []byte(`{}`))
-	if err != nil || !strings.Contains(full, "step one") {
-		t.Fatalf("full plan render missing step: %q err=%v", full, err)
-	}
-	steps, err := tool.Execute(context.Background(), []byte(`{"section":"steps"}`))
-	if err != nil || !strings.Contains(steps, "- [ ] step one") || strings.Contains(steps, "Verification") {
-		t.Fatalf("steps section wrong: %q err=%v", steps, err)
-	}
-}
-
-// --- role gate (contracts/role-gate.md RG-6 matrix) ---
-
-func roleGateEngine(t *testing.T) *Engine {
-	e := linkTestEngine(t)
-	e.lifecycle = Lifecycle{State: contract.LifecycleImplementing, Depth: PipelineDepthFull, ResearchCompleted: true, PlanWritten: true, Approved: true}
-	return e
-}
-
-func gateCall(name, args string) contract.ToolCall { return contract.NewToolCall("g1", name, args) }
-
-func TestPhaseReadGateDeniesTwiceThenWaives(t *testing.T) {
-	e := roleGateEngine(t)
-	sc := dispatchScope{counters: newCallCounters(), trackStats: true}
-	call := gateCall("read_file", `{"path":"impl.go"}`)
-	for attempt := 1; attempt <= 2; attempt++ {
-		outcome, blocked := e.phaseReadGate(context.Background(), sc, call, "read_file")
-		if !blocked || !outcome.Failed || !strings.Contains(outcome.Output, "belongs to the implementation subagents") {
-			t.Fatalf("attempt %d must deny with guidance, got blocked=%v %+v", attempt, blocked, outcome)
-		}
-	}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, call, "read_file"); blocked {
-		t.Fatal("third attempt must proceed with a recorded waiver (RG-3) — a gate can never loop")
-	}
-	var stats contract.TaskStats
-	e.finalizeLinkStats(&stats)
-	e.stampReadGateStats(&stats)
-	if stats.ReadGate.Denied != 2 || stats.ReadGate.Waived != 1 {
-		t.Fatalf("stats want denied=2 waived=1, got %+v", stats.ReadGate)
-	}
-}
-
-func TestPhaseReadGateShellReadDeniedGrepPasses(t *testing.T) {
-	e := roleGateEngine(t)
-	sc := dispatchScope{counters: newCallCounters(), trackStats: true}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("run_shell", `{"command":"cat impl.go"}`), "run_shell"); !blocked {
-		t.Fatal("shell cat bypass must be denied (RG-2)")
-	}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("run_shell", `{"command":"go test ./..."}`), "run_shell"); blocked {
-		t.Fatal("non-read shell commands must pass")
-	}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("grep", `{"pattern":"x"}`), "grep"); blocked {
-		t.Fatal("discovery tools must never be gated")
-	}
-}
-
-func TestPhaseReadGateExemptions(t *testing.T) {
-	// Light depth: never gated.
-	e := roleGateEngine(t)
-	e.lifecycle.Depth = "light"
-	sc := dispatchScope{counters: newCallCounters(), trackStats: true}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file"); blocked {
-		t.Fatal("light depth must never gate")
-	}
-	// Degraded phase: exempt.
-	e = roleGateEngine(t)
-	e.lifecycle.Degradations = []LifecycleDegradation{{State: contract.LifecycleImplementing, Reason: "x"}}
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file"); blocked {
-		t.Fatal("degraded phases must be exempt (advance-notice texts promise reads)")
-	}
-	// Post-failure diagnosis: exempt after a failed dispatch.
-	e = roleGateEngine(t)
-	e.markImplementFailureDiagnosis(context.Background())
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file"); blocked {
-		t.Fatal("post-failure diagnosis must be exempt (RG-4)")
-	}
-	// Subagent scopes: never gated.
-	e = roleGateEngine(t)
-	if _, blocked := e.phaseReadGate(context.Background(), dispatchScope{counters: newCallCounters()}, gateCall("read_file", `{"path":"a"}`), "read_file"); blocked {
-		t.Fatal("subagent scopes must never be gated")
-	}
-	// Kill switch: gate disabled with linking off.
-	e = roleGateEngine(t)
-	e.settings.ContextLinking = "off"
-	if _, blocked := e.phaseReadGate(context.Background(), sc, gateCall("read_file", `{"path":"a"}`), "read_file"); blocked {
-		t.Fatal("contextLinking=off must disable the gate (FR-017)")
-	}
-}
-
 func TestParseReportTrailer(t *testing.T) {
 	report := "Changes made: stuff.\nChanged: a.go, b/c.go , none\nVerified: go test ./... green\nCarryForward: the loader now caches\ntrailing prose"
 	changed, verified, carry := parseReportTrailer(report)
@@ -359,33 +263,6 @@ func TestParseReportTrailer(t *testing.T) {
 	}
 	if c, v, cf := parseReportTrailer("plain prose report"); len(c) != 0 || v != "" || cf != "" {
 		t.Fatal("absent trailer must degrade to nothing, never error")
-	}
-}
-
-// TestResearchAutoTransitionsWithoutDispatch pins feature 013: entering an
-// orchestrated pipeline NEVER fans out harness subagents — research passes
-// straight into planning with the investigate-then-plan instruction, and the
-// provider sees zero requests.
-func TestResearchAutoTransitionsWithoutDispatch(t *testing.T) {
-	provider := &scriptedProvider{}
-	settings := engineSettings()
-	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "brief", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine.lifecycle = Lifecycle{State: contract.LifecycleResearch, Depth: PipelineDepthFull}
-	prelude, err := engine.preparePipelinePhase(context.Background(), "extend the calc package with a Multiply function", Budget{MaxAgentRuns: 2}, Profile(contract.EffortMedium))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(prelude, "[pipeline planning]") {
-		t.Fatalf("research must hand the model the planning instruction, got %q", prelude)
-	}
-	if engine.LifecycleState() != contract.LifecyclePlanning {
-		t.Fatalf("research must transition to planning, got %s", engine.LifecycleState())
-	}
-	if len(provider.requests) != 0 {
-		t.Fatalf("the harness must not launch subagents on its own — %d provider requests fired", len(provider.requests))
 	}
 }
 

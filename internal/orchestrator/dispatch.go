@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -120,7 +119,6 @@ type callCounters struct {
 	callCounts        map[string]int
 	failedCalls       map[string]string
 	failedClassCounts map[string]int
-	planViolations    int
 }
 
 func newCallCounters() *callCounters {
@@ -173,7 +171,7 @@ func (e *Engine) mainScope(definitions []contract.ToolDefinition) dispatchScope 
 			if !failed && readonlyTools[name] {
 				e.inspection.Record(call, output)
 			}
-			if isMutation(name) && !errors.Is(dispatchErr, contract.ErrPlanModeExited) {
+			if isMutation(name) {
 				e.history.MarkSuperseded(e.inspection.InvalidateFor(call))
 			}
 		},

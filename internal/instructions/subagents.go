@@ -46,7 +46,7 @@ var readOnlyShellAllowlistText = Register(Text{
 	Body: ReadOnlyShellAllowlistBody, StatesRule: RuleReadOnlyShell, MentionsTools: []string{"run_shell"}, AllowlistCtx: "subagent.read-only",
 })
 
-// SubagentReadOnlyShellNoticeBody is the sentence explore/plan/review
+// SubagentReadOnlyShellNoticeBody is the sentence explore/review
 // subagents' System text appends so the read-only shell rule is stated
 // before any call, not only on rejection.
 const SubagentReadOnlyShellNoticeBody = "Your run_shell only runs read-only commands: " + ReadOnlyShellAllowlistBody
@@ -58,7 +58,7 @@ var subagentReadOnlyShellNoticeText = Register(Text{
 
 // Subagent kind Description + System bodies (Sidecar-class: composed fresh
 // per subagent run into that run's own system message, never the main
-// loop's cached prefix). Read-only kinds (explore/plan/review) each end with
+// loop's cached prefix). Read-only kinds (explore/review) each end with
 // the read-only-shell advance notice (fix b); general's schema is the real
 // workspace-tool registry filtered by its Allowed map, so its Description
 // deliberately does not claim run_subagent/exit_plan_mode/ask_user/
@@ -69,9 +69,6 @@ var subagentReadOnlyShellNoticeText = Register(Text{
 const (
 	SubagentExploreDescription = "Read-only codebase exploration that returns grounded findings."
 	SubagentExploreSystem      = "Explore the requested code paths efficiently. Search first, batch reads, cite exact files and symbols, and report only verified findings. You cannot edit. " + SubagentReadOnlyShellNoticeBody
-
-	SubagentPlanDescription = "Read-only implementation planning grounded in the real code."
-	SubagentPlanSystem      = "Inspect the relevant code, then return an ordered implementation plan with exact files/functions, edge cases, and verification. Do not edit. " + SubagentReadOnlyShellNoticeBody
 
 	SubagentReviewDescription = "Read-only correctness and security review with ranked findings."
 	SubagentReviewSystem      = "Review the diff and surrounding code. Report only verified correctness, security, or reliability issues ranked by severity with file:line and a failure scenario. No style nits; do not edit. " + SubagentReadOnlyShellNoticeBody
@@ -94,11 +91,6 @@ var (
 	subagentExploreSystemText = Register(Text{
 		ID: "subagent.explore.system", Audience: Subagent, Cache: Sidecar, Body: SubagentExploreSystem,
 		StatesRule: RuleReadOnlyShell, MentionsTools: []string{"list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"}, AllowlistCtx: "subagent.explore",
-	})
-	subagentPlanDescText   = Register(Text{ID: "subagent.plan.description", Audience: Subagent, Cache: Sidecar, Body: SubagentPlanDescription})
-	subagentPlanSystemText = Register(Text{
-		ID: "subagent.plan.system", Audience: Subagent, Cache: Sidecar, Body: SubagentPlanSystem,
-		StatesRule: RuleReadOnlyShell, MentionsTools: []string{"list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"}, AllowlistCtx: "subagent.plan",
 	})
 	subagentReviewDescText   = Register(Text{ID: "subagent.review.description", Audience: Subagent, Cache: Sidecar, Body: SubagentReviewDescription})
 	subagentReviewSystemText = Register(Text{
@@ -133,7 +125,7 @@ var (
 // HandoffDeliverable bodies, one per handoff role.
 const (
 	HandoffDeliverableResearch       = "Grounded findings and exact references for the named research scope."
-	HandoffDeliverableImplementation = "Complete the assigned approved plan step(s) without widening scope."
+	HandoffDeliverableImplementation = "Complete the assigned change without widening scope; check off the tasks.md items you finish."
 	HandoffDeliverableReview         = "Independently verify the assigned changes and acceptance checks."
 )
 
@@ -152,3 +144,14 @@ const (
 	HandoffContractHeader        = "HANDOFF CONTRACT"
 	HandoffContractNoOverlapNote = "No predecessor finding overlaps this scope; inspect only the named scope."
 )
+
+// SubagentReviewReadOnlyNoticeBody states the review-only rule in advance
+// (IS-4): a review run never edits, whether it starts fresh or continues an
+// implementer's stream. The gate that refuses mutations inside a review
+// continuation (gate.continuation-review.mutation) enforces exactly this.
+const SubagentReviewReadOnlyNoticeBody = "You review; you never edit. Report verified findings with file:line and end with a VERDICT line."
+
+var subagentReviewReadOnlyNoticeText = Register(Text{
+	ID: "subagent.review.read-only-notice", Audience: Subagent, Cache: Sidecar, Body: SubagentReviewReadOnlyNoticeBody,
+	StatesRule: RuleContinuationReviewOnly, AllowlistCtx: "subagent.review",
+})

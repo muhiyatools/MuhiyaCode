@@ -89,10 +89,6 @@ func SystemPrompt(c PromptContext) string {
 	if c.HasSubagents {
 		agents = fmt.Sprintf(instructions.PromptDelegationOnTemplate, c.SubagentModel)
 	}
-	// Feature 009 records one cache epoch for the static orchestration policy
-	// and the richer run_subagent schema. Phase, verdict, plan, and handoff data
-	// remain dynamic tail/artifact content and never enter this stable prefix.
-	orchestration := instructions.PromptOrchestrationPipelineBody
 	sections := []string{
 		instructions.PromptIdentityBody,
 		instructions.PromptOperatingContractBody,
@@ -100,7 +96,6 @@ func SystemPrompt(c PromptContext) string {
 		instructions.PromptCacheDisciplineBody,
 		instructions.PromptToolsAndRecoveryBody,
 		agents,
-		orchestration,
 		instructions.PromptCommunicationBody,
 		instructions.PromptSafetyBody,
 		fmt.Sprintf(instructions.PromptEnvironmentTemplate, c.Workspace, c.OS, c.Shell, c.Model, c.ModelAddendum, web),

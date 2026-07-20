@@ -29,7 +29,7 @@ func testRuntime(t testing.TB) Runtime {
 	settings.Provider.SubagentModelID = "fast"
 	settings.Provider.Models = []contract.Model{{ID: "main", Name: "Main", ContextLimit: 64000}, {ID: "fast", Name: "Fast", ContextLimit: 32000}}
 	settings.RTL.Mode = "auto"
-	engine, err := orchestrator.NewEngine(orchestrator.EngineConfig{Settings: settings, Provider: inertProvider{}, Registry: orchestrator.NewRegistry(), InitialPlan: contract.Plan{Steps: []contract.PlanStep{{Title: "Inspect", Status: contract.PlanCompleted}, {Title: "Build", Status: contract.PlanInProgress}}}})
+	engine, err := orchestrator.NewEngine(orchestrator.EngineConfig{Settings: settings, Provider: inertProvider{}, Registry: orchestrator.NewRegistry()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,6 +406,9 @@ func TestPromptStyleActivityAndPaste(t *testing.T) {
 	// section) shows the checklist with the in-progress step highlighted (A3,
 	// replacing the old "plan N/M" activity bar).
 	m.busy, m.status = true, "Working…"
+	// The panel reads the tasks.md checklist mirror; seed one open item so the
+	// busy branch has something to render.
+	m.plan = contract.Plan{Steps: todoSteps(contract.PlanCompleted, contract.PlanInProgress, contract.PlanPending)}
 	activity := m.renderActivity()
 	if !strings.Contains(activity, "Working…") {
 		t.Fatalf("activity component missing status:\n%s", activity)
@@ -717,40 +720,6 @@ func TestThinkingTextNeverRenders(t *testing.T) {
 	}
 	if strings.Contains(view, "Ready") {
 		t.Fatal("idle 'Ready' line leaked into the view")
-	}
-}
-
-// TestPlanReadyModalOpensOnStatsMsg (P2) verifies that a task-complete stats
-// message with PlanReady set opens the Proceed now / Proceed later / Keep
-// planning modal, and that the "Proceed later" choice sets the engine's
-// pending-plan flag and clears plan mode.
-func TestPlanReadyModalOpensOnStatsMsg(t *testing.T) {
-	rt := testRuntime(t)
-	rt.Engine.SetLifecycleState(contract.LifecyclePlanning)
-	m := NewModel(Options{Runtime: rt, Version: "test"})
-	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
-	updated, _ := m.Update(statsMsg(contract.TaskStats{PlanReady: true, TaskClass: "plan"}))
-	m = updated.(*Model)
-	if m.modal == nil {
-		t.Fatal("PlanReady stats did not open the proceed modal")
-	}
-	var labels []string
-	for _, c := range m.modal.choices {
-		labels = append(labels, c.Label)
-	}
-	if !strings.Contains(strings.Join(labels, "|"), "Proceed now") || !strings.Contains(strings.Join(labels, "|"), "Proceed later") || !strings.Contains(strings.Join(labels, "|"), "Keep planning") {
-		t.Fatalf("proceed modal choices wrong: %v", labels)
-	}
-	// Select "Proceed later" (index 1) via the modal's onSelect callback and
-	// pump any command. Proceed later sets the pending-plan flag and clears
-	// plan mode without submitting, so the flag must remain set.
-	cmd := m.modal.onSelect(1)
-	m = pump(t, m, cmd, 30)
-	if !m.runtime.Engine.PendingPlan() {
-		t.Fatal("Proceed later did not set the engine pending-plan flag")
-	}
-	if m.runtime.Engine.PlanMode() {
-		t.Fatal("Proceed later did not clear plan mode")
 	}
 }
 

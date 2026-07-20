@@ -89,50 +89,10 @@ func TestStatedInAdvance_EveryEnforcedRuleHasAStatedRule(t *testing.T) {
 		if !stated[tx.EnforcesRule] {
 			t.Errorf("text %q enforces rule %q but no registered text states that rule in advance (IS-4)", tx.ID, tx.EnforcesRule)
 		}
-		// A rule that governs a concrete output format must carry a worked
-		// example somewhere the reader sees before the gate fires.
-		if tx.EnforcesRule == RulePlanStepShape || tx.EnforcesRule == RulePlanNoteShape {
-			if tx.Example == "" && !statesRuleHasExample(texts, tx.EnforcesRule) {
-				t.Errorf("text %q enforces format rule %q with no Example on the gate or on any text that states the rule (IS-4)", tx.ID, tx.EnforcesRule)
-			}
-		}
 	}
-}
-
-func statesRuleHasExample(texts []Text, rule string) bool {
-	for _, tx := range texts {
-		if tx.StatesRule == rule && tx.Example != "" {
-			return true
-		}
-	}
-	return false
 }
 
 // --- IS-5: contradiction / canonical-copy ----------------------------------
-
-// quotedPlanStepExampleRE finds a quoted, plan-step-shaped worked example
-// (an [F#]-citation plus a Verify:/Acceptance: check) embedded in prose —
-// the shape every plan-step example site historically used to show the
-// model. Before feature 010 this matched FOUR distinct literal strings
-// across four files; one of them (the exit_plan_mode content-bar rejection)
-// had silently drifted to a different file/finding/check than the other
-// three.
-var quotedPlanStepExampleRE = regexp.MustCompile(`"([^"]*\[F\d+][^"]*(?:Verify|Acceptance)[^"]*)"`)
-
-func TestCanonicalCopy_PlanStepExampleIsSingleSource(t *testing.T) {
-	seen := map[string]bool{}
-	for _, tx := range All() {
-		for _, match := range quotedPlanStepExampleRE.FindAllStringSubmatch(tx.Body, -1) {
-			seen[match[1]] = true
-			if match[1] != PlanStepExampleBody {
-				t.Errorf("text %q embeds a plan-step example %q that differs from the canonical instructions.PlanStepExampleBody %q (IS-5 canonical-copy)", tx.ID, match[1], PlanStepExampleBody)
-			}
-		}
-	}
-	if !seen[PlanStepExampleBody] {
-		t.Fatal("no registered text embeds the canonical plan-step example; the audit's positive-match assumption is broken")
-	}
-}
 
 // TestCanonicalCopy_ReportFormatFieldListsAreSingleSource guards against the
 // pre-010 drift where run_subagent's tool description paraphrased the
@@ -182,14 +142,13 @@ func TestCanonicalCopy_WriteFilePermissionSentenceIsTokenIdentical(t *testing.T)
 // cross-checks this mirror against the real, live subagentSpecs() output.
 var realAllowlists = map[string]map[string]bool{
 	"main-loop": setOf("list_files", "read_file", "grep", "search_text", "glob", "edit_file", "multi_edit", "write_file",
-		"apply_patch", "run_shell", "git_status", "git_diff", "read_plan", "update_plan", "ask_user", "propose_changes",
-		"save_memory", "recall_memory", "edit_memory", "run_subagent", "exit_plan_mode", "web_search"),
+		"apply_patch", "run_shell", "git_status", "git_diff", "ask_user", "propose_changes",
+		"save_memory", "recall_memory", "edit_memory", "run_subagent", "web_search"),
 	"subagent.general": setOf("list_files", "read_file", "grep", "search_text", "glob", "edit_file", "multi_edit",
-		"write_file", "apply_patch", "run_shell", "git_status", "git_diff", "read_plan", "web_search"),
-	"subagent.explore":   setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell", "read_plan"),
-	"subagent.plan":      setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell", "read_plan"),
-	"subagent.review":    setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell", "read_plan"),
-	"subagent.read-only": setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell", "read_plan"),
+		"write_file", "apply_patch", "run_shell", "git_status", "git_diff", "web_search"),
+	"subagent.explore":   setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"),
+	"subagent.review":    setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"),
+	"subagent.read-only": setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"),
 }
 
 func setOf(names ...string) map[string]bool {
@@ -229,7 +188,7 @@ func TestCapabilityReference_MentionedToolsAreInRealAllowlist(t *testing.T) {
 // dispatches only through registry.Execute, restricted to spec.Allowed,
 // never the main loop's synthetic-tool switch).
 func TestCapabilityReference_GeneralSubagentNeverAdvertisesSyntheticTools(t *testing.T) {
-	forbidden := []string{"run_subagent", "exit_plan_mode", "ask_user", "propose_changes"}
+	forbidden := []string{"run_subagent", "ask_user", "propose_changes"}
 	for _, id := range []string{"subagent.general.description", "subagent.general.system"} {
 		tx, ok := ByID(id)
 		if !ok {
@@ -250,49 +209,6 @@ func TestCapabilityReference_GeneralSubagentNeverAdvertisesSyntheticTools(t *tes
 // an [F#] citation, an Acceptance:/Verify:/Check: label). The mirror is
 // cross-checked against the REAL function in
 // internal/orchestrator/instructions_wiring_test.go.
-var (
-	mirrorPathRE            = regexp.MustCompile(`(?i)(^|[\s"'` + "`" + `(])([\w.-]+[/\\])*[\w.-]+\.(ts|tsx|js|jsx|json|go|py|rb|rs|java|kt|cs|cpp|c|h|css|html|vue|svelte|md|yml|yaml|toml|sql|sh|ps1|env)\b|[\w.-]+[/\\][\w.-]+[/\\][\w/\\.-]+`)
-	mirrorFindingCitationRE = regexp.MustCompile(`(?i)\[f\d+(\s*[,&/+]\s*f?\d+)*]`)
-	mirrorAcceptanceLabelRE = regexp.MustCompile(`(?i)\b(accept|acceptance|verify|check):`)
-)
-
-func mirrorMissingPlanStepRequirements(title string) []string {
-	lower := strings.ToLower(title)
-	var missing []string
-	if !mirrorPathRE.MatchString(title) && !strings.Contains(lower, "function") && !strings.Contains(lower, "package ") && !strings.Contains(lower, "symbol ") {
-		missing = append(missing, "an exact file/function target")
-	}
-	if !mirrorFindingCitationRE.MatchString(title) {
-		missing = append(missing, "a [F#] finding citation")
-	}
-	if !mirrorAcceptanceLabelRE.MatchString(title) {
-		missing = append(missing, "an observable Acceptance:/Verify: check")
-	}
-	return missing
-}
-
-func TestWorkedExample_PlanStepPassesValidator(t *testing.T) {
-	if missing := mirrorMissingPlanStepRequirements(PlanStepExampleBody); len(missing) > 0 {
-		t.Fatalf("ExamplePlanStep %q fails the plan-step validator: missing %v (IS-7)", PlanStepExampleBody, missing)
-	}
-}
-
-// mirrorLabeledPlanSection mirrors pipeline.go's labeledPlanSection: does the
-// note contain a non-empty <label>: section (case-insensitive)?
-func mirrorLabeledPlanSection(note, label string) bool {
-	lower := strings.ToLower(note)
-	start := strings.Index(lower, strings.ToLower(label)+":")
-	return start >= 0 && strings.TrimSpace(note[start+len(label)+1:]) != ""
-}
-
-func TestWorkedExample_PlanNotePassesValidator(t *testing.T) {
-	if !mirrorLabeledPlanSection(PlanNoteExampleBody, "verification") {
-		t.Errorf("ExamplePlanNote is missing a non-empty Verification: section (IS-7): %q", PlanNoteExampleBody)
-	}
-	if !mirrorLabeledPlanSection(PlanNoteExampleBody, "risks") {
-		t.Errorf("ExamplePlanNote is missing a non-empty Risks: section (IS-7): %q", PlanNoteExampleBody)
-	}
-}
 
 // --- IS-8: gate-message quality (terse gates) -------------------------------
 
@@ -316,11 +232,6 @@ func TestGateMessageQuality_TerseGates(t *testing.T) {
 			id:         "gate.duplicate-read",
 			reason:     regexp.MustCompile(`(?i)already in context`),
 			nextAction: regexp.MustCompile(`(?i)use that result`),
-		},
-		{
-			id:         "gate.plan-mode.mutation",
-			reason:     regexp.MustCompile(`(?i)read-only`),
-			nextAction: regexp.MustCompile(`(?i)exit_plan_mode`),
 		},
 	}
 	for _, req := range reqs {

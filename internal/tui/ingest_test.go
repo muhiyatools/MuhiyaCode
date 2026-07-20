@@ -62,8 +62,7 @@ func TestApplyAgentEventKindsUpdateAgentView(t *testing.T) {
 // TestContextPlanAndMCPStatusMessagesUpdateModel (feature 010 US5, WI-7)
 // closes the one real gap the wiring-inventory pass found among the
 // Callbacks members: contract.Callbacks.Context/PlanUpdate/MCPStatus (wired
-// producer-side at internal/orchestrator/contextreport.go:152,
-// phaserunners.go:310, and internal/command/mcp_actions.go:179, and
+// producer-side in internal/orchestrator and internal/command, and
 // translated to a Bubble Tea message by internal/tui/bridge.go's
 // Callbacks()) had no test anywhere driving their consumer half —
 // update.go's contextMsg/planMsg/mcpStatusMsg cases. TaskComplete/statsMsg,

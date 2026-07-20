@@ -14,7 +14,6 @@ import (
 const (
 	outputReserveTokens      = 12_000
 	hardTurnCeiling          = 120
-	maxPlanContinues         = 8
 	maintenanceFloorRatio    = 0.60
 	maintenanceHardFoldRatio = 0.80 // C4: hard fold boundary
 	// maintenanceMinYieldPercent (A1/T008) is the minimum reclaimable yield, as a
@@ -38,19 +37,9 @@ type Persistence struct {
 	AppendTranscript   func(context.Context, map[string]any) error
 	AppendUsage        func(context.Context, contract.UsageRecord) error
 	AppendInvalidation func(context.Context, contract.InvalidationEvent) error
-	WritePlan          func(context.Context, string) error
-	// WriteGoal (G4) persists the active-goal sidecar; ClearGoal removes it.
-	// Both are invoked off the modeMu hot path, serialized by writeMu.
-	WriteGoal func(context.Context, contract.GoalSnapshot) error
-	ClearGoal func(context.Context) error
-	// WritePlanState (P2) persists the plan-mode + pending-plan flags;
-	// ClearPlanState removes the sidecar when both flags go false. Both run
-	// off the modeMu hot path, serialized by writeMu.
-	WritePlanState func(context.Context, contract.PlanStateSnapshot) error
-	ClearPlanState func(context.Context) error
 	// WriteProjectContext (005 US3) atomically persists the typed per-session
-	// project-context sidecar, mirroring WriteGoal/WritePlanState. Used to persist
-	// the applied instruction/memory cursors alongside history growth.
+	// project-context sidecar. Used to persist the applied instruction/memory
+	// cursors alongside history growth.
 	WriteProjectContext func(context.Context, contract.ProjectContextSnapshot) error
 	// WritePrefixShape (Ultimate Polish C3) persists the session-stable prefix shape
 	// so the next resume can attribute a skills/tools/model change vs a silent cold
@@ -83,20 +72,11 @@ type EngineConfig struct {
 	Callbacks            contract.Callbacks
 	Persistence          Persistence
 	Prompt               PromptContext
-	InitialPlan          contract.Plan
 	InitialUsageRecords  []contract.UsageRecord
 	InitialInvalidations []contract.InvalidationEvent
 	BoundaryTools        BoundaryToolSource
 	Rescue               RescueFunc
 	Redact               func(string) string
-	// InitialGoal (G4) restores an active goal from the goal.json sidecar on
-	// session resume. Only snapshots with Status "active" are restored.
-	InitialGoal *contract.GoalSnapshot
-	// InitialPlanState (P2) restores the plan-mode and pending-plan flags from
-	// the plan_state.json sidecar on session resume, so a mid-plan restart or a
-	// saved-but-not-yet-executed plan survives. Plan CONTENT is restored via
-	// InitialPlan (plan.md); this carries only the two flags.
-	InitialPlanState *contract.PlanStateSnapshot
 	// InitialProjectContext restores the boot snapshot and applied hashes on resume.
 	// ProjectContextProbe re-reads the current MUHIYA.md / MEMORY.md at each submit
 	// boundary to decide one-shot tail updates (006). Both optional: nil leaves
@@ -135,37 +115,16 @@ type Engine struct {
 	cancel   context.CancelFunc
 	done     chan struct{}
 	steering []string
-	plan     contract.Plan
-	// supersededPlan preserves the immediately previous plan inside the next
-	// execution-grade artifact so a new pipeline never silently overwrites it.
-	supersededPlan string
-	previous       TaskClass
-	effortMu       sync.RWMutex
+	// checklist mirrors the workspace tasks.md checklist for the to-do panel;
+	// it is parsed from the file whenever a tool call writes it, never authored
+	// by the harness.
+	checklist contract.Plan
+	previous  TaskClass
+	effortMu  sync.RWMutex
 
-	// modeMu is the single mutex owning ALL goal/plan mode state: goal,
-	// lastGoal, planMode, pendingPlan (T004/REV B1). A prior revision split
-	// these across modeMu (setters) and a separate goalMu (loop reads), which
-	// left e.goal guarded by two locks — no mutual exclusion, a real data race
-	// reachable because /goal is allowed while a task runs. One mutex fixes it;
-	// locks are never nested (the mode setters never call the loop-read helpers
-	// while holding modeMu, and vice versa), so there is no deadlock risk.
-	modeMu   sync.Mutex
-	goal     *Goal // active objective; nil when cleared/completed
-	lastGoal *Goal // G2: tombstone of the most recent completed/blocked goal
-	// lifecycle (010 US1) is the SINGLE task-lifecycle state machine. It replaces
-	// planMode, pendingPlan, planPhase, and the pipeline PipelineState (plus their
-	// two phase enums, the verdict reason, and the plan-content-bar strike
-	// counter), so the two machines the 009 audit found can no longer disagree.
-	// All of it lives under modeMu, alongside goal state, for the plan⇄goal
-	// exclusion invariant.
-	lifecycle Lifecycle
-	// writeMu (G4/P2) serializes off-hot-path goal/plan-state sidecar writes so
-	// a slow disk sync never blocks modeMu. restoredGoalNotice and
-	// restoredPlanNotice are set once in NewEngine and surfaced (then cleared)
-	// by RestoredGoalNotice / RestoredPlanNotice.
-	writeMu            sync.Mutex
-	restoredGoalNotice string
-	restoredPlanNotice string
+	// writeMu serializes off-hot-path sidecar writes (project context, prefix
+	// shape, agent records) so a slow disk sync never blocks a task turn.
+	writeMu sync.Mutex
 	// Project-context state (006). These run on the single task goroutine (finalize
 	// + brief composition), so plain reads/writes are race-free; only the sidecar
 	// write in persistProjectCursor takes writeMu, matching the goal/plan-state
@@ -217,7 +176,6 @@ type Engine struct {
 	taskAgentRuns        int
 	taskAgentReused      int
 	taskAgentCap         int
-	taskPhaseAgentRuns   map[contract.LifecycleState]int // 009/010: the unchanged allowance applies per orchestrated lifecycle phase
 	// taskAgentDenied counts run_subagent calls rejected because the budget was
 	// exhausted (or zero). It escalates the denial message so the model stops
 	// retrying and finishes the work directly.
@@ -237,11 +195,7 @@ type Engine struct {
 	// taskTerminalReads counts run_shell invocations that merely read a file
 	// where a dedicated tool sufficed (feature 011 SC-006 violation counter).
 	taskTerminalReads int
-	// taskOversizedPlanRejected bounds the update_plan >hard-max step gate to one
-	// guidance round per task (D5/T032): the second oversized attempt is accepted
-	// rather than rejected again, so steps are never destroyed.
-	taskOversizedPlanRejected bool
-	runCounter                int
+	runCounter        int
 	// harnessEvents is the bounded (harnessEventRingCap) in-memory ring of
 	// harness-caused friction events (T010), guarded by taskMu. It backs /errors
 	// and the task-summary friction marker without a DB read; the same events are
@@ -260,17 +214,6 @@ type Engine struct {
 	agentRecordOrder []string
 	taskLinks        []contract.LinkOutcome
 	taskSeq          int
-	// readGate (feature 012 contracts/role-gate.md) is the per-task state of
-	// the phase-scoped implementation-read gate.
-	readGate readGateState
-}
-
-// readGateState tracks the role gate's per-task outcomes (RG-3/RG-4).
-type readGateState struct {
-	denied      int
-	waived      bool
-	exempt      int
-	postFailure bool
 }
 
 type toolOutcome struct {
@@ -351,7 +294,6 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		callbacks:             config.Callbacks,
 		persistence:           config.Persistence,
 		prompt:                config.Prompt,
-		plan:                  config.InitialPlan,
 		rescue:                config.Rescue,
 		redactFn:              config.Redact,
 		boundaryTools:         config.BoundaryTools,
@@ -383,27 +325,6 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 			ModelID:    config.InitialPrefixShape.ModelID,
 		}
 	}
-	// G4: restore an active goal from the persisted sidecar. Only an active
-	// goal resurrects — completed/blocked goals are intentionally dropped so a
-	// finished objective never re-activates. The restored AutoTurns is reset at
-	// the next task boundary (ResetGoalTaskCounter, G5), so a resumed goal gets
-	// a fresh per-task autonomous budget. Surface a one-shot TUI notice.
-	if config.InitialGoal != nil && config.InitialGoal.Status == string(GoalActive) && strings.TrimSpace(config.InitialGoal.Text) != "" {
-		engine.goal = &Goal{Text: config.InitialGoal.Text, Status: GoalActive, AutoTurns: config.InitialGoal.AutoTurns}
-		engine.restoredGoalNotice = "Restored active goal: " + contract.Digest(config.InitialGoal.Text, 200) + " (/goal clear to drop)"
-	}
-	// 010 US1: restore the unified lifecycle from the migrated sidecar. The
-	// persistence-layer loader (state.MigrateLifecycle, called by the command
-	// layer) has already resolved any legacy shape into the snapshot's canonical
-	// State+depth; restore.go rebuilds the gate facts from the durable plan and
-	// the one-shot resume notice. Plan content was restored via InitialPlan.
-	if config.InitialPlanState != nil {
-		engine.lifecycle, engine.restoredPlanNotice = restoreLifecycle(*config.InitialPlanState, engine.plan)
-	}
-	// Feature 012 R-D7: read_plan serves the session's rendered plan from the
-	// harness (no filesystem path, no outside-workspace prompt), so subagents
-	// can read their phase by reference instead of receiving pasted context.
-	engine.registry.Add(readPlanTool{engine: engine})
 	return engine, nil
 }
 
@@ -416,11 +337,8 @@ func (e *Engine) resetTaskState(budget Budget) {
 	e.taskAgentRuns, e.taskAgentReused, e.taskDuplicates, e.taskOverBudget = 0, 0, 0, 0
 	e.taskAgentDenied = 0
 	e.taskReviewDecision, e.taskTerminalReads = nil, 0
-	e.taskOversizedPlanRejected = false
 	e.resetLinkTaskState()
-	e.resetReadGateState()
 	e.taskAgentCap = budget.MaxAgentRuns
-	e.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
 	e.taskPeakContext = 0
 	e.taskCounters = newCallCounters()
 	e.taskFailures = nil // H5: reset the per-task failure window
@@ -563,10 +481,12 @@ func (e *Engine) InvalidationEvents() []contract.InvalidationEvent {
 	return e.invalidations.Events()
 }
 
-func (e *Engine) CurrentPlan() contract.Plan {
+// CurrentChecklist returns the last parsed tasks.md checklist for the to-do
+// panel. It is empty until a tool call writes the workspace checklist.
+func (e *Engine) CurrentChecklist() contract.Plan {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.plan
+	return e.checklist
 }
 
 func (e *Engine) nextRequestSeq() int {

@@ -233,10 +233,12 @@ func TestHoverMovesCommandSelection(t *testing.T) {
 }
 
 // TestCommandTargetMatchesDrawnRow (US4) is the non-circular geometry check: it
-// renders the real frame, finds the screen row where "/goal" is actually drawn,
-// and asserts the InteractionMap's target for that command sits on the same row.
-// If the map and the pixels ever diverge, a click would miss — this catches it.
+// renders the real frame, finds the screen row where "/context" is actually
+// drawn, and asserts the InteractionMap's target for that command sits on the
+// same row. If the map and the pixels ever diverge, a click would miss — this
+// catches it.
 func TestCommandTargetMatchesDrawnRow(t *testing.T) {
+	const probe = "/context"
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 30})
 	m = updated.(*Model)
@@ -244,20 +246,20 @@ func TestCommandTargetMatchesDrawnRow(t *testing.T) {
 	updated, _ = m.Update(tea.KeyPressMsg{Code: '/', Text: "/"})
 	m = updated.(*Model)
 	content := m.View().Content
-	drawnRow := screenRowContaining(content, "/goal")
+	drawnRow := screenRowContaining(content, probe)
 	if drawnRow < 0 {
-		t.Fatal("/goal was not drawn in the palette")
+		t.Fatalf("%s was not drawn in the palette", probe)
 	}
 	matches := m.commandMatches()
-	goalID := -1
+	probeID := -1
 	for i, c := range matches {
-		if c.name == "/goal" {
-			goalID = i
+		if c.name == probe {
+			probeID = i
 		}
 	}
 	mapped := -1
 	for _, tg := range m.hits.targets {
-		if tg.kind == targetCommandItem && tg.id == goalID {
+		if tg.kind == targetCommandItem && tg.id == probeID {
 			mapped = tg.rect.y
 		}
 	}

@@ -57,7 +57,7 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	args := strings.Fields(value)
 	command := strings.ToLower(args[0])
 	if m.busy {
-		allowed := command == "/reasoning" || command == "/effort" || command == "/goal" || command == "/context" || command == "/errors"
+		allowed := command == "/reasoning" || command == "/effort" || command == "/context" || command == "/errors"
 		if !allowed {
 			m.notify(command + " is unavailable while a task is running. Press Esc to stop it, or send plain text to steer it.")
 			return nil
@@ -97,8 +97,6 @@ func (m *Model) runSlash(value string) tea.Cmd {
 			choices = append(choices, contract.QuestionChoice{Label: string(level), Description: reasoningSummary(level), Recommended: level == m.runtime.Settings.Effort})
 		}
 		m.openChoice("Reasoning effort", "How hard the model thinks. The gateway maps this to each model's thinking level (DeepSeek: low/medium→high, high/max→max).", choices, func(index int) tea.Cmd { return m.setEffort(choices[index].Label) })
-	case "/goal":
-		return m.handleGoalCommand(strings.TrimSpace(strings.TrimPrefix(value, args[0])))
 	case "/permissions", "/mode":
 		if len(args) > 1 {
 			return m.setPermission(contract.PermissionMode(args[1]))
@@ -199,44 +197,6 @@ func reasoningSummary(level contract.EffortLevel) string {
 	default:
 		return ""
 	}
-}
-
-func (m *Model) handleGoalCommand(rest string) tea.Cmd {
-	switch strings.ToLower(rest) {
-	case "", "status":
-		if goal, ok := m.runtime.Engine.GoalSnapshot(); ok {
-			m.openInfo("Active goal", fmt.Sprintf("%s\n\nStatus: %s", goal.Text, goal.Status))
-		} else if last, ok := m.runtime.Engine.LastGoalResult(); ok {
-			m.openInfo("Last goal result", fmt.Sprintf("%s\n\nStatus: %s%s", last.Text, last.Status, suffix(last.Blocked)))
-		} else {
-			m.notify("No active goal. Use /goal <objective> to set one.")
-		}
-	case "clear", "off", "stop", "none", "done":
-		engine := m.runtime.Engine
-		return engineOp(func() { engine.ClearGoal() }, "Goal cleared.")
-	default:
-		// B5/T023: busy-guard setting a goal mid-task. SetGoal flips plan mode
-		// off (G3), so allowing it while a task runs reintroduces the exact
-		// mid-turn mode change P5 guards /plan against. Status and clear stay
-		// allowed while busy (a query is read-only; clearing only removes tail
-		// content next task).
-		if m.busy {
-			m.notify("Cannot set a goal while a task is running.")
-			return nil
-		}
-		// G3 + G6: SetGoal returns a notice when it has to disable plan mode or when
-		// it replaces an active goal. Run off the UI thread (SetGoal does sidecar
-		// disk I/O); the default success notice fills in when it returns none.
-		engine, objective := m.runtime.Engine, rest
-		return func() tea.Msg {
-			notice := engine.SetGoal(objective)
-			if notice == "" {
-				notice = "Goal set — the agent will keep working toward it until it is met."
-			}
-			return engineNoticeMsg{notice: notice}
-		}
-	}
-	return nil
 }
 
 // engineOp runs a void engine mutation in a tea.Cmd goroutine (off the Update

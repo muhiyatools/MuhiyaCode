@@ -142,10 +142,6 @@ func TestAutoReviewNudgeFiresOnceAtMax(t *testing.T) {
 		Provider: provider, Registry: NewRegistry(&recordingTool{name: "write_file"}),
 		Prompt: PromptContext{},
 	})
-	// AutoReview is an implementation-phase guard. Feature 009 would otherwise
-	// consume this intentionally narrow scripted provider in mandatory research;
-	// pin the test at an already-approved light implementation phase.
-	engine.lifecycle = Lifecycle{State: contract.LifecycleImplementing, Depth: PipelineDepthLight, ResearchCompleted: true, PlanWritten: true, Approved: true}
 	// "delegate" keeps the class ≥ standard so the agent cap is non-zero.
 	answer, _, err := engine.Run(context.Background(), "please delegate and update the two config files for the deploy")
 	if err != nil {

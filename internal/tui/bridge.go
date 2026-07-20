@@ -40,9 +40,6 @@ type modalRequest struct {
 // and freezes the whole TUI. The callback instead runs the engine transition
 // in a command goroutine and returns one of these messages, which Update
 // handles back on the UI thread where notify()/submit() are safe.
-type planProceedResultMsg struct{ ok bool }
-type planDeferredMsg struct{}
-type planKeepPlanningMsg struct{ err error }
 
 // Results of engine mutations moved OFF the Update goroutine (T021). The engine's
 // goal/plan mutators do disk sidecar I/O under a lock; running them inline on the

@@ -90,7 +90,7 @@ func (m *Model) handleAction(action actionMsg) tea.Cmd {
 			m.releasePastes()     // US5 T067: and its stashed paste blocks
 			m.resetPaging()       // US1 T020: bump the page generation; cancel stale page loads
 			m.loadEvents(payload.events)
-			m.plan, m.usage = payload.runtime.Engine.CurrentPlan(), payload.runtime.Engine.Usage()
+			m.plan, m.usage = payload.runtime.Engine.CurrentChecklist(), payload.runtime.Engine.Usage()
 			// Show the restored session's real context usage immediately
 			// instead of a blank "context —" until the next model turn.
 			report := payload.runtime.Engine.ContextReport()
@@ -99,17 +99,6 @@ func (m *Model) handleAction(action actionMsg) tea.Cmd {
 			// the previous session's totals never bleed across.
 			m.lastStats = nil
 			m.notify("Session opened: " + payload.runtime.Session.ID)
-			// G4: if the resumed session restored an active goal from its
-			// goal.json sidecar, surface the one-shot notice here too. We are
-			// already inside the payload.runtime.Engine != nil guard above.
-			if restored := payload.runtime.Engine.RestoredGoalNotice(); restored != "" {
-				m.notify(restored)
-			}
-			// P2: surface the restored plan-state notice (plan mode and/or a
-			// pending plan) on a mid-TUI session switch too.
-			if restored := payload.runtime.Engine.RestoredPlanNotice(); restored != "" {
-				m.notify(restored)
-			}
 			// US1 T020: establish the paging cursor for the switched-in session.
 			return m.loadInitialPageCmd()
 		}
@@ -196,46 +185,6 @@ func (m *Model) openText(title, message string, secret bool, onText func(string)
 		return
 	}
 	m.modal = &modalState{title: title, message: message, input: true, secret: secret, onText: onText}
-}
-
-// openPlanReadyModal (P2) opens the Proceed now / Proceed later / Keep planning
-// modal after a plan-ready task. The engine left plan mode on in interactive
-// runs; each choice drives the engine's plan/pending state and either submits
-// (proceed now) or notifies (proceed later / keep planning).
-func (m *Model) openPlanReadyModal() {
-	choices := []contract.QuestionChoice{
-		{Label: "Proceed now", Description: "Execute the approved plan immediately", Recommended: true},
-		{Label: "Proceed later", Description: "Save the plan; say 'proceed' any time to execute it"},
-		{Label: "Keep planning", Description: "Keep refining the plan without editing"},
-		{Label: "Discard plan", Description: "Drop this plan entirely (or say 'discard the plan' any time)"},
-	}
-	m.openChoice("Plan is ready", "The plan is complete. How do you want to proceed?", choices, func(index int) tea.Cmd {
-		// 010 UL-2: one unified path per choice — the engine's lifecycle methods
-		// handle the orchestrated-vs-manual distinction internally, so the TUI no
-		// longer branches on a pipeline-vs-legacy discriminator that could drift.
-		engine := m.runtime.Engine
-		if engine == nil {
-			return nil
-		}
-		// CRITICAL: this callback runs inside Bubble Tea's Update loop. The engine
-		// lifecycle methods below synchronously emit pipeline notices/plan updates
-		// via program.Send on an UNBUFFERED channel, which the Update goroutine is
-		// the sole reader of — calling them here deadlocks the event loop and
-		// freezes the entire terminal. Each branch therefore runs the transition in
-		// a command goroutine and returns a result message; Update performs the
-		// notify()/submit() follow-up back on the UI thread (see update.go).
-		ctx := m.ctx
-		switch index {
-		case 0: // Proceed now — approve and start execution (dead-click guarded inside).
-			return func() tea.Msg { return planProceedResultMsg{ok: engine.ProceedWithPlan(ctx)} }
-		case 1: // Proceed later — save the plan as pending.
-			return func() tea.Msg { engine.DeferPlan(ctx); return planDeferredMsg{} }
-		case 2: // Keep planning — return to the planning state.
-			return func() tea.Msg { return planKeepPlanningMsg{err: engine.KeepPlanning(ctx)} }
-		default: // P2: Discard plan — drop it entirely.
-			return func() tea.Msg { engine.DiscardPlan(); return engineNoticeMsg{notice: "Plan discarded."} }
-		}
-	})
 }
 
 // openOnboarding shows the first-run sign-in modal: a single option that starts

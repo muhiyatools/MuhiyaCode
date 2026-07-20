@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"runtime"
 	"sort"
 	"strings"
@@ -59,55 +58,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	profile := Profile(e.effort())
 	assessment := Classify(userPrompt, e.previous)
 	e.previous = assessment.Class
-	verdict := NeedsPlan(assessment)
-	l := e.Lifecycle()
-	// P2: a natural-language "discard the plan" while a plan is pending/interrupted
-	// drops it and stops — the replacement for /plan clear. Checked before the proceed
-	// route so "forget the plan" never executes it.
-	if l.State.InvitesProceed() && planDiscardRE.MatchString(userPrompt) {
-		e.DiscardPlan()
-		e.callbacks.EmitNotice("Plan discarded.")
-		return e.finalize(ctx, "Discarded the saved plan. Tell me what you'd like to do next."), stats, nil
-	}
-	proceed := continuationRE.MatchString(userPrompt) || planProceedRE.MatchString(userPrompt)
-	// Does this task resume the existing lifecycle rather than re-route? An
-	// orchestrated pipeline mid-flight (research/planning/implementing/validating)
-	// always resumes; a plan-mode execution resumes too; a plan awaiting approval
-	// or saved pending/interrupted resumes only on an explicit proceed/continuation.
-	resume := false
-	switch {
-	case l.Orchestrated() && l.State.IsPipelineResumable():
-		resume = true
-	case l.State == contract.LifecycleImplementing || l.State == contract.LifecycleValidating:
-		resume = true
-	case l.State.IsApprovalPause():
-		resume = proceed
-	case l.State.InvitesProceed():
-		resume = proceed
-	}
-	switch {
-	case resume:
-		// The existing lifecycle drives this task; no re-routing.
-	case verdict.NeedsPlan:
-		e.beginPipeline(ctx, verdict)
-	case !l.Orchestrated() || l.State == contract.LifecycleFinished:
-		e.recordDirectVerdict(ctx, verdict)
-	case l.State.IsApprovalPause():
-		// An unrelated direct task arrived while an orchestrated plan sits at the
-		// approval pause. Park it: the saved plan stays pending and resumable with
-		// "proceed" while this task runs direct — an abandoned approval gate must
-		// never inject its gate text into, or block the edits of, unrelated work.
-		e.parkPipelineForDirectTask(ctx, verdict)
-	}
 	budget := BudgetFor(assessment, profile)
-	// Plan-mode floor: the plan block advertises explore/plan/review subagents,
-	// so a plan-mode task must never carry agents=0 — the model would be told
-	// to delegate and then denied ("budget exhausted (0 run(s))"). One run is
-	// always available for delegated investigation; the brief is rebuilt so the
-	// advertised budget matches the enforced cap.
-	if e.PlanMode() || e.pipelineActive() {
-		budget = budget.WithAgentFloor(1, assessment)
-	}
 	modelPrompt := userPrompt
 	if profile.Onboarding && ShouldConsiderOnboarding(userPrompt) && e.callbacks.Ask != nil {
 		e.callbacks.EmitStatus("Clarifying the task...")
@@ -129,8 +80,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		}
 	}
 	e.resetTaskState(budget)
-	// G5: goal autonomous-continuation budget is per task, not per goal.
-	e.ResetGoalTaskCounter()
 	if err := e.applyBoundaryToolChange(ctx); err != nil {
 		return "", stats, err
 	}
@@ -138,14 +87,14 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	toolCalls, checksRun, turns, folded := 0, 0, 0, 0
 	taskLinesAdded, taskLinesRemoved := 0, 0 // UD-6: Σ diff adds/removes of applied file-changing calls this task
 	doneCriteria := ""
-	planReady := false    // P2: set when a plan-mode task ends via exit_plan_mode or a free-text plan finish
+
 	terminateReason := "" // H5: reason a task was force-finalized (token breaker / failure terminator), surfaced to the TUI as a warn
 	defer func() {
 		// Computed before the taskMu lock below — harnessEventsSince takes taskMu,
 		// and sync.Mutex is not reentrant.
 		_, harnessVisible := e.harnessEventsSince(harnessStart)
 		e.taskMu.Lock()
-		stats = contract.TaskStats{DurationMS: time.Since(started).Milliseconds(), Effort: profile.Level, TaskClass: string(assessment.Class), Usage: subtractUsage(e.sessionUsage, usageStart), AgentUsage: e.taskAgentUsage, PeakContextPercent: e.taskPeakContext, ToolCalls: toolCalls, AgentRuns: e.taskAgentRuns, AgentRunsReused: e.taskAgentReused, Turns: turns, ChecksRun: checksRun, FoldedTokens: folded, DisciplineScore: max(0, 100-min(24, e.taskDuplicates*8)-min(16, e.taskOverBudget*2)), DoneCriteria: doneCriteria, PlanReady: planReady, TerminatedReason: terminateReason, LinesAdded: taskLinesAdded, LinesRemoved: taskLinesRemoved, HarnessEvents: harnessVisible}
+		stats = contract.TaskStats{DurationMS: time.Since(started).Milliseconds(), Effort: profile.Level, TaskClass: string(assessment.Class), Usage: subtractUsage(e.sessionUsage, usageStart), AgentUsage: e.taskAgentUsage, PeakContextPercent: e.taskPeakContext, ToolCalls: toolCalls, AgentRuns: e.taskAgentRuns, AgentRunsReused: e.taskAgentReused, Turns: turns, ChecksRun: checksRun, FoldedTokens: folded, DisciplineScore: max(0, 100-min(24, e.taskDuplicates*8)-min(16, e.taskOverBudget*2)), DoneCriteria: doneCriteria, TerminatedReason: terminateReason, LinesAdded: taskLinesAdded, LinesRemoved: taskLinesRemoved, HarnessEvents: harnessVisible}
 		// UD-6/UD-9 (feature 008): session accumulators for the usage panel —
 		// active time and lines± are session-scoped (reset on resume, labeled
 		// "this session"); API time derives from persisted record durations.
@@ -182,7 +131,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// step still open, resumable). Pre-execution and terminal phases are
 		// untouched, so the plan-ready finalize paths and non-plan tasks never
 		// misfire. Placed here so user-stop, error, and breaker exits stamp too.
-		e.stampPlanCompletionPhase()
 		allEvents := e.InvalidationEvents()
 		if eventStart < len(allEvents) {
 			stats.Invalidations = append([]contract.InvalidationEvent(nil), allEvents[eventStart:]...)
@@ -193,7 +141,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		sort.Strings(stats.FilesChanged)
 		e.finalizeReviewStats(&stats, assessment.Class, filesChanged, taskLinesAdded, taskLinesRemoved)
 		e.finalizeLinkStats(&stats)
-		e.stampReadGateStats(&stats)
 		if e.callbacks.TaskComplete != nil {
 			e.callbacks.TaskComplete(stats)
 		}
@@ -216,70 +163,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	}
 	folded = maintenance.FoldedTokens
 	brief := budget.Brief
-	// P3(a): the user pointed at an existing plan document — teach the model to read
-	// it, mirror it into the to-dos, and execute it (no re-planning). Inline dynamic
-	// tail block (like the goal/breaker nudges), so it never touches the cached prefix.
-	if assessment.PlanDoc {
-		brief = planDocBlock(assessment.PlanDocPath) + "\n" + brief
-	}
-	executingPlanText := ""
-	// P2 step 4: a bare "proceed" (or any continuationRE match) against a saved
-	// pending plan executes it. Inject the persisted plan content into the task
-	// brief (cache-safe — it rides the user-message tail) and clear the flag so
-	// the plan executes exactly once. The plan content is the in-memory plan
-	// (kept in sync with plan.md via update_plan/WritePlan).
-	// 004 US2 (T7): resume a saved plan when the user gives the go-ahead. Fires
-	// for a pending or interrupted plan (the interrupted case resumes a partially
-	// executed plan) and matches both the bare continuation tokens and the wider
-	// "proceed with the plan" phrasing. Step-progress detection (T8) in
-	// updatePlan is the phrasing-independent backstop for anything this misses.
-	if e.LifecycleState().InvitesProceed() {
-		if continuationRE.MatchString(userPrompt) || planProceedRE.MatchString(userPrompt) {
-			e.beginExecution(ctx)
-			planText := e.executionPlanMarkdown(e.CurrentPlan())
-			if strings.TrimSpace(planText) != "" {
-				executingPlanText = planText
-			}
-		}
-	}
-	if pipelinePrelude, pipelineErr := e.preparePipelinePhase(ctx, userPrompt, budget, profile); pipelineErr != nil {
-		return "", stats, pipelineErr
-	} else if strings.TrimSpace(pipelinePrelude) != "" {
-		brief = pipelinePrelude + "\n" + brief
-	}
-	// The legacy "[executing saved plan]" payload serves DIRECT resumes (a
-	// saved plan executed in the main conversation). An orchestrated full-depth
-	// resume never gets it (feature 013): the phase prelude carries the current
-	// instruction and the model reads the plan via read_plan — injecting the
-	// whole plan body would duplicate both and re-ask for completed work once
-	// the pipeline finishes. Light pipelines and manual resumes keep it.
-	pipelineAfterPrepare := e.Lifecycle()
-	if executingPlanText != "" && pipelineAfterPrepare.Depth != PipelineDepthFull {
-		brief = "[executing saved plan]\n" + executingPlanText + "\n" + brief
-	}
-	plan := e.planBlock()
-	goal := e.goalBlock()
-	pipeline := e.pipelineBlock()
-	// C1/T030 + DG2: defensive backstop for the plan/pipeline ⇄ goal exclusion (G3).
-	// The setters keep at most one active, but if a plan OR an orchestration-pipeline
-	// block is somehow live alongside a goal, their instructions contradict (plan/
-	// pipeline: follow the current phase gate, ask to proceed; goal: work
-	// autonomously, end with a marker). The plan/pipeline is the more restrictive
-	// mode, so it wins and the goal block is dropped — this also stops a goal from
-	// silently self-blocking on missing markers mid-pipeline.
-	if (plan != "" || pipeline != "") && goal != "" {
-		log.Printf("[mode] plan/pipeline and goal both active during brief assembly — dropping goal block")
-		goal = ""
-	}
-	if plan != "" {
-		brief = plan + "\n" + brief
-	}
-	if pipeline != "" {
-		brief = pipeline + "\n" + brief
-	}
-	if goal != "" {
-		brief = goal + "\n" + brief
-	}
 	// 005 US3 / 006: append one-shot project-context updates to the newest user tail
 	// in canonical order (instructions-update, then memory-update, above the goal/
 	// plan blocks and below the user's text). Baked into the message BEFORE first
@@ -329,7 +212,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	currentClass := assessment.Class
 	turnCap := budget.MaxTurns
 	escalated, convergeNoted, finalNoted := false, false, false
-	sawToolCall, emptyFinalRetries, planContinues, consecutiveFailures := false, 0, 0, 0
+	sawToolCall, emptyFinalRetries, consecutiveFailures := false, 0, 0
 	intentFinalRetries := 0   // FR-004b: bounded retries when a turn narrates an action without calling a tool
 	autoReviewNudged := false // DG-7: the max-effort review nudge fires at most once per task
 	allFailedTurnStreak := 0  // B7: consecutive turns where EVERY tool call failed (reset at Run start via this local)
@@ -531,19 +414,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				}
 				continue
 			}
-			// G1/T020: scan the goal marker on the FINAL governed turn too. Without
-			// this, a [goal:complete] / [goal:blocked] emitted on the last allowed
-			// turn is dropped and the goal wrongly stays active into the next task.
-			if e.scanGoalMarker(assistantText) {
-				e.clearGoalSidecar()
-			}
-			// P2 belt-and-suspenders: a plan-mode task that hit the turn cap
-			// with a plan in place is also plan-ready (the model may have
-			// free-text asked to proceed instead of calling exit_plan_mode).
-			e.maybeSignalPlanReady(&planReady)
-			if e.pipelineActive() && e.LifecycleState() != contract.LifecycleFinished && !planReady {
-				e.SetLifecycleState(contract.LifecycleInterrupted)
-			}
 			return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
 		}
 		if len(calls) == 0 {
@@ -573,62 +443,12 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[continue] You announced the next action but made no tool call. Make that tool call now, or give the final result instead."})
 				continue
 			}
-			// Fault-injection finding (010 US2/FI-13): this nudge must only fire
-			// while a plan is actually being EXECUTED (LifecycleImplementing) —
-			// mirroring the LifecycleValidating scope its sibling check uses
-			// immediately below. Before this guard it fired for ANY non-empty
-			// e.plan.Steps regardless of lifecycle state, so a plan that was
-			// discarded (DiscardPlan clears lifecycle.State/Depth but not
-			// e.plan) or parked for an unrelated task (parkPipelineForDirectTask,
-			// same) left stale pending steps that hijacked every later plain-text
-			// reply with "finish your incomplete plan" for up to maxPlanContinues
-			// turns — live incidents this pinned catalog row now guards.
-			if l := e.Lifecycle(); l.State == contract.LifecycleImplementing && e.hasIncompletePlan() && planContinues < maxPlanContinues {
-				planContinues++
-				turnCap = min(hardTurnCeiling, max(turnCap, turns+8))
-				if trimmed != "" {
-					_ = e.persistAssistant(ctx, trimmed)
-				}
-				e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[continue] Your plan has incomplete steps. Do not ask whether to continue; finish them now, or mark completed steps and give the final summary."})
-				continue
-			}
-			if l := e.Lifecycle(); l.State == contract.LifecycleValidating && !l.Validated && planContinues < maxPlanContinues {
-				planContinues++
-				turnCap = min(hardTurnCeiling, max(turnCap, turns+6))
-				if trimmed != "" {
-					_ = e.persistAssistant(ctx, trimmed)
-				}
-				e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[validation gate] Completion is blocked until validation is confirmed. Run the plan's verification command(s), address any findings, and keep the plan complete."})
-				continue
-			}
-			// An active goal keeps the agent working autonomously until it emits
-			// a completion or blocked marker (or hits the auto-turn cap).
-			// G1/G5: also scan the marker here so a [goal:complete] / blocked
-			// marker on the final assistant text terminates the task even when
-			// the auto-continue logic below would otherwise force a continue.
-			if e.scanGoalMarker(trimmed) {
-				// G4: a terminal marker cleared the active goal — drop the sidecar
-				// so it does not resurrect on resume.
-				e.clearGoalSidecar()
-			}
-			if next := e.advanceGoal(trimmed, false); next != "" {
-				turnCap = min(hardTurnCeiling, max(turnCap, turns+8))
-				if trimmed != "" {
-					_ = e.persistAssistant(ctx, trimmed)
-				}
-				e.history.Append(contract.Message{Role: contract.RoleUser, Content: next})
-				continue
-			}
-			// G4: advanceGoal returns "" when the goal ended via the idle/cap
-			// guards too — drop the sidecar before finalizing so the finished
-			// goal does not resurrect. Idempotent with the scanGoalMarker clear.
-			e.clearGoalSidecar()
 			// DG-7 (feature 008): AutoReview — at max effort, when substantial
 			// file-changing work is about to finalize with agent allowance left,
 			// nudge ONCE for an independent review pass. A dynamic tail rider
-			// (never prefix), fired at most once per task, skipped in plan mode
-			// (read-only) and when nothing meaningful changed.
-			if profile.AutoReview && !autoReviewNudged && !e.PlanMode() && len(filesChanged) >= 2 && e.taskAgentRuns < e.taskAgentCap {
+			// (never prefix), fired at most once per task, skipped when nothing
+			// meaningful changed.
+			if profile.AutoReview && !autoReviewNudged && len(filesChanged) >= 2 && e.taskAgentRuns < e.taskAgentCap {
 				autoReviewNudged = true
 				// Feature 011 T019: the nudge consults the review gate first — a
 				// trivial two-file change (docs, renames, tiny low-risk edits) no
@@ -646,25 +466,11 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 					continue
 				}
 			}
-			// P2 belt-and-suspenders: a plan-mode task that ended with free
-			// text (no exit_plan_mode) and a plan in place is plan-ready.
-			e.maybeSignalPlanReady(&planReady)
 			return e.finalize(ctx, fallbackAnswer(trimmed, filesChanged)), stats, nil
 		}
 
 		sawToolCall = true
 		e.countTerminalReadCalls(calls) // feature 011 SC-006 violation counter
-		// G1: also scan the goal marker on text accompanying tool calls. Without
-		// this, [goal:complete] emitted in the same turn as a tool call is dropped.
-		if e.scanGoalMarker(assistantText) {
-			// G4: a terminal marker on a tool-call turn clears the sidecar too.
-			e.clearGoalSidecar()
-		} else {
-			// B4: a turn that made tool calls is forward motion — reset the
-			// consecutive-idle counter so it never accumulates across productive
-			// turns.
-			e.markGoalToolProgress()
-		}
 		if strings.TrimSpace(assistantText) != "" {
 			if err := e.persistMessage(ctx, "assistant", "message", assistantText, "", map[string]any{"role": "assistant", "content": assistantText, "createdAt": time.Now().UTC().Format(time.RFC3339Nano)}); err != nil {
 				return "", stats, err
@@ -672,21 +478,9 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		}
 		e.history.Append(assistantReplayMessage(response, assistantText, calls))
 		outcomes := e.executeBatch(ctx, calls, definitions, live)
-		planExited := false
 		for _, outcome := range outcomes {
 			toolCalls++
-			// P2: exit_plan_mode surfaces a sentinel so we can break out of the turn
-			// loop without polluting the assistant text with a fake result. We still
-			// record the (sentinel) outcome for context fidelity and finalize.
-			if errors.Is(outcome.Err, contract.ErrPlanModeExited) {
-				// T018/REV B2b: mark plan-ready but DO NOT early-return here. Every
-				// announced tool_call in this batch must still receive a tool result
-				// below, or the persisted history holds an assistant tool_calls turn
-				// with fewer results than calls — a malformed sequence the provider
-				// rejects (400) on the next request. The exit sentinel is not a real
-				// failure; the finalize happens AFTER the loop appends every result.
-				planExited = true
-			} else if outcome.Failed {
+			if outcome.Failed {
 				consecutiveFailures++
 				// H5: record the failed call's turn in the sliding window for the
 				// distinct-failure terminator. The windowed count (not the
@@ -699,10 +493,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			}
 			if isCheckCall(outcome.Call) && !outcome.Failed {
 				checksRun++
-				l := e.Lifecycle()
-				if (l.State == contract.LifecycleValidating && !e.hasIncompletePlan()) || (l.State == contract.LifecycleImplementing && l.Depth == PipelineDepthLight) {
-					_ = e.ConfirmPipelineValidation(ctx, "successful main-loop verification command")
-				}
 			}
 			trackChanged(outcome, filesChanged)
 			// UD-6 (feature 008): accumulate lines± from applied (successful)
@@ -724,20 +514,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				return "", stats, err
 			}
 			e.history.Append(contract.Message{Role: contract.RoleTool, ToolCallID: outcome.Call.ID, Content: outcome.Output})
-		}
-		if planExited {
-			// All tool results for this batch are appended, so the assistant/tool
-			// pairing is well-formed. P2: signal plan-ready so the TUI opens the
-			// Proceed now / Proceed later / Keep planning modal. Interactive runs
-			// (TaskComplete wired) leave plan mode ON for the modal; one-shot runs
-			// resolve to proceed-later so a later "proceed" executes the saved plan.
-			planReady = true
-			e.SetLifecycleState(contract.LifecycleApproval) // 004 US2 (T2): plan ready for a decision
-			if e.callbacks.TaskComplete == nil {
-				e.SetLifecycleState(contract.LifecyclePending) // T6: one-shot resolves to proceed-later
-				return e.finalize(ctx, "Plan ready — saved. Say 'proceed' (or 'go ahead') to execute it."), stats, nil
-			}
-			return e.finalize(ctx, "Plan ready — awaiting Proceed now / Proceed later / Keep planning."), stats, nil
 		}
 		// B7: all-failed-turns detector. A turn in which EVERY tool call failed is
 		// a strong loop signal the per-call storm breaker can miss (e.g. the model

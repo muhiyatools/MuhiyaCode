@@ -272,9 +272,15 @@ func (m *Model) renderAgentChip(agent *agentView, width int) string {
 		titleStyle = titleStyle.Underline(true)
 	}
 	line := fmt.Sprintf("%s [%d] %s", marker, agent.index, titleStyle.Render(agent.title))
-	identity := agent.agent
-	if agent.phase != "" && agent.phase != string(contract.LifecycleDirect) {
-		identity = agent.phase + "/" + agent.role
+	// The chip shows the agent's role in this task, never the internal kind
+	// string: the model names each dispatch, and the free-form title is the
+	// fallback when it did not.
+	identity := agent.role
+	if identity == "" {
+		identity = agent.title
+	}
+	if identity == "" {
+		identity = agent.agent
 	}
 	label := identity + " · " + agent.status
 	if agent.model != "" {

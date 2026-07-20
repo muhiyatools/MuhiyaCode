@@ -14,12 +14,8 @@ import (
 // by adding or removing schemas.
 func (e *Engine) sessionDefinitions() []contract.ToolDefinition {
 	definitions := e.registry.BaseDefinitions(nil)
-	definitions = append(definitions, updatePlanDefinition(), askUserDefinition(), proposeChangesDefinition(), saveMemoryDefinition(), recallMemoryDefinition(), editMemoryDefinition())
+	definitions = append(definitions, askUserDefinition(), proposeChangesDefinition(), saveMemoryDefinition(), recallMemoryDefinition(), editMemoryDefinition())
 	definitions = append(definitions, runSubagentDefinition(e.subagentSpecs()))
-	// P2: exit_plan_mode lives in the byte-stable tool block regardless of
-	// plan-mode state, so toggling plan mode never changes the schema set
-	// (preserves the prime invariant — the cached prefix stays put).
-	definitions = append(definitions, exitPlanModeDefinition())
 	definitions = append(definitions, e.registry.MCPDefinitions(nil)...)
 	return definitions
 }
@@ -33,16 +29,6 @@ func (e *Engine) sessionDefinitions() []contract.ToolDefinition {
 // removed) is reflected here automatically, with no second place to update.
 func (e *Engine) SessionToolNames() []string {
 	return toolNames(e.sessionDefinitions())
-}
-
-func exitPlanModeDefinition() contract.ToolDefinition {
-	return definition("exit_plan_mode", instructions.ToolExitPlanModeDescription, map[string]any{
-		"summary": map[string]any{"type": "string", "description": "One-paragraph recap of the approved plan."},
-	}, []string{"summary"})
-}
-
-func updatePlanDefinition() contract.ToolDefinition {
-	return definition("update_plan", instructions.ToolUpdatePlanDescription, map[string]any{"steps": map[string]any{"type": "array", "minItems": 1, "maxItems": 12, "items": map[string]any{"type": "object", "properties": map[string]any{"title": map[string]any{"type": "string", "description": instructions.ToolUpdatePlanStepTitlePropertyDescription}, "status": map[string]any{"type": "string", "enum": []string{"pending", "in_progress", "completed"}}}, "required": []string{"title", "status"}}}, "note": map[string]any{"type": "string", "description": instructions.ToolUpdatePlanNotePropertyDescription}}, []string{"steps"})
 }
 
 func askUserDefinition() contract.ToolDefinition {

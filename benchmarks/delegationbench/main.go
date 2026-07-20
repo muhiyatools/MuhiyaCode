@@ -298,15 +298,9 @@ func executeOne(opts options, workload workloadSpec, sourcePaths state.Paths, se
 	defer app.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), opts.timeout)
+	// The two-step plan-approve flow is gone with the planning pipeline: a task
+	// now runs to completion in one Run (the model delegates execution itself).
 	answer, stats, runErr := app.Runtime().Engine.Run(ctx, workload.Prompt)
-	if runErr == nil && stats.PlanReady && opts.workload == "delegation" {
-		implementationAnswer, implementationStats, implementationErr := app.Runtime().Engine.Run(ctx, "proceed")
-		stats = combineBenchmarkStats(stats, implementationStats)
-		if strings.TrimSpace(implementationAnswer) != "" {
-			answer = implementationAnswer
-		}
-		runErr = implementationErr
-	}
 	cancel()
 	result.Answer = answer
 	if runErr != nil {

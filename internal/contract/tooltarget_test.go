@@ -33,7 +33,7 @@ func TestToolTarget(t *testing.T) {
 		{"subagent title", "run_subagent", `{"agent":"explore","title":"scan auth"}`, "scan auth"},
 		{"apply_patch derives from diff", "apply_patch", `{"patch":"--- a/f.go\n+++ b/f.go\n@@ -1 +1 @@\n-a\n+b\n"}`, "f.go"},
 		{"apply_patch garbage is empty", "apply_patch", `{"patch":"garbage"}`, ""},
-		{"no target field", "update_plan", `{"steps":[]}`, ""},
+		{"no target field", "list_directory", `{"depth":2}`, ""},
 		{"malformed json is empty", "read_file", `{not json`, ""},
 		{"empty string field ignored", "read_file", `{"path":""}`, ""},
 	}

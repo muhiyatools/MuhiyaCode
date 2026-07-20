@@ -446,29 +446,6 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	subagent, _ := state.SubagentModel(*a.settings)
 	profile := gateway.ResolveModelProfile(active.ID + " " + active.Name)
 	shell, _ := workspace.ChooseShell(a.settings.Shell.Preferred)
-	planText, _ := a.sessions.ReadPlan(session.ID)
-	initialPlan := parsePlan(planText)
-	// G4: restore an active goal from the per-session goal.json sidecar.
-	// Only an active goal resurrects; completed/blocked goals are dropped so a
-	// finished objective never re-activates. The engine surfaces a one-shot
-	// notice (RestoredGoalNotice) for the TUI to display.
-	var initialGoal *contract.GoalSnapshot
-	if snapshot, ok, _ := a.sessions.ReadGoal(session.ID); ok && snapshot.Status == string(orchestrator.GoalActive) && strings.TrimSpace(snapshot.Text) != "" {
-		copySnapshot := snapshot
-		initialGoal = &copySnapshot
-	}
-	// 010 UL-7: restore the plan lifecycle from the plan_state.json sidecar. Any
-	// legacy shape is migrated through the SINGLE loader (state.MigrateLifecycle,
-	// the only reader of the legacy fields); only the canonical state+depth is
-	// threaded into the engine. A fully idle (direct) result needs no restore.
-	// Plan content was already loaded above (planText → InitialPlan); the engine
-	// surfaces a one-shot notice (RestoredPlanNotice) for the TUI to display.
-	var initialPlanState *contract.PlanStateSnapshot
-	if snapshot, ok, _ := a.sessions.ReadPlanState(session.ID); ok {
-		if lifecycleState, depth := state.MigrateLifecycle(snapshot, initialPlan); lifecycleState != contract.LifecycleDirect {
-			initialPlanState = &contract.PlanStateSnapshot{State: lifecycleState, PipelineDepth: depth}
-		}
-	}
 	// 005 US3: compose (new session) or restore (resume) the project-context boot
 	// snapshot BEFORE NewEngine, which sends no provider request — so the boot
 	// block rides the first user submit in one send. On resume the persisted
@@ -554,15 +531,6 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			AppendInvalidation: func(_ context.Context, event contract.InvalidationEvent) error {
 				return a.sessions.AppendInvalidation(session.ID, event)
 			},
-			WritePlan: func(_ context.Context, content string) error { return a.sessions.WritePlan(session.ID, content) },
-			WriteGoal: func(_ context.Context, snapshot contract.GoalSnapshot) error {
-				return a.sessions.WriteGoal(session.ID, snapshot)
-			},
-			ClearGoal: func(_ context.Context) error { return a.sessions.ClearGoal(session.ID) },
-			WritePlanState: func(_ context.Context, snapshot contract.PlanStateSnapshot) error {
-				return a.sessions.WritePlanState(session.ID, snapshot)
-			},
-			ClearPlanState: func(_ context.Context) error { return a.sessions.ClearPlanState(session.ID) },
 			WriteProjectContext: func(_ context.Context, snapshot contract.ProjectContextSnapshot) error {
 				return a.sessions.WriteProjectContext(session.ID, snapshot)
 			},
@@ -598,9 +566,6 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 				MemoryContent:       memory.CanonicalContent,
 			}, nil
 		},
-		InitialPlan:          initialPlan,
-		InitialGoal:          initialGoal,
-		InitialPlanState:     initialPlanState,
 		InitialUsageRecords:  usageRecords,
 		InitialInvalidations: invalidationEvents,
 		BoundaryTools: func() (orchestrator.BoundaryToolChange, bool, error) {

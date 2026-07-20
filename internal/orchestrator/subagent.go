@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -90,7 +89,7 @@ func handoffFor(input subagentInput, context string) HandoffContract {
 }
 
 func (e *Engine) subagentSpecs() map[string]subagentSpec {
-	read := map[string]bool{"list_files": true, "read_file": true, "grep": true, "search_text": true, "glob": true, "git_status": true, "git_diff": true, "run_shell": true, "read_plan": true}
+	read := map[string]bool{"list_files": true, "read_file": true, "grep": true, "search_text": true, "glob": true, "git_status": true, "git_diff": true, "run_shell": true}
 	all := make(map[string]bool)
 	for _, name := range e.registry.Names() {
 		all[name] = true
@@ -104,7 +103,6 @@ func (e *Engine) subagentSpecs() map[string]subagentSpec {
 	}
 	return map[string]subagentSpec{
 		"explore": {Name: "explore", Description: instructions.SubagentExploreDescription, Allowed: clone(read), MaxTurns: 12, System: instructions.SubagentExploreSystem},
-		"plan":    {Name: "plan", Description: instructions.SubagentPlanDescription, Allowed: clone(read), MaxTurns: 14, System: instructions.SubagentPlanSystem},
 		"review":  {Name: "review", Description: instructions.SubagentReviewDescription, Allowed: clone(read), MaxTurns: 14, System: instructions.SubagentReviewSystem},
 		"general": {Name: "general", Description: instructions.SubagentGeneralDescription, Allowed: all, MaxTurns: 24, System: instructions.SubagentGeneralSystem},
 	}
@@ -123,17 +121,11 @@ func (e *Engine) runSubagentTool(ctx context.Context, raw json.RawMessage) (stri
 // launches call this directly with the struct (no marshal/unmarshal round-trip).
 func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (string, error) {
 	input.Agent, input.Task, input.Title = strings.TrimSpace(input.Agent), strings.TrimSpace(input.Task), strings.TrimSpace(input.Title)
-	// P3: in plan mode, the "general" subagent gets the full mutating registry.
-	// Block it at the gate so the UI's read-only invariant cannot be bypassed
-	// by spawning a general subagent from inside a plan-mode task.
-	if e.PlanMode() && input.Agent == "general" {
-		return "", errors.New(instructions.GateSubagentPlanModeGeneralBody)
-	}
 	spec, ok := e.subagentSpecs()[input.Agent]
 	if !ok || input.Task == "" {
-		return "", fmt.Errorf("agent must be explore, plan, review, or general and task is required")
+		return "", fmt.Errorf("agent must be explore, review, or general and task is required")
 	}
-	if (input.Agent == "explore" || input.Agent == "plan") && e.knowledge != nil {
+	if input.Agent == "explore" && e.knowledge != nil {
 		if fact, ok := e.knowledge.Reusable(input.Agent, input.Task); ok {
 			e.taskMu.Lock()
 			e.taskAgentReused++
@@ -145,17 +137,9 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 			return fmt.Sprintf("Subagent %q report (reused; workspace unchanged; zero tokens):\n%s", input.Agent, body), nil
 		}
 	}
-	l := e.Lifecycle()
-	phaseBudgeted := l.Orchestrated()
 	e.taskMu.Lock()
 	limit := e.taskAgentCap
 	used := e.taskAgentRuns
-	if phaseBudgeted {
-		if e.taskPhaseAgentRuns == nil {
-			e.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
-		}
-		used = e.taskPhaseAgentRuns[l.State]
-	}
 	if limit <= 0 || used >= limit {
 		e.taskAgentDenied++
 		denied := e.taskAgentDenied
@@ -177,9 +161,6 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 		return "", fmt.Errorf(instructions.GateSubagentBudgetSoftTmpl, reason)
 	}
 	e.taskAgentRuns++
-	if phaseBudgeted {
-		e.taskPhaseAgentRuns[l.State]++
-	}
 	e.runCounter++
 	runID := fmt.Sprintf("a%d-%x", e.runCounter, time.Now().UnixMilli())
 	e.taskMu.Unlock()
@@ -187,11 +168,10 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 		input.Title = deriveTitle(input.Task)
 	}
 	result := e.executeSubagent(ctx, runID, input, spec)
-	// Every usable report banks with its phase/role provenance; consumers that
-	// need research evidence filter on it (Knowledge.ResearchFindings) rather
-	// than this call discriminating by agent kind.
+	// Every usable report banks with its role provenance so scoped briefings and
+	// the reuse fast path can find it later.
 	if (result.Status == "done" || strings.HasPrefix(result.Status, "partial")) && len(result.Report) >= 80 && e.knowledge != nil {
-		e.knowledge.AddPhaseReport(input.Agent, pipelineLabel(l.State), handoffRole(input.Agent), input.Title, input.Task, result.Report)
+		e.knowledge.AddPhaseReport(input.Agent, "", handoffRole(input.Agent), input.Title, input.Task, result.Report)
 	}
 	e.addTaskAgentUsage(result.Usage)
 	// Every review dispatch stamps its outcome onto the recorded review decision
@@ -201,7 +181,6 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 	if input.Agent == "review" {
 		e.updateTaskReviewOutcome(result.Report)
 	}
-	e.observeOrchestratedSubagent(ctx, input.Agent, result)
 	if e.persistence.AddEvent != nil {
 		summary, _ := json.Marshal(map[string]any{"runId": result.RunID, "agent": result.Agent, "title": result.Title, "status": result.Status, "terminalShape": result.TerminalShape, "turns": result.Turns, "toolCalls": result.ToolCalls, "usage": result.Usage, "task": contract.TruncateEllipsis(input.Task, 2000), "report": contract.TruncateEllipsis(result.Report, 4000)})
 		_ = e.persistence.AddEvent(ctx, "agent", "run_summary", e.redact(string(summary)), "")
@@ -214,9 +193,6 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 	// switch to direct work BEFORE hitting the exhaustion error.
 	e.taskMu.Lock()
 	used = e.taskAgentRuns
-	if phaseBudgeted {
-		used = e.taskPhaseAgentRuns[l.State]
-	}
 	remaining := max(0, e.taskAgentCap-used)
 	e.taskMu.Unlock()
 	budgetNote := fmt.Sprintf("%d subagent run(s) remaining", remaining)
@@ -261,18 +237,11 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			break
 		}
 	}
-	// Only an orchestrated phase is surfaced on the agent event; a manual /
-	// direct-task subagent carries no phase tag (the TUI hides it), matching the
-	// pre-010 behavior where the pipeline phase was "direct".
-	phase := ""
-	if l := e.Lifecycle(); l.Orchestrated() {
-		phase = pipelineLabel(l.State)
-	}
 	role := handoffRole(input.Agent)
 	plan := e.planDispatch(input, spec, modelID)
 	decision, streamSpec, capture := plan.decision, plan.streamSpec, plan.capture
 	system, definitions, messages, handoff := plan.system, plan.definitions, plan.messages, plan.handoff
-	e.emitAgent(contract.AgentEvent{Kind: "start", RunID: runID, Agent: input.Agent, Phase: phase, Role: role, Title: input.Title, Task: input.Task, Handoff: handoff.Render(), Model: modelName})
+	e.emitAgent(contract.AgentEvent{Kind: "start", RunID: runID, Agent: input.Agent, Role: role, Title: input.Title, Task: input.Task, Handoff: handoff.Render(), Model: modelName})
 	// B6/T025: subagents dispatch through the SAME shared gate as the main loop
 	// (validation, failed-cache, repeat limiter, storm breaker, plan-mode gate),
 	// but with their OWN per-run counters so their gate state never pollutes the
@@ -533,7 +502,7 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			e.callbacks.EmitNotice("linked but cold (provider cache miss) — the predecessor's cache likely expired or routing changed; this run paid a cold write.")
 		}
 	}
-	e.emitAgent(contract.AgentEvent{Kind: "done", RunID: runID, Agent: input.Agent, Phase: string(phase), Role: role, Title: input.Title, Status: result.Status, Report: result.Report, Usage: result.Usage})
+	e.emitAgent(contract.AgentEvent{Kind: "done", RunID: runID, Agent: input.Agent, Role: role, Title: input.Title, Status: result.Status, Report: result.Report, Usage: result.Usage})
 	return result
 }
 

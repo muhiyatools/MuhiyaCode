@@ -444,7 +444,7 @@ func NewModel(options Options) *Model {
 		m.status = "Loading workspace…"
 		m.pendingSubmit = strings.TrimSpace(options.InitialPrompt)
 	} else {
-		m.plan = options.Runtime.Engine.CurrentPlan()
+		m.plan = options.Runtime.Engine.CurrentChecklist()
 		report := options.Runtime.Engine.ContextReport()
 		m.context = contract.ContextInfo{HistoryTokens: report.HistoryTokens, ContextLimit: report.ContextLimit, Percent: report.Percent}
 		m.loadEvents(options.Recent)

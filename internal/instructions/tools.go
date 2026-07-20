@@ -36,10 +36,6 @@ const (
 	ToolRunShellDescription  = "Run a shell command in the workspace with streaming output and cancellation. For reading or searching files use read_file/grep instead — they are cheaper and cache-tracked."
 	ToolGitStatusDescription = "Show concise git status."
 	ToolGitDiffDescription   = "Show the workspace git diff."
-	// ToolReadPlanDescription (feature 012 R-D7): the harness-served plan
-	// reader — a subagent reads its assigned phase by reference instead of
-	// receiving pasted plan prose in its handoff.
-	ToolReadPlanDescription = "Read the session's approved execution plan. Optional section: 'steps' returns only the implementation steps. Read-only; returns 'No plan exists yet' when none is set."
 )
 
 var (
@@ -58,39 +54,17 @@ var (
 	toolRunShellText   = Register(Text{ID: "tool.run_shell.desc", Audience: MainStatic, Cache: Prefix, Body: ToolRunShellDescription})
 	toolGitStatusText  = Register(Text{ID: "tool.git_status.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGitStatusDescription})
 	toolGitDiffText    = Register(Text{ID: "tool.git_diff.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGitDiffDescription})
-	toolReadPlanText   = Register(Text{ID: "tool.read_plan.desc", Audience: MainStatic, Cache: Prefix, Body: ToolReadPlanDescription, MentionsTools: []string{"read_plan"}, AllowlistCtx: "main-loop"})
 )
 
-// Synthetic main-loop tool descriptions (engine.go sessionDefinitions). The
-// update_plan step-title and note property descriptions carry the same
-// format rule (RulePlanStepShape/RulePlanNoteShape) as the tool description
-// itself, so they are registered too (IS-4/IS-7 need to see them, not just
-// the top-level description).
+// Synthetic main-loop tool descriptions (engine.go sessionDefinitions).
 const (
-	ToolUpdatePlanDescription                  = "Create or update the real task plan. In pipeline planning, every step must name an exact target, cite [F#], and include an observable Acceptance/Verify check; note must contain Verification: commands and Risks: entries. In an orchestration pipeline every step title must be \"<file-or-function target>: <change> [F#] — Verify: <observable check>\", example: \"" + PlanStepExampleBody + "\". Max 12 steps — merge related edits into one step; per-file detail and repo-wide commands belong in the note's Verification:/Risks: sections."
-	ToolUpdatePlanStepTitlePropertyDescription = "Exact file/function scope + [F#] research citation + Acceptance/Verify check; mark [parallel] or [serial] when dependencies matter."
-	ToolUpdatePlanNotePropertyDescription      = "Include `Verification:` with concrete commands/checks and `Risks:` with mitigations."
-	ToolAskUserDescription                     = "Ask 1-3 blocking multiple-choice questions."
-	ToolProposeChangesDescription              = "Request approval before broad or risky edits."
-	ToolExitPlanModeDescription                = "Call when your plan is complete and you are ready to hand off for execution. Only meaningful in plan mode."
+	ToolAskUserDescription        = "Ask 1-3 blocking multiple-choice questions."
+	ToolProposeChangesDescription = "Request approval before broad or risky edits."
 )
 
 var (
-	toolUpdatePlanText = Register(Text{
-		ID: "tool.update_plan.desc", Audience: MainStatic, Cache: Prefix, Body: ToolUpdatePlanDescription,
-		StatesRule: RulePlanStepShape, Example: ExamplePlanStep.ID, MentionsTools: []string{"update_plan"}, AllowlistCtx: "main-loop",
-	})
-	toolUpdatePlanStepTitlePropertyText = Register(Text{
-		ID: "tool.update_plan.step-title-property", Audience: MainStatic, Cache: Prefix, Body: ToolUpdatePlanStepTitlePropertyDescription,
-		StatesRule: RulePlanStepShape, Example: ExamplePlanStep.ID,
-	})
-	toolUpdatePlanNotePropertyText = Register(Text{
-		ID: "tool.update_plan.note-property", Audience: MainStatic, Cache: Prefix, Body: ToolUpdatePlanNotePropertyDescription,
-		StatesRule: RulePlanNoteShape, Example: ExamplePlanNote.ID,
-	})
 	toolAskUserText        = Register(Text{ID: "tool.ask_user.desc", Audience: MainStatic, Cache: Prefix, Body: ToolAskUserDescription})
 	toolProposeChangesText = Register(Text{ID: "tool.propose_changes.desc", Audience: MainStatic, Cache: Prefix, Body: ToolProposeChangesDescription})
-	toolExitPlanModeText   = Register(Text{ID: "tool.exit_plan_mode.desc", Audience: MainStatic, Cache: Prefix, Body: ToolExitPlanModeDescription})
 )
 
 // run_subagent (engine.go runSubagentDefinition) is the richest tool
@@ -119,14 +93,9 @@ var (
 	})
 	toolRunSubagentTaskPropertyText = Register(Text{
 		ID: "tool.run_subagent.task-property", Audience: MainStatic, Cache: Prefix, Body: ToolRunSubagentTaskPropertyDescription,
-		Example: ExamplePlanStep.ID,
+		Example: ExampleDelegationTask.ID,
 	})
 )
-
-// RulePlanStepShape is the rule ID for the plan-step title shape (the exact
-// target + [F#] citation + Verify: check requirement) linking every site
-// that states or enforces it (fix c).
-const RulePlanStepShape = "rule.plan-step-shape"
 
 // web_search (gateway/web.go).
 const ToolWebSearchDescription = "Search the live web for current or niche facts and return citable sources."

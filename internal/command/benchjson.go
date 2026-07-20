@@ -148,7 +148,6 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 			OutboundChars: link.OutboundChars, ReturnChars: link.ReturnChars,
 		})
 	}
-	summary.ReadGate.Denied, summary.ReadGate.Waived, summary.ReadGate.Exempt = stats.ReadGate.Denied, stats.ReadGate.Waived, stats.ReadGate.Exempt
 	payload, err := json.Marshal(map[string]benchSummary{"muhiya_bench": summary})
 	if err != nil {
 		return

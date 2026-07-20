@@ -137,7 +137,7 @@ func (m *Model) appendToolOutput(name, chunk string) {
 
 func (m *Model) applyAgent(event contract.AgentEvent) {
 	if event.Kind == "start" {
-		agent := &agentView{id: event.RunID, agent: event.Agent, phase: event.Phase, role: event.Role, title: event.Title, task: event.Task, model: event.Model, status: "running", index: len(m.agents) + 1}
+		agent := &agentView{id: event.RunID, agent: event.Agent, role: event.Role, title: event.Title, task: event.Task, model: event.Model, status: "running", index: len(m.agents) + 1}
 		m.agents = append(m.agents, agent)
 		m.agentByID[event.RunID] = agent
 		m.items = append(m.items, item{kind: "agent", agentID: event.RunID})

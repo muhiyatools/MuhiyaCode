@@ -43,14 +43,14 @@ const PromptOperatingContractBody = `OPERATING CONTRACT
 When rules conflict, order priority: safety, the user's explicit request, this contract, then style.
 1. Read the final [task-brief] on the user message and size the work to it. Conversational turns answer directly without tools.
 2. Inspect before editing: search first, then read only the ranges you need, batching independent reads and searches into one turn.
-3. For work of three or more steps, keep update_plan current and state "DONE =" observable success criteria before the first edit. Finish every open plan step unless truly blocked.
+3. For work of three or more steps, keep a tasks.md checklist in the project root current and state "DONE =" observable success criteria before the first edit. Never claim completion while a checklist item is open.
 4. Make focused edits that match local style. Never overwrite an existing file this session has not read. Treat tool output as ground truth.
 5. Verify exactly to the brief, fix failures your change caused, then stop. Do not add unrequested features or broad cleanup.
 6. Final answer: concise outcome, verification performed, and genuine remaining risk.`
 
 var promptOperatingContractText = Register(Text{
 	ID: "prompt.operating-contract", Audience: MainStatic, Cache: Prefix, Body: PromptOperatingContractBody,
-	MentionsTools: []string{"update_plan"}, AllowlistCtx: "main-loop",
+	AllowlistCtx: "main-loop",
 })
 
 // PromptContextEditDisciplineBody's first bullet embeds
@@ -148,24 +148,6 @@ Subagents (model: %s) are your workforce for independent work. The task brief's 
 var promptDelegationOnText = Register(Text{
 	ID: "prompt.delegation.on", Audience: MainStatic, Cache: Prefix, Body: PromptDelegationOnTemplate,
 	StatesRule: RuleSubagentBudget, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
-})
-
-// Condensed in feature 011 T026 to fund the TOOLS AND RECOVERY cheapest-tool
-// bullet (D5): every phase rule below is semantically unchanged — only the
-// redundant framing sentence and looser wording were removed. The dynamic
-// [orchestration-pipeline] tail block still carries per-phase direction.
-const PromptOrchestrationPipelineBody = `ORCHESTRATION PIPELINE
-When the newest user tail contains [orchestration-pipeline], act as conductor, not implementer, and obey its enforced phase:
-- Research: delegate the named independent scopes, consume only their bounded reports, do not edit.
-- Plan: synthesize an execution-grade artifact: steps name exact targets, cite [F#] findings, declare dependency intent, carry observable acceptance checks, list verification commands and risks.
-- Approval: stop. Auto-accept permissions are never approval to implement.
-- Implement: execute only approved plan parts; full depth belongs to implementation subagents, light depth may stay in the main loop. Keep step status truthful.
-- Validation: independently review the changed files and run the plan checks; address or explicitly report verified findings. Never claim completion while a step or validation gate is open.
-Handoffs state role, scope, context, deliverable, and exact output format — never transcripts, never re-exploring predecessor-covered scope.`
-
-var promptOrchestrationPipelineText = Register(Text{
-	ID: "prompt.orchestration-pipeline", Audience: MainStatic, Cache: Prefix, Body: PromptOrchestrationPipelineBody,
-	StatesRule: RulePlanModeReadOnly, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
 })
 
 // ProjectMemoryInstructionBody is the fixed, byte-stable paragraph that

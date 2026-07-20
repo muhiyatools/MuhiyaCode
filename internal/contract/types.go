@@ -5,7 +5,6 @@ package contract
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"time"
 )
 
@@ -296,149 +295,6 @@ type Plan struct {
 	UpdatedAt time.Time  `json:"updatedAt"`
 }
 
-// PlanPhase (004 US2) is the whole-plan lifecycle state, distinct from the
-// per-step PlanStatus. It is the single source of truth for every plan
-// affordance the UI shows: an executable hint appears ONLY in PlanPhasePending
-// (and, as a resumable-partial variant, PlanPhaseInterrupted). Terminal phases
-// (finished/superseded/discarded) never advertise executability again, even
-// across session resume. See specs/004-deepseek-agent-polish/contracts/plan-lifecycle.md.
-type PlanPhase string
-
-const (
-	PlanPhaseNone        PlanPhase = ""            // no plan for the session
-	PlanPhaseDrafting    PlanPhase = "drafting"    // plan mode on; plan being written/refined
-	PlanPhaseReady       PlanPhase = "ready"       // plan-ready signaled; awaiting the proceed/save/keep decision
-	PlanPhasePending     PlanPhase = "pending"     // saved for later; the ONLY phase that invites execution
-	PlanPhaseExecuting   PlanPhase = "executing"   // a run is actively working the plan's steps
-	PlanPhaseFinished    PlanPhase = "finished"    // all steps completed; terminal
-	PlanPhaseInterrupted PlanPhase = "interrupted" // execution ended with incomplete steps; resumable
-	PlanPhaseSuperseded  PlanPhase = "superseded"  // replaced by a newer plan; terminal
-	PlanPhaseDiscarded   PlanPhase = "discarded"   // explicitly cleared by the user; terminal
-)
-
-// IsTerminal reports whether the phase is an end state a plan never leaves
-// except by starting a fresh lifecycle (a new plan re-enters drafting).
-func (p PlanPhase) IsTerminal() bool {
-	return p == PlanPhaseFinished || p == PlanPhaseSuperseded || p == PlanPhaseDiscarded
-}
-
-// PipelinePhase is the harness-enforced orchestration phase for one task. It
-// intentionally stays distinct from PlanPhase: the pipeline drives the
-// existing plan lifecycle while also sequencing research and validation.
-// The empty value is legacy-compatible and is interpreted as direct work.
-type PipelinePhase string
-
-const (
-	PipelinePhaseDirect    PipelinePhase = "direct"
-	PipelinePhaseResearch  PipelinePhase = "research"
-	PipelinePhasePlan      PipelinePhase = "plan"
-	PipelinePhaseApprove   PipelinePhase = "approve"
-	PipelinePhaseImplement PipelinePhase = "implement"
-	PipelinePhaseValidate  PipelinePhase = "validate"
-	PipelinePhaseDone      PipelinePhase = "done"
-)
-
-// LifecycleState is the feature-010 unified task lifecycle: the SINGLE source
-// of truth that replaces the legacy plan-mode flags (planMode/pendingPlan) and
-// the two phase enums (PlanPhase drives affordances, PipelinePhase drives
-// orchestration). The 11 states are the disjoint union of both machines; every
-// consumer reads them through the pure predicates below rather than comparing
-// raw states, so the two-truth desync class becomes unrepresentable.
-// PlanPhase/PipelinePhase remain ONLY as legacy sidecar-migration inputs.
-type LifecycleState string
-
-const (
-	LifecycleDirect       LifecycleState = ""                  // no plan; direct work (also the zero value / legacy-absent)
-	LifecycleResearch     LifecycleState = "research"          // pipeline research; read-only
-	LifecyclePlanning     LifecycleState = "planning"          // plan being written; read-only
-	LifecycleApproval     LifecycleState = "awaiting-approval" // plan written; awaiting the user's go-ahead; read-only
-	LifecyclePending      LifecycleState = "pending"           // saved for later; a bare "proceed" executes it
-	LifecycleImplementing LifecycleState = "implementing"      // executing the approved plan's steps
-	LifecycleValidating   LifecycleState = "validating"        // reviewing changes before completion
-	LifecycleInterrupted  LifecycleState = "interrupted"       // execution ended with open steps; resumable
-	LifecycleFinished     LifecycleState = "finished"          // all steps done; terminal
-	LifecycleSuperseded   LifecycleState = "superseded"        // replaced by a newer plan; terminal
-	LifecycleDiscarded    LifecycleState = "discarded"         // explicitly cleared by the user; terminal
-)
-
-// IsReadOnly reports whether the state blocks every mutating tool — the
-// research/planning/approval investigation window. It is identical to
-// BlocksMutation by design: the feature-009 audit proved the two separate
-// mutation gates guarded the same set, so they collapse into one predicate.
-func (s LifecycleState) IsReadOnly() bool {
-	return s == LifecycleResearch || s == LifecyclePlanning || s == LifecycleApproval
-}
-
-// BlocksMutation is the gate predicate; identical set to IsReadOnly.
-func (s LifecycleState) BlocksMutation() bool { return s.IsReadOnly() }
-
-// InvitesProceed reports whether a bare "proceed" should execute a saved plan.
-func (s LifecycleState) InvitesProceed() bool {
-	return s == LifecyclePending || s == LifecycleInterrupted
-}
-
-// IsApprovalPause reports the one state where the approval flow gate is shown.
-func (s LifecycleState) IsApprovalPause() bool { return s == LifecycleApproval }
-
-// IsPipelineResumable reports whether a restart resumes an in-flight pipeline
-// phase (as opposed to a proceed-hint state, which resumes via InvitesProceed).
-func (s LifecycleState) IsPipelineResumable() bool {
-	return s == LifecycleResearch || s == LifecyclePlanning ||
-		s == LifecycleImplementing || s == LifecycleValidating
-}
-
-// IsTerminal reports an end state a plan never leaves except by starting a
-// fresh lifecycle (a new plan re-enters planning/research).
-func (s LifecycleState) IsTerminal() bool {
-	return s == LifecycleFinished || s == LifecycleSuperseded || s == LifecycleDiscarded
-}
-
-// IsActive reports whether the task is inside the orchestration pipeline (any
-// non-direct state) — replaces the old pipelineActive() flag check.
-func (s LifecycleState) IsActive() bool { return s != LifecycleDirect }
-
-// GoalSnapshot (G4) is the persisted shape of a goal stored in the per-session
-// goal.json sidecar next to the session files. Only goals with Status "active"
-// are restored on resume; completed/blocked goals are not persisted (the G2
-// tombstone is in-memory only, so a finished objective does not resurrect).
-// AutoTurns is restored for fidelity but resets at the next task boundary
-// (ResetGoalTaskCounter, G5), so a resumed goal gets a fresh per-task budget.
-type GoalSnapshot struct {
-	Text      string `json:"text"`
-	Status    string `json:"status"`
-	AutoTurns int    `json:"autoTurns"`
-	Blocked   string `json:"blocked,omitempty"`
-}
-
-// PlanStateSnapshot (P2) persists the plan-mode and pending-plan flags in the
-// per-session plan_state.json sidecar so they survive a restart. planMode
-// restores read-only planning; pendingPlan makes a bare "proceed" execute the
-// saved plan (P2 step 4). The plan CONTENT already persists via plan.md/tasks.md
-// (WritePlan); this sidecar carries only the two flags the flow needs.
-type PlanStateSnapshot struct {
-	PlanMode    bool `json:"planMode"`
-	PendingPlan bool `json:"pendingPlan"`
-	// Phase (004 US2) is the whole-plan lifecycle state. Additive and
-	// omitempty: a legacy sidecar without it is derived from the two booleans
-	// on load (pendingPlan→pending, planMode→drafting, else none). PlanMode and
-	// PendingPlan stay authoritative for their existing consumers and remain
-	// consistent with Phase.
-	Phase PlanPhase `json:"phase,omitempty"`
-	// PipelinePhase is an additive feature-009 sidecar field. Legacy snapshots
-	// omit it and therefore resume through the existing direct/plan lifecycle.
-	PipelinePhase PipelinePhase `json:"pipeline_phase,omitempty"`
-	// PipelineDepth persists alongside PipelinePhase so a light pipeline
-	// resumes light. Additive: legacy snapshots omit it and restore as full
-	// (the pre-existing behavior).
-	PipelineDepth string `json:"pipeline_depth,omitempty"`
-	// State (feature 010) is the unified lifecycle — the canonical field going
-	// forward. When present it is authoritative and the migration loader
-	// ignores the legacy fields above; when absent (older sidecars) the loader
-	// derives it from PipelinePhase/Phase/PlanMode/PendingPlan. Depth rides
-	// alongside via the existing PipelineDepth field.
-	State LifecycleState `json:"state,omitempty"`
-}
-
 type QuestionChoice struct {
 	Label       string `json:"label"`
 	Description string `json:"description,omitempty"`
@@ -456,16 +312,10 @@ type Answer struct {
 	Index    int
 }
 
-// ErrPlanModeExited (P2) is returned by the orchestrator's exit_plan_mode
-// dispatch to signal that the current task should finalize while leaving
-// plan-mode state to the TUI/handler that picks up after the task ends.
-var ErrPlanModeExited = errors.New("plan ready: awaiting user choice")
-
 type AgentEvent struct {
 	Kind  string
 	RunID string
 	Agent string
-	Phase string
 	Role  string
 	Title string
 	Task  string
@@ -522,10 +372,6 @@ type TaskStats struct {
 	DisciplineScore    int                 `json:"disciplineScore"`
 	DoneCriteria       string              `json:"doneCriteria,omitempty"`
 	Invalidations      []InvalidationEvent `json:"invalidations,omitempty"`
-	// PlanReady (P2) is set when a plan-mode task ended via exit_plan_mode or a
-	// free-text plan finish. The TUI opens the Proceed now / Proceed later / Keep
-	// planning modal when it sees this on the task-complete stats.
-	PlanReady bool `json:"planReady,omitempty"`
 	// TerminatedReason (H5) is set when a task was force-finalized by the token
 	// circuit breaker or the distinct-failure terminator. The TUI surfaces it as
 	// a warn notice so the user knows why the task stopped early.
@@ -575,10 +421,6 @@ type TaskStats struct {
 	// decision this task — including declines with their reason — so the summary
 	// and benchmark records always explain what was reused and what was not.
 	Links []LinkOutcome `json:"links,omitempty"`
-	// ReadGate (feature 012 FR-006) counts the phase-scoped role gate's outcomes
-	// for this task: implementation reads denied, the bounded waiver, and
-	// recorded exemptions.
-	ReadGate ReadGateStats `json:"readGate,omitzero"`
 }
 
 // LinkOutcome (feature 012, data-model.md ContextLink) is the per-dispatch
@@ -608,14 +450,6 @@ type LinkOutcome struct {
 	// OutboundChars/ReturnChars feed the SC-006 communication-overhead share.
 	OutboundChars int `json:"outboundChars,omitempty"`
 	ReturnChars   int `json:"returnChars,omitempty"`
-}
-
-// ReadGateStats (feature 012 contracts/role-gate.md RG-3) aggregates the
-// phase-scoped read gate's telemetry for one task.
-type ReadGateStats struct {
-	Denied int `json:"denied,omitempty"`
-	Waived int `json:"waived,omitempty"`
-	Exempt int `json:"exempt,omitempty"`
 }
 
 // StopCause values for TaskStats.StopCause (003, FR-013a).

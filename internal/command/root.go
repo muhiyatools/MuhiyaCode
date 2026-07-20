@@ -84,14 +84,7 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 			return tui.HydratedRuntime{}, err
 		}
 		// One-shot startup notices are read from the now-live engine: config gaps,
-		// plus any restored goal/plan-state resurrected from the sidecars (G4/P2).
 		notice := configurationNotice(*app.Settings(), app.secrets)
-		if restored := app.Runtime().Engine.RestoredGoalNotice(); restored != "" {
-			notice = joinNotice(notice, restored)
-		}
-		if restored := app.Runtime().Engine.RestoredPlanNotice(); restored != "" {
-			notice = joinNotice(notice, restored)
-		}
 		return tui.HydratedRuntime{
 			Runtime: app.Runtime(), Actions: app.Actions(), Recent: app.Recent(), Notice: notice,
 		}, nil
@@ -104,14 +97,6 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 		InitialPrompt: options.Prompt, Context: cmd.Context(), Simple: options.Simple,
 		Hydrate: hydrate,
 	})
-}
-
-// joinNotice appends add to base on its own line, tolerating an empty base.
-func joinNotice(base, add string) string {
-	if base == "" {
-		return add
-	}
-	return base + "\n" + add
 }
 
 func runOneShot(cmd *cobra.Command, cwd, prompt string, fresh, noMCP bool) error {

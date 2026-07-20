@@ -18,8 +18,14 @@ import (
 // whole instruction-consolidation feature; every other moved text is
 // byte-identical (internal/instructions/dump_test.go's Prefix-bytes golden
 // pins the exact rendered result). Prior baselines: 3642 (feature 004), 4522
-// (feature 008), 5709 (feature 009).
-const promptBaselineChars = 5789
+// (feature 008), 5709 (feature 009), 5789 (feature 010).
+//
+// v1.1.0 (native agent) RE-BASELINED DOWNWARD to 4810: deleting the
+// ORCHESTRATION PIPELINE section and rewriting the operating contract's
+// checklist bullet for tasks.md shrank the rendered prompt from 5777 to 4798
+// chars. The ratchet is a ceiling, so shrinkage never fails CI — this
+// tightening is deliberate, so the budget keeps meaning something.
+const promptBaselineChars = 4810
 
 func TestSystemPromptSizeWithinBudget(t *testing.T) {
 	ctx := PromptContext{

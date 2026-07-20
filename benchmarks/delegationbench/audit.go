@@ -126,20 +126,17 @@ func (o *benchmarkObserver) observeAgent(event contract.AgentEvent) {
 	o.mu.Lock()
 	meta := o.runs[event.RunID]
 	if event.Kind == "start" {
-		meta = agentRunMeta{phase: event.Phase, role: event.Role}
+		meta = agentRunMeta{role: event.Role}
 		o.runs[event.RunID] = meta
 		o.agents = append(o.agents, phaseAgentEvent{
-			At: now, Kind: event.Kind, RunID: event.RunID, Phase: event.Phase, Role: event.Role, Model: event.Model,
+			At: now, Kind: event.Kind, RunID: event.RunID, Role: event.Role, Model: event.Model,
 			HandoffCompliant: handoffCompliant(event.Handoff),
 		})
 	} else if event.Kind == "done" {
-		if event.Phase != "" {
-			meta.phase = event.Phase
-		}
 		if event.Role != "" {
 			meta.role = event.Role
 		}
-		o.agents = append(o.agents, phaseAgentEvent{At: now, Kind: event.Kind, RunID: event.RunID, Phase: meta.phase, Role: meta.role, Status: event.Status})
+		o.agents = append(o.agents, phaseAgentEvent{At: now, Kind: event.Kind, RunID: event.RunID, Role: meta.role, Status: event.Status})
 	}
 	if event.Kind == "tool_start" && benchmarkMutationTool(event.Tool) && o.planAtFirstMutation == nil {
 		o.planAtFirstMutation = latestPlanModTime(o.sessionsDir)

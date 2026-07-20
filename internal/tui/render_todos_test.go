@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"context"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -16,7 +15,6 @@ func todoModel(t *testing.T) *Model {
 	_ = m.Init()
 	return mustUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 30})
 }
-
 
 // TestTodoRowsCollapse pins the collapse algorithm (A3 T030): under budget shows
 // every step; over budget rolls up completed steps (when ≥2) and summarizes the
@@ -86,8 +84,10 @@ func TestTodoRowRTLTitleStaysValid(t *testing.T) {
 	}
 }
 
-// TestTodoPanelGating covers the busy checklist, the Ctrl+T hide, and the idle
-// non-resumable case where the panel stays empty (A3 T031/T034).
+// TestTodoPanelGating covers the panel's whole gating table: the busy checklist,
+// the Ctrl+T hide, and the two retire cases — no steps at all, and every step
+// completed (A3 T031/T034). The panel is now driven purely by m.plan's step
+// statuses; there is no lifecycle predicate behind it.
 func TestTodoPanelGating(t *testing.T) {
 	m := todoModel(t)
 	m.plan = contract.Plan{Steps: todoSteps(contract.PlanCompleted, contract.PlanInProgress)}
@@ -100,42 +100,47 @@ func TestTodoPanelGating(t *testing.T) {
 		t.Fatalf("Ctrl+T-hidden panel should render nothing, got:\n%s", got)
 	}
 	m.todoVisible = true
-	m.busy = false
-	if got := m.renderTodos(); got != "" {
-		t.Fatalf("idle non-resumable plan should render nothing, got:\n%s", got)
+
+	// No steps at all → nothing to show, busy or idle.
+	m.plan = contract.Plan{}
+	for _, busy := range []bool{true, false} {
+		m.busy = busy
+		if got := m.renderTodos(); got != "" {
+			t.Fatalf("empty plan (busy=%v) should render nothing, got:\n%s", busy, got)
+		}
+	}
+
+	// Every step completed → the checklist has retired itself, busy or idle.
+	m.plan = contract.Plan{Steps: todoSteps(contract.PlanCompleted, contract.PlanCompleted)}
+	for _, busy := range []bool{true, false} {
+		m.busy = busy
+		if got := m.renderTodos(); got != "" {
+			t.Fatalf("fully completed plan (busy=%v) should retire the panel, got:\n%s", busy, got)
+		}
 	}
 }
 
-// TestTodoPanelTerminalRetires proves a terminal (discarded) plan retires the panel
-// even while busy with steps (A3 T034).
-func TestTodoPanelTerminalRetires(t *testing.T) {
-	rt := testRuntime(t)
-	rt.Engine.DiscardPlan() // → discarded, a terminal lifecycle state
-	m := NewModel(Options{Runtime: rt, Version: "test"})
-	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 30})
-	m.busy = true
-	m.plan = contract.Plan{Steps: todoSteps(contract.PlanInProgress)}
-	if got := m.renderTodos(); got != "" {
-		t.Fatalf("a terminal plan must retire the panel, got:\n%s", got)
-	}
-}
-
-// TestTodoPanelIdleResumeLine proves a pending (resumable) plan shows the compact
-// idle resume line with the remaining count (A3 T032).
-func TestTodoPanelIdleResumeLine(t *testing.T) {
-	rt := testRuntime(t)
-	rt.Engine.SetLifecycleState(contract.LifecyclePlanning) // → planning (read-only)
-	rt.Engine.DeferPlan(context.Background())               // → pending (invites "proceed")
-	m := NewModel(Options{Runtime: rt, Version: "test"})
-	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 30})
+// TestTodoPanelIdleSummaryLine proves that idle with open items collapses the
+// panel to a single counted summary line rather than the whole checklist, and
+// that the count covers exactly the not-completed steps (A3 T032).
+func TestTodoPanelIdleSummaryLine(t *testing.T) {
+	m := todoModel(t)
 	m.busy = false
 	m.plan = contract.Plan{Steps: todoSteps(contract.PlanCompleted, contract.PlanPending, contract.PlanPending)}
 	got := m.renderTodos()
-	if !strings.Contains(got, "to-dos remaining") || !strings.Contains(got, "proceed") {
-		t.Fatalf("pending plan should show the idle resume line, got:\n%s", got)
+	if !strings.Contains(got, "to-dos remaining") {
+		t.Fatalf("idle plan with open items should show the summary line, got:\n%s", got)
 	}
 	if !strings.Contains(got, "2 to-dos") {
-		t.Errorf("resume line should count 2 remaining (1 of 3 done), got:\n%s", got)
+		t.Errorf("summary line should count 2 remaining (1 of 3 done), got:\n%s", got)
+	}
+	// It is a SUMMARY, not the checklist: exactly one rendered line, and no
+	// per-step titles.
+	if lines := strings.Split(strings.Trim(got, "\n"), "\n"); len(lines) != 1 {
+		t.Errorf("idle summary should be one line, got %d:\n%s", len(lines), got)
+	}
+	if strings.Contains(got, "step 1") || strings.Contains(got, "step 2") {
+		t.Errorf("idle summary must not render individual steps:\n%s", got)
 	}
 }
 

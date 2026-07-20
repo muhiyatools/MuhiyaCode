@@ -22,11 +22,10 @@ import (
 // from the flag name alone which golden a regeneration touches.
 var updatePrefixGolden = flag.Bool("update-prefix-golden", false, "regenerate the Prefix-bytes wire golden")
 
-// Feature 010 US3 (IS-6, IS-7): internal/instructions/audit_test.go mirrors
-// the real capability-reference allowlists and the real worked-example
-// validators locally, because that package imports only contract and cannot
-// reach orchestrator's unexported subagentSpecs/missingPlanStepRequirements/
-// labeledPlanSection. This file is the other half: it builds the REAL
+// Feature 010 US3 (IS-6): internal/instructions/audit_test.go mirrors the real
+// capability-reference allowlists locally, because that package imports only
+// contract and cannot reach orchestrator's unexported subagentSpecs. This file
+// is the other half: it builds the REAL
 // registry the production binary uses (workspace.New(...).Tools(), exactly
 // as internal/command/application.go does) and cross-checks every
 // instructions.Text against the LIVE data, so a drift between the mirror and
@@ -60,7 +59,6 @@ func TestWiring_CapabilityReferenceMatchesRealSubagentSpecs(t *testing.T) {
 	ctxToKind := map[string]string{
 		"subagent.general": "general",
 		"subagent.explore": "explore",
-		"subagent.plan":    "plan",
 		"subagent.review":  "review",
 	}
 	for _, tx := range instructions.All() {
@@ -95,33 +93,10 @@ func TestWiring_GeneralSubagentRealAllowedNeverIncludesSyntheticTools(t *testing
 	if !ok {
 		t.Fatal("subagentSpecs() has no \"general\" entry")
 	}
-	for _, synthetic := range []string{"run_subagent", "exit_plan_mode", "ask_user", "propose_changes", "save_memory", "edit_memory"} {
+	for _, synthetic := range []string{"run_subagent", "ask_user", "propose_changes", "save_memory", "edit_memory"} {
 		if general.Allowed[synthetic] {
 			t.Errorf("general subagent's real Allowed map now includes synthetic tool %q — its advertised schema and capabilityStatement would over-promise (fix a regression)", synthetic)
 		}
-	}
-}
-
-// TestWiring_PlanStepExamplePassesRealValidator calls the REAL
-// missingPlanStepRequirements from pipeline.go — not a mirror — against
-// instructions.PlanStepExampleBody (IS-7).
-func TestWiring_PlanStepExamplePassesRealValidator(t *testing.T) {
-	// requireCitation=true: the canonical example carries an [F#] citation, so it
-	// must satisfy the strictest form of the validator (existing-codebase task).
-	if missing := missingPlanStepRequirements(instructions.PlanStepExampleBody, true); len(missing) > 0 {
-		t.Fatalf("instructions.PlanStepExampleBody fails the REAL missingPlanStepRequirements validator: missing %v", missing)
-	}
-}
-
-// TestWiring_PlanNoteExamplePassesRealValidator calls the REAL
-// labeledPlanSection from pipeline.go against instructions.PlanNoteExampleBody
-// (IS-7, fix e).
-func TestWiring_PlanNoteExamplePassesRealValidator(t *testing.T) {
-	if labeledPlanSection(instructions.PlanNoteExampleBody, "verification", "risks") == "" {
-		t.Errorf("instructions.PlanNoteExampleBody has no non-empty Verification: section per the REAL labeledPlanSection parser")
-	}
-	if labeledPlanSection(instructions.PlanNoteExampleBody, "risks") == "" {
-		t.Errorf("instructions.PlanNoteExampleBody has no non-empty Risks: section per the REAL labeledPlanSection parser")
 	}
 }
 

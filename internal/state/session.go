@@ -45,9 +45,6 @@ func (s *Sessions) New(ctx context.Context, workspace, title string) (contract.S
 	if err := writeFileAtomic(filepath.Join(dir, "transcript.jsonl"), nil, false); err != nil {
 		return contract.Session{}, err
 	}
-	if err := s.WritePlan(session.ID, "No task has been planned yet."); err != nil {
-		return contract.Session{}, err
-	}
 	return session, nil
 }
 
@@ -151,126 +148,6 @@ func readSessionJSONLines[T any](paths Paths, sessionID, name string) ([]T, erro
 		return nil, fmt.Errorf("read %s: %w", name, err)
 	}
 	return result, nil
-}
-
-func (s *Sessions) WritePlan(sessionID, content string) error {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
-	}
-	body := []byte(strings.TrimSpace(content) + "\n")
-	if err := writeFileAtomic(filepath.Join(dir, "plan.md"), body, false); err != nil {
-		return err
-	}
-	return writeFileAtomic(filepath.Join(dir, "tasks.md"), body, false)
-}
-
-func (s *Sessions) ReadPlan(sessionID string) (string, error) {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return "", err
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "plan.md"))
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	return string(data), err
-}
-
-// WriteGoal (G4) persists the active-goal sidecar as goal.json next to the
-// session files, following the WritePlan atomic-write pattern. Only active
-// goals are written; callers clear the sidecar when a goal completes, is
-// blocked, or is cleared so a finished objective never resurrects on resume.
-func (s *Sessions) WriteGoal(sessionID string, snapshot contract.GoalSnapshot) error {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
-	}
-	return writeJSON(filepath.Join(dir, "goal.json"), snapshot, false)
-}
-
-// ReadGoal (G4) loads the goal sidecar. The bool is false when no sidecar
-// exists (no goal was active when the session last closed); a malformed file
-// is treated as absent so a corrupt sidecar never blocks session resume.
-func (s *Sessions) ReadGoal(sessionID string) (contract.GoalSnapshot, bool, error) {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return contract.GoalSnapshot{}, false, err
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "goal.json"))
-	if os.IsNotExist(err) {
-		return contract.GoalSnapshot{}, false, nil
-	}
-	if err != nil {
-		return contract.GoalSnapshot{}, false, err
-	}
-	var snapshot contract.GoalSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return contract.GoalSnapshot{}, false, nil
-	}
-	return snapshot, true, nil
-}
-
-// ClearGoal (G4) removes the goal sidecar. A missing file is not an error so
-// callers can invoke it unconditionally on every goal-clearing transition.
-func (s *Sessions) ClearGoal(sessionID string) error {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(filepath.Join(dir, "goal.json")); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
-// WritePlanState (P2) persists the plan-mode and pending-plan flags to the
-// plan_state.json sidecar next to the session files, mirroring the goal
-// sidecar's atomic-write pattern. The plan CONTENT persists via plan.md/
-// tasks.md (WritePlan); this carries only the two flags the proceed flow needs.
-func (s *Sessions) WritePlanState(sessionID string, snapshot contract.PlanStateSnapshot) error {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
-	}
-	return writeJSON(filepath.Join(dir, "plan_state.json"), snapshot, false)
-}
-
-// ReadPlanState (P2) loads the plan-state sidecar. The bool is false when no
-// sidecar exists (no plan mode was active and no plan was pending when the
-// session last closed); a malformed file is treated as absent so a corrupt
-// sidecar never blocks session resume.
-func (s *Sessions) ReadPlanState(sessionID string) (contract.PlanStateSnapshot, bool, error) {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return contract.PlanStateSnapshot{}, false, err
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "plan_state.json"))
-	if os.IsNotExist(err) {
-		return contract.PlanStateSnapshot{}, false, nil
-	}
-	if err != nil {
-		return contract.PlanStateSnapshot{}, false, err
-	}
-	var snapshot contract.PlanStateSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return contract.PlanStateSnapshot{}, false, nil
-	}
-	return snapshot, true, nil
-}
-
-// ClearPlanState (P2) removes the plan-state sidecar when both flags are false
-// (plan mode off and no pending plan). A missing file is not an error so
-// callers can invoke it unconditionally when the state goes fully idle.
-func (s *Sessions) ClearPlanState(sessionID string) error {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(filepath.Join(dir, "plan_state.json")); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
 }
 
 // WritePrefixShape persists the session-stable prefix shape (Ultimate Polish C3),

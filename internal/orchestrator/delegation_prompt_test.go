@@ -81,7 +81,9 @@ func TestRunSubagentDefinitionRichAndDeterministic(t *testing.T) {
 	}
 	// Check the description text pre-marshal (json.Marshal HTML-escapes "<").
 	description := runSubagentDefinition(specs).Function.Description
-	for _, want := range []string{"Example:", "explore", "plan", "review", "general", "agents<=N"} {
+	// The 'plan' kind is gone; only the surviving three are asserted. (The
+	// description text itself is rewritten in a later phase.)
+	for _, want := range []string{"Example:", "explore", "review", "general", "agents<=N"} {
 		if !strings.Contains(description, want) {
 			t.Fatalf("run_subagent description missing %q (DG-4)", want)
 		}

@@ -38,65 +38,10 @@ func TestZeroAgentBriefStatesProhibition(t *testing.T) {
 	}
 }
 
-// TestWithAgentFloorRegeneratesBrief: raising the floor must also rewrite the
-// advertised budget so brief and enforcement never contradict.
-func TestWithAgentFloorRegeneratesBrief(t *testing.T) {
-	base := BudgetFor(Assessment{Class: ClassSmall}, Profile(contract.EffortLow))
-	if base.MaxAgentRuns != 0 {
-		t.Fatalf("small class at low effort should start at 0 agents, got %d", base.MaxAgentRuns)
-	}
-	raised := base.WithAgentFloor(1, Assessment{Class: ClassSmall})
-	if raised.MaxAgentRuns != 1 {
-		t.Fatalf("floor not applied: %d", raised.MaxAgentRuns)
-	}
-	if !strings.Contains(raised.Brief, "agents<=1") || strings.Contains(raised.Brief, "no run_subagent") {
-		t.Fatalf("floored brief not regenerated: %s", raised.Brief)
-	}
-	// Idempotent when already at or above the floor.
-	if again := raised.WithAgentFloor(1, Assessment{Class: ClassSmall}); again.MaxAgentRuns != 1 {
-		t.Fatalf("floor should be idempotent, got %d", again.MaxAgentRuns)
-	}
-}
-
-// TestPlanModeGuaranteesAgentFloor runs a REAL plan-mode task at low effort
-// with a small-class prompt (0 agents without the floor) and asserts the
-// delegated explore run succeeds instead of failing with the exhausted error.
-func TestPlanModeGuaranteesAgentFloor(t *testing.T) {
-	provider := &scriptedProvider{responses: []contract.ChatResponse{
-		{ToolCalls: []contract.ToolCall{contract.NewToolCall("s", "run_subagent", `{"agent":"explore","task":"survey the config loader"}`)}},
-		{Content: "Findings: the config loader lives in config.go and is already validated."}, // subagent turn -> done
-		{Content: "Plan drafted."}, // main loop final
-	}}
-	settings := engineSettings()
-	settings.Effort = contract.EffortLow
-	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "planfloor", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&recordingTool{name: "run_subagent"}, &recordingTool{name: "read_file"}), Prompt: PromptContext{Model: "Test"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine.SetLifecycleState(contract.LifecyclePlanning)
-	// Small-class prompt: without the plan-mode floor this task gets agents=0.
-	if _, _, err := engine.Run(context.Background(), "plan the config change"); err != nil {
-		t.Fatal(err)
-	}
-	sawReport, sawExhausted := false, false
-	for _, msg := range engine.history.All() {
-		if msg.Role != contract.RoleTool {
-			continue
-		}
-		if strings.Contains(msg.Content, "Subagent \"explore\" report") {
-			sawReport = true
-		}
-		if strings.Contains(msg.Content, "budget exhausted") || strings.Contains(msg.Content, "no subagent budget") {
-			sawExhausted = true
-		}
-	}
-	if !sawReport {
-		t.Fatalf("plan-mode explore delegation did not run:\n%+v", engine.history.All())
-	}
-	if sawExhausted {
-		t.Fatalf("plan-mode delegation was denied despite the floor:\n%+v", engine.history.All())
-	}
-}
+// TestWithAgentFloorRegeneratesBrief and TestPlanModeGuaranteesAgentFloor were
+// deleted with Budget.WithAgentFloor and plan mode: the floor existed only to
+// guarantee plan mode a delegated run, and both the method and the lifecycle
+// state it keyed on are gone.
 
 // TestSubagentDenialEscalates: 004 US3 (T035) splits the two denial paths. With
 // no budget at all (agents=0) the first call hard-closes immediately. A genuine

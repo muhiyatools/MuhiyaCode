@@ -7,7 +7,6 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"github.com/muhiya/muhiyacode/internal/orchestrator"
 )
 
 func (m *Model) renderHeader() string {
@@ -162,16 +161,6 @@ func (m *Model) renderModeLine() string {
 	// Right cluster, least-specific first; the effort chip is appended last so it
 	// sits at the far right ("top-right beneath the input").
 	var right []string
-	if m.runtime.Engine != nil && m.runtime.Engine.PlanMode() {
-		// P1: plan mode is now only the pipeline's read-only planning phase (there is
-		// no /plan toggle), so the badge reads "planning".
-		right = append(right, m.palette.warning.Render("planning"))
-	}
-	if m.runtime.Engine != nil {
-		if goal, ok := m.runtime.Engine.GoalSnapshot(); ok && goal.Status == orchestrator.GoalActive {
-			right = append(right, m.palette.brandSoft.Render("goal"))
-		}
-	}
 	if n := len(m.selectedSkills); n > 0 {
 		right = append(right, m.palette.brandSoft.Render(fmt.Sprintf("%d skills", n)))
 	}

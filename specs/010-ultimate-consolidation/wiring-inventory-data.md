@@ -49,7 +49,7 @@ together by the session prefix golden.
 | Tool | run_shell | Run a shell command with streaming output and context-based cancellation | internal/workspace/workspace_test.go:255 (TestShellStreamingAndCancellation) | wired |
 | Tool | git_status | Show concise `git status --short` | internal/workspace/workspace_test.go:207 (TestListGlobWriteAndGitToolBehaviors) | wired |
 | Tool | git_diff | Show the workspace `git diff` (optionally staged/path/context-scoped) | internal/workspace/workspace_test.go:215 (TestListGlobWriteAndGitToolBehaviors) | wired |
-| Tool | read_plan | Harness-served read of the session's approved execution plan (feature 012 R-D7); optional section='steps' | internal/orchestrator/contextlink_test.go (TestReadPlanTool) | wired |
+| Tool | read_plan | REMOVED in v1.1.0 with the planning pipeline — the checklist lives in the workspace tasks.md, which ordinary read_file reaches | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 
 ## Tools — synthetic main-loop (8)
 
@@ -61,14 +61,14 @@ ever appear in a subagent's real `Allowed` map (pinned by
 
 | Surface | Identifier | Advertised behavior | Verified-by | Status |
 |---|---|---|---|---|
-| Tool | update_plan | Create/update the task plan; in orchestrated planning every step needs a target, an [F#] citation, and a Verify: check; max 12 steps | internal/orchestrator/plan_lifecycle_test.go:57 (TestPlanLifecycleProceedThenFinished) + instructions_wiring_test.go:108 (TestWiring_PlanStepExamplePassesRealValidator) + faultinjection_test.go (FI-8, 13-step rejection) | wired |
+| Tool | update_plan | REMOVED in v1.1.0 — the model maintains a tasks.md checklist with ordinary file tools instead | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 | Tool | ask_user | Ask 1-3 blocking multiple-choice questions | internal/tui/askuser_safety_test.go:45 (TestAskEmptyChoicesDoesNotPanic, the Callbacks.Ask consumer e.askUser dispatches to) + instructions_wiring_test.go:162 (schema wiring) | wired |
 | Tool | propose_changes | Request approval before broad or risky edits | internal/orchestrator/mode_scenario_test.go:51 (TestProposeChangesNonInteractiveIsHonest) | wired |
 | Tool | save_memory | Save one durable project fact to the memory-store index, or (with topic) into a topic file plus a one-line index pointer; 500-char cap; repeats dedupe as already known | internal/orchestrator/memory_test.go:148 (TestSaveMemoryToolApprovalGateParity) + memory_test.go:191 (TestSaveMemoryToolAutoAcceptSaves) + memory_test.go (TestSaveMemoryTopicRouting) | wired |
 | Tool | recall_memory | Read one project-memory topic file whose pointer appears in the always-loaded index (on-demand detail) | internal/orchestrator/memory_test.go (TestRecallMemoryRoundTrip) | wired |
 | Tool | edit_memory | Update or delete exactly one saved memory entry (index or topic file) by matching enough of its line; empty new deletes; deleting a topic's last entry dissolves the file and its index pointer; same approval gate as save_memory | internal/orchestrator/memory_test.go (TestEditMemoryReplaceAndDelete + TestEditMemoryDissolvesEmptyTopic + TestEditMemoryApprovalGateParity) | wired |
 | Tool | run_subagent | Run an isolated subagent (explore/plan/review/general); only its final report returns | internal/orchestrator/subagent_budget_test.go:15 (TestLowEffortGrantsOneSubagentRun) + instructions_wiring_test.go:58 (TestWiring_CapabilityReferenceMatchesRealSubagentSpecs) | wired |
-| Tool | exit_plan_mode | Signal the plan is complete and ready for execution handoff; a harmless no-op outside plan mode | internal/orchestrator/plan_mode_phase3_test.go:101 (TestExitPlanModeFinalizesPlanTask) + pipeline_polish_test.go:192 (no-op outside plan mode) | wired |
+| Tool | exit_plan_mode | REMOVED in v1.1.0 with Planning Mode | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 
 ## Tools — conditional and dynamic (2)
 
@@ -89,7 +89,7 @@ is driven end to end through the real Enter-key path by one shared test.
 | Slash Command | /compact | Compact the conversation (summarize earlier turns) | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) | wired |
 | Slash Command | /rewind | Restore the latest checkpoint | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree, Actions.Rewind wired) | wired |
 | Slash Command | /reasoning | Set reasoning effort (low-max); bare command opens a choice modal | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) + slash_alias_test.go:22 (TestEffortAliasMatchesCanonicalCommand) | wired |
-| Slash Command | /goal | Set/inspect/clear an autonomous goal | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) | wired |
+| Slash Command | /goal | REMOVED in v1.1.0 — the goal auto-continue system is gone; the agent follows the user's instructions directly | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 | Slash Command | /permissions | Change permission mode (normal/auto-accept); bare command opens a choice modal | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) + slash_alias_test.go:44 (TestModeAliasMatchesCanonicalCommand) | wired |
 | Slash Command | /model | Choose or refresh main/subagent models; mid-session switch warns first | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) + model_switch_test.go:56,76,93,128,146 (chooseModel behaviors) | wired |
 | Slash Command | /login | Store the API key (interactive builds only) | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) + command_visibility_test.go:12 (TestCommandVisibilityTracksSignIn) | wired |
@@ -207,7 +207,7 @@ conditional surfaces to name).
 | Callbacks Member | ToolStart | A tool call is starting (name + raw arguments) | internal/orchestrator/dispatch.go:100,182 (producer) + internal/tui/bridge_test.go:56 (TestBridgeFlushClearsBuffers) | wired |
 | Callbacks Member | ToolOutput | Streaming tool/shell output chunks | internal/tui/bridge_test.go:28 (TestBridgeCoalescesToolOutputPerTool) | wired |
 | Callbacks Member | ToolEnd | A tool call finished (name + final output) | internal/orchestrator/dispatch.go:242 (producer) + internal/tui/bridge_test.go:56 (TestBridgeFlushClearsBuffers) | wired |
-| Callbacks Member | PlanUpdate | The plan changed (update_plan tool, or a pipeline phase writing it) | internal/orchestrator/phaserunners.go:310, toolhandlers.go:178 (producer) + internal/tui/ingest_test.go:75 (TestContextPlanAndMCPStatusMessagesUpdateModel) | wired |
+| Callbacks Member | PlanUpdate | The tasks.md checklist changed | internal/tui/ingest_test.go:75 (TestContextPlanAndMCPStatusMessagesUpdateModel) | wired |
 | Callbacks Member | Usage | A token-usage delta for the in-flight request | internal/orchestrator/usage.go:118 (producer) + internal/tui/usage_display_test.go:10 (TestMixedProviderUsageRowsAndUnavailableCache) | wired |
 | Callbacks Member | Context | The current context-window usage snapshot | internal/orchestrator/contextreport.go:152-153 (producer) + internal/tui/ingest_test.go:75 (TestContextPlanAndMCPStatusMessagesUpdateModel) | wired |
 | Callbacks Member | Agent | A subagent lifecycle event (see AgentEvent kinds above) | internal/orchestrator/subagent.go:398-399 (producer) + internal/tui/ingest_test.go:18 (TestApplyAgentEventKindsUpdateAgentView) | wired |
