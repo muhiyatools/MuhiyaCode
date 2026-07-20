@@ -13,7 +13,7 @@ import (
 // recorded plan state, disclosing open steps instead of implying completion.
 
 func TestCompletionDisclosesIncompleteSteps(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "ca-incomplete")
+	engine, _ := scriptedEngine(t, "ca-incomplete")
 	engine.plan = contract.Plan{Steps: []contract.PlanStep{
 		{Title: "Wire the handler", Status: contract.PlanCompleted},
 		{Title: "Add the migration", Status: contract.PlanInProgress},
@@ -30,7 +30,7 @@ func TestCompletionDisclosesIncompleteSteps(t *testing.T) {
 }
 
 func TestCompletionNoDiscloseWhenComplete(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "ca-complete")
+	engine, _ := scriptedEngine(t, "ca-complete")
 	engine.plan = contract.Plan{Steps: []contract.PlanStep{
 		{Title: "Only step", Status: contract.PlanCompleted},
 	}, UpdatedAt: time.Now().UTC()}
@@ -42,7 +42,7 @@ func TestCompletionNoDiscloseWhenComplete(t *testing.T) {
 }
 
 func TestCompletionNoDiscloseForNonPlanTask(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "ca-nonplan")
+	engine, _ := scriptedEngine(t, "ca-nonplan")
 	// No plan phase (a plain task that happened to use update_plan-style steps
 	// but is not an executing plan lifecycle) → no disclosure.
 	engine.plan = contract.Plan{Steps: []contract.PlanStep{

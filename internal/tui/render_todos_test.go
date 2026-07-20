@@ -2,7 +2,6 @@ package tui
 
 import (
 	"context"
-	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -18,14 +17,6 @@ func todoModel(t *testing.T) *Model {
 	return mustUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 30})
 }
 
-// todoSteps builds a plan from a status sequence with generated titles.
-func todoSteps(spec ...contract.PlanStatus) []contract.PlanStep {
-	out := make([]contract.PlanStep, len(spec))
-	for i, st := range spec {
-		out[i] = contract.PlanStep{Title: fmt.Sprintf("step %d", i+1), Status: st}
-	}
-	return out
-}
 
 // TestTodoRowsCollapse pins the collapse algorithm (A3 T030): under budget shows
 // every step; over budget rolls up completed steps (when ≥2) and summarizes the

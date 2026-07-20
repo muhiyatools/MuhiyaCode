@@ -295,6 +295,7 @@ func TestPhaseReadGateDeniesTwiceThenWaives(t *testing.T) {
 	}
 	var stats contract.TaskStats
 	e.finalizeLinkStats(&stats)
+	e.stampReadGateStats(&stats)
 	if stats.ReadGate.Denied != 2 || stats.ReadGate.Waived != 1 {
 		t.Fatalf("stats want denied=2 waived=1, got %+v", stats.ReadGate)
 	}

@@ -194,6 +194,13 @@ func (e *Engine) runSubagentInput(ctx context.Context, input subagentInput) (str
 		e.knowledge.AddPhaseReport(input.Agent, pipelineLabel(l.State), handoffRole(input.Agent), input.Title, input.Task, result.Report)
 	}
 	e.addTaskAgentUsage(result.Usage)
+	// Every review dispatch stamps its outcome onto the recorded review decision
+	// (ceiling hit, coverage line) so completion stats and benchmark records
+	// carry them, whoever launched the reviewer. Idempotent: re-parsing the same
+	// report writes the same fields.
+	if input.Agent == "review" {
+		e.updateTaskReviewOutcome(result.Report)
+	}
 	e.observeOrchestratedSubagent(ctx, input.Agent, result)
 	if e.persistence.AddEvent != nil {
 		summary, _ := json.Marshal(map[string]any{"runId": result.RunID, "agent": result.Agent, "title": result.Title, "status": result.Status, "terminalShape": result.TerminalShape, "turns": result.Turns, "toolCalls": result.ToolCalls, "usage": result.Usage, "task": contract.TruncateEllipsis(input.Task, 2000), "report": contract.TruncateEllipsis(result.Report, 4000)})

@@ -197,7 +197,7 @@ func TestLifecycleOrchestratedFromDepth(t *testing.T) {
 // the reverse direction (there is no manual plan toggle to clear a goal); a goal is
 // instead refused while a plan executes (DG2, goal_hardening_test.go).
 func TestLifecyclePlanGoalExclusion(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "lc-exclusion")
+	engine, _ := scriptedEngine(t, "lc-exclusion")
 	engine.SetLifecycleState(contract.LifecyclePlanning)
 	if !engine.PlanMode() {
 		t.Fatal("planning did not engage")

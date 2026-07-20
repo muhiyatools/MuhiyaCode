@@ -66,3 +66,12 @@ func TestEventFixtureLoadsDeterministically(t *testing.T) {
 		t.Fatal("fixture events did not load into the transcript")
 	}
 }
+
+// todoSteps builds checklist steps from a status sequence with generated titles.
+func todoSteps(spec ...contract.PlanStatus) []contract.PlanStep {
+	out := make([]contract.PlanStep, len(spec))
+	for i, st := range spec {
+		out[i] = contract.PlanStep{Title: fmt.Sprintf("step %d", i+1), Status: st}
+	}
+	return out
+}

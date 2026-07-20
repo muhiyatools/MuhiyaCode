@@ -193,6 +193,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		sort.Strings(stats.FilesChanged)
 		e.finalizeReviewStats(&stats, assessment.Class, filesChanged, taskLinesAdded, taskLinesRemoved)
 		e.finalizeLinkStats(&stats)
+		e.stampReadGateStats(&stats)
 		if e.callbacks.TaskComplete != nil {
 			e.callbacks.TaskComplete(stats)
 		}

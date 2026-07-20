@@ -418,6 +418,7 @@ func (e *Engine) resetTaskState(budget Budget) {
 	e.taskReviewDecision, e.taskTerminalReads = nil, 0
 	e.taskOversizedPlanRejected = false
 	e.resetLinkTaskState()
+	e.resetReadGateState()
 	e.taskAgentCap = budget.MaxAgentRuns
 	e.taskPhaseAgentRuns = make(map[contract.LifecycleState]int)
 	e.taskPeakContext = 0

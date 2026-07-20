@@ -18,22 +18,6 @@ import (
 // reads become LifecycleState()/SetLifecycleState(), and the merged
 // lifecycleRestoreNotice replaces planRestoreNotice.
 
-func lifecycleEngine(t *testing.T, id string, resp ...contract.ChatResponse) (*Engine, *scriptedProvider) {
-	t.Helper()
-	if len(resp) == 0 {
-		resp = []contract.ChatResponse{{Content: "ok"}}
-	}
-	provider := &scriptedProvider{responses: resp}
-	settings := engineSettings()
-	engine, err := NewEngine(EngineConfig{
-		Settings: &settings, Session: contract.Session{ID: id, WorkspacePath: t.TempDir()},
-		Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return engine, provider
-}
 
 func incompletePlan() contract.Plan {
 	return contract.Plan{Steps: []contract.PlanStep{{Title: "Step one", Status: contract.PlanInProgress}}, UpdatedAt: time.Now().UTC()}
@@ -55,7 +39,7 @@ func migratedPlanState(legacy contract.PlanStateSnapshot, plan contract.Plan) *c
 // T3/T10: proceed-now executes and, once all steps complete, the plan is
 // finished — and NO executable notice survives. The headline defect.
 func TestPlanLifecycleProceedThenFinished(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "pl-finish", contract.ChatResponse{
+	engine, _ := scriptedEngine(t, "pl-finish", contract.ChatResponse{
 		ToolCalls: []contract.ToolCall{contract.NewToolCall("u", "update_plan", `{"steps":[{"title":"Step one","status":"completed"}]}`)},
 	}, contract.ChatResponse{Content: "all done"})
 	engine.plan = incompletePlan()
@@ -77,7 +61,7 @@ func TestPlanLifecycleProceedThenFinished(t *testing.T) {
 // T7: the widened matcher catches "proceed with the plan" (which misses the
 // bare-token continuation regex) and injects + executes the saved plan.
 func TestPlanLifecycleWidenedProceedExecutes(t *testing.T) {
-	engine, provider := lifecycleEngine(t, "pl-widened", contract.ChatResponse{Content: "working"})
+	engine, provider := scriptedEngine(t, "pl-widened", contract.ChatResponse{Content: "working"})
 	engine.plan = incompletePlan()
 	engine.SetPendingPlan(true) // T4: proceed-later → pending
 	if engine.LifecycleState() != contract.LifecyclePending {
@@ -98,7 +82,7 @@ func TestPlanLifecycleWidenedProceedExecutes(t *testing.T) {
 // T8: a go-ahead phrasing that misses BOTH matchers still flips pending→executing
 // the moment the model advances a plan step. Phrasing-independent backstop.
 func TestPlanLifecycleStepProgressDetectsExecution(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "pl-t8", contract.ChatResponse{
+	engine, _ := scriptedEngine(t, "pl-t8", contract.ChatResponse{
 		ToolCalls: []contract.ToolCall{contract.NewToolCall("u", "update_plan", `{"steps":[{"title":"Step one","status":"completed"}]}`)},
 	}, contract.ChatResponse{Content: "done"})
 	engine.plan = incompletePlan()
@@ -118,7 +102,7 @@ func TestPlanLifecycleStepProgressDetectsExecution(t *testing.T) {
 // T11: a run that ends with steps still open leaves the plan interrupted
 // (resumable), not finished and not freshly executable.
 func TestPlanLifecycleIncompleteEndInterrupts(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "pl-interrupt", contract.ChatResponse{Content: "stopping here"})
+	engine, _ := scriptedEngine(t, "pl-interrupt", contract.ChatResponse{Content: "stopping here"})
 	engine.plan = contract.Plan{Steps: []contract.PlanStep{
 		{Title: "Step one", Status: contract.PlanCompleted},
 		{Title: "Step two", Status: contract.PlanInProgress},
@@ -153,7 +137,7 @@ func TestPlanLifecycleIncompleteEndInterrupts(t *testing.T) {
 // production is fixed — see the task report for details instead of masking it
 // here.
 func TestPlanLifecycleSupersede(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "pl-supersede")
+	engine, _ := scriptedEngine(t, "pl-supersede")
 	engine.plan = incompletePlan()
 	engine.SetPendingPlan(true)
 	engine.SetLifecycleState(contract.LifecyclePlanning) // enter plan mode over a pending plan
@@ -184,7 +168,7 @@ func TestPlanLifecycleSupersede(t *testing.T) {
 // T12: /plan clear discards the plan; the phase is terminal and no affordance
 // remains.
 func TestPlanLifecycleDiscard(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "pl-discard")
+	engine, _ := scriptedEngine(t, "pl-discard")
 	engine.plan = incompletePlan()
 	engine.SetPendingPlan(true)
 	engine.DiscardPlan()
@@ -198,7 +182,7 @@ func TestPlanLifecycleDiscard(t *testing.T) {
 
 // A terminal phase never transitions back to an executable state.
 func TestPlanLifecycleTerminalIsSticky(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "pl-sticky")
+	engine, _ := scriptedEngine(t, "pl-sticky")
 	engine.SetLifecycleState(contract.LifecycleFinished)
 	engine.SetLifecycleState(contract.LifecycleImplementing) // must be a no-op
 	if got := engine.LifecycleState(); got != contract.LifecycleFinished {
@@ -314,7 +298,7 @@ func TestPlanLifecycleFinishedResumesSilent(t *testing.T) {
 // T2: a plan-ready signal requires at least one incomplete step, so re-entering
 // plan mode over an already-complete plan cannot re-arm the executable hint.
 func TestPlanLifecycleReadyRequiresIncompleteStep(t *testing.T) {
-	engine, _ := lifecycleEngine(t, "pl-ready-guard", contract.ChatResponse{Content: "Here is the plan. Proceed?"})
+	engine, _ := scriptedEngine(t, "pl-ready-guard", contract.ChatResponse{Content: "Here is the plan. Proceed?"})
 	engine.SetLifecycleState(contract.LifecyclePlanning)
 	engine.plan = contract.Plan{Steps: []contract.PlanStep{{Title: "done already", Status: contract.PlanCompleted}}, UpdatedAt: time.Now().UTC()}
 	_, stats, err := engine.Run(context.Background(), "plan it")

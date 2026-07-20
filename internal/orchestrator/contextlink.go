@@ -366,3 +366,20 @@ func linkNoticeLine(outcome contract.LinkOutcome) string {
 		return ""
 	}
 }
+
+// resetLinkTaskState starts a task with a fresh link ledger. The task ordinal
+// stamps record lineage so same-task chains and cross-task follow-ups are
+// distinguishable (decideLink). Caller holds taskMu (the task-start reset
+// block).
+func (e *Engine) resetLinkTaskState() {
+	e.taskLinks = nil
+	e.taskSeq++
+}
+
+// finalizeLinkStats stamps the feature-012 link ledger onto the task stats
+// (FR-015): one outcome per subagent dispatch.
+func (e *Engine) finalizeLinkStats(stats *contract.TaskStats) {
+	e.taskMu.Lock()
+	defer e.taskMu.Unlock()
+	stats.Links = append([]contract.LinkOutcome(nil), e.taskLinks...)
+}

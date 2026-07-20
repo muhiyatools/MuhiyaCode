@@ -104,22 +104,17 @@ func (e *Engine) markImplementFailureDiagnosis(ctx context.Context) {
 	}
 }
 
-// resetLinkTaskState starts a task with a fresh link ledger and read-gate
-// state; the task ordinal stamps record lineage so phase chains and
-// follow-ups are distinguishable (contextlink.go decideLink). Caller holds
-// taskMu (the task-start reset block).
-func (e *Engine) resetLinkTaskState() {
-	e.taskLinks = nil
+// resetReadGateState clears the per-task read-gate counters. Caller holds
+// taskMu (the task-start reset block). The link-ledger half of the former
+// combined reset now lives in contextlink.go.
+func (e *Engine) resetReadGateState() {
 	e.readGate = readGateState{}
-	e.taskSeq++
 }
 
-// finalizeLinkStats stamps the feature-012 ledgers onto the task stats
-// (FR-015): per-dispatch link outcomes and the read gate's counters.
-func (e *Engine) finalizeLinkStats(stats *contract.TaskStats) {
+// stampReadGateStats records the read gate's counters on the task stats.
+func (e *Engine) stampReadGateStats(stats *contract.TaskStats) {
 	e.taskMu.Lock()
 	defer e.taskMu.Unlock()
-	stats.Links = append([]contract.LinkOutcome(nil), e.taskLinks...)
 	stats.ReadGate = contract.ReadGateStats{Denied: e.readGate.denied, Exempt: e.readGate.exempt}
 	if e.readGate.waived {
 		stats.ReadGate.Waived = 1
