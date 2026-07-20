@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/orchestrator"
 )
@@ -774,5 +775,29 @@ func TestRTLAndWrappingAreStable(t *testing.T) {
 	markdown := RenderMarkdown("# Result\n\n- one\n- `two`\n```go\nfmt.Println(1)\n```", 24, "off", "auto", newPalette("dark"))
 	if strings.Contains(markdown, "```") || !strings.Contains(markdown, "Result") || !strings.Contains(markdown, "fmt.Println") {
 		t.Fatalf("markdown render = %q", markdown)
+	}
+}
+
+// TestUpdateAvailableSegment (v1.1.0 chrome): the header names a newer
+// published version when one exists, and renders nothing at all otherwise —
+// including when the check never completed (empty latest) or the installed
+// build is ahead of the registry.
+func TestUpdateAvailableSegment(t *testing.T) {
+	frame := func(latest string) string {
+		m := NewModel(Options{Runtime: testRuntime(t), Version: "1.1.0", LatestVersion: latest})
+		m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+		return ansi.Strip(m.View().Content)
+	}
+	available := frame("1.2.0")
+	if !strings.Contains(available, "Update available 1.2.0") {
+		t.Fatalf("newer version not surfaced:\n%s", available)
+	}
+	if !strings.Contains(available, "you have 1.1.0") {
+		t.Fatalf("installed version not shown alongside:\n%s", available)
+	}
+	for _, quiet := range []string{"", "1.1.0", "1.0.9"} {
+		if got := frame(quiet); strings.Contains(got, "Update available") {
+			t.Fatalf("update segment rendered for latest=%q:\n%s", quiet, got)
+		}
 	}
 }

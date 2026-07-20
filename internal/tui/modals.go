@@ -206,7 +206,7 @@ func (m *Model) openOnboarding() {
 		{Label: "Log in with Muhiya Account", Description: "Opens your browser (muhiya.com) — approve, then return here", Recommended: true},
 	}
 	m.openChoice(
-		"Welcome to MuhiyaCode",
+		"Set up MuhiyaCode",
 		"Sign in to connect this machine to your Muhiya account. Your browser will open so you can approve the sign-in.\n\nPress Esc to dismiss — you can also paste a key with /login <key>.",
 		choices,
 		func(int) tea.Cmd {

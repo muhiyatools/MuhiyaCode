@@ -7,6 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/updatecheck"
 )
 
 func (m *Model) renderHeader() string {
@@ -22,6 +23,12 @@ func (m *Model) renderHeader() string {
 	// user, so naming them here would be noise. /context discloses them.
 	seg := []string{
 		" " + m.palette.brand.Render(m.glyphs.brand+" MuhiyaCode") + " " + m.palette.faint.Render("v"+m.version),
+	}
+	// A newer published version is worth one quiet segment. It renders nothing
+	// when current, unknown, or offline, and sits before the context meter so a
+	// narrow terminal drops it first.
+	if updatecheck.Newer(m.latestVersion, m.version) {
+		seg = append(seg, dot+" "+m.palette.brandSoft.Render("Update available "+m.latestVersion)+" "+m.palette.faint.Render("(you have "+m.version+")"))
 	}
 	seg = append(seg, dot+" "+contextMeterStyle(m.palette, m.context.Percent, hasLimit).Render(contextLabel))
 	line1 := strings.Join(seg, "  ")

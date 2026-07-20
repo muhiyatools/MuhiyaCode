@@ -22,12 +22,17 @@ func stateModel(t *testing.T) *Model {
 // visible text, not escape codes.
 func frameText(m *Model) string { return ansi.Strip(m.View().Content) }
 
-// TestFirstRunState (US6 T071/T074) — an empty session shows the welcome cue.
+// TestFirstRunState (v1.1.0) — an empty session renders an empty transcript.
+// The welcome cue is deliberately gone: the composer, header, and mode-line
+// hints orient a new user without a greeting to scroll past every session.
 func TestFirstRunState(t *testing.T) {
 	m := stateModel(t)
 	m.refreshViewport(true)
-	if !strings.Contains(frameText(m), "Welcome to MuhiyaCode") {
-		t.Fatal("first-run state missing its cue")
+	if strings.Contains(frameText(m), "Welcome to MuhiyaCode") {
+		t.Fatal("the removed welcome cue is back")
+	}
+	if strings.TrimSpace(m.transcriptContent) != "" {
+		t.Fatalf("empty session rendered transcript content: %q", m.transcriptContent)
 	}
 }
 

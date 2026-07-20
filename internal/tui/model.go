@@ -74,10 +74,13 @@ type Actions struct {
 }
 
 type Options struct {
-	Runtime       Runtime
-	Bridge        *Bridge
-	Actions       Actions
-	Version       string
+	Runtime Runtime
+	Bridge  *Bridge
+	Actions Actions
+	Version string
+	// LatestVersion is the newest published version, when a background check
+	// found one. Empty means unknown or up to date — the header shows nothing.
+	LatestVersion string
 	InitialPrompt string
 	Recent        []contract.Event
 	Notice        string
@@ -97,6 +100,9 @@ type HydratedRuntime struct {
 	Actions Actions
 	Recent  []contract.Event
 	Notice  string
+	// LatestVersion is the newest published version, if the background update
+	// check finished in time. Empty means unknown — the header shows nothing.
+	LatestVersion string
 }
 
 // hydratedMsg delivers the deferred runtime (or an error) to the loading model.
@@ -206,26 +212,29 @@ type noticeState struct {
 }
 
 type Model struct {
-	ctx      context.Context
-	runtime  Runtime
-	bridge   *Bridge
-	actions  Actions
-	version  string
-	theme    Theme
-	palette  palette
-	glyphs   glyphs
-	viewport viewport.Model
-	input    Composer
-	width    int
-	height   int
-	items    []item
-	busy     bool
-	status   string
-	started  time.Time
-	usage    contract.Usage
-	context  contract.ContextInfo
-	plan     contract.Plan
-	frame    int
+	ctx     context.Context
+	runtime Runtime
+	bridge  *Bridge
+	actions Actions
+	version string
+	// latestVersion is the newest published version when an update is available;
+	// empty renders nothing.
+	latestVersion string
+	theme         Theme
+	palette       palette
+	glyphs        glyphs
+	viewport      viewport.Model
+	input         Composer
+	width         int
+	height        int
+	items         []item
+	busy          bool
+	status        string
+	started       time.Time
+	usage         contract.Usage
+	context       contract.ContextInfo
+	plan          contract.Plan
+	frame         int
 	// transcriptRenders counts full transcript re-renders; the US1/US2 hot-path
 	// guard asserts it does not advance on keystrokes or idle ticks.
 	transcriptRenders int
@@ -433,7 +442,7 @@ func NewModel(options Options) *Model {
 	view := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	view.SoftWrap = false
 	view.FillHeight = true
-	m := &Model{ctx: ctx, runtime: options.Runtime, bridge: options.Bridge, actions: options.Actions, version: options.Version, theme: theme, palette: colors, glyphs: marks, viewport: view, input: input, width: 100, height: 34, status: "Ready", agentByID: make(map[string]*agentView), activeTools: make(map[string]*toolView), selectedSkills: make(map[string]Skill), historyIndex: -1, initialPrompt: options.InitialPrompt, followOutput: true, todoVisible: true}
+	m := &Model{ctx: ctx, runtime: options.Runtime, bridge: options.Bridge, actions: options.Actions, version: options.Version, latestVersion: options.LatestVersion, theme: theme, palette: colors, glyphs: marks, viewport: view, input: input, width: 100, height: 34, status: "Ready", agentByID: make(map[string]*agentView), activeTools: make(map[string]*toolView), selectedSkills: make(map[string]Skill), historyIndex: -1, initialPrompt: options.InitialPrompt, followOutput: true, todoVisible: true}
 	// US1 T021: when the runtime is not yet built and a Hydrate func is provided,
 	// start in the loading shell; the engine-dependent state is populated once
 	// hydration completes. Otherwise this is the unchanged single-stage path.

@@ -63,6 +63,9 @@ func (m *Model) applyHydration(msg hydratedMsg) tea.Cmd {
 		report := m.runtime.Engine.ContextReport()
 		m.context = contract.ContextInfo{HistoryTokens: report.HistoryTokens, ContextLimit: report.ContextLimit, Percent: report.Percent}
 	}
+	if msg.result.LatestVersion != "" {
+		m.latestVersion = msg.result.LatestVersion
+	}
 	if strings.TrimSpace(msg.result.Notice) != "" {
 		m.warn(msg.result.Notice)
 	}

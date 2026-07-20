@@ -27,13 +27,14 @@ func (m *Model) renderTranscript() string {
 			items = append([]item{{kind: "system", content: "Agent task: " + agent.task}}, agent.items...)
 		}
 	}
-	// US6: an empty transcript shows a first-run cue instead of a blank void — it
-	// also teaches the "/" palette and the mouse affordances so they are discoverable.
+	// An empty session renders an empty transcript. The welcome cue that used to
+	// live here is gone (v1.1.0): the composer, the header, and the "/" hint in
+	// the mode line already orient a new user, and a greeting that has to be
+	// scrolled past on every new session is not worth its space.
 	if len(items) == 0 {
 		m.transcriptChips = m.transcriptChips[:0]
-		hint := m.firstRunHint()
-		m.transcriptContent = hint
-		return hint
+		m.transcriptContent = ""
+		return ""
 	}
 	// Reserve the left gutter and a small right margin so text never touches
 	// either edge of the terminal. T048: use the single shared contentWidth so
@@ -92,20 +93,6 @@ func (m *Model) renderTranscript() string {
 	// ANSI-free plain text on copy without re-deriving the transcript.
 	m.transcriptContent = content
 	return content
-}
-
-// firstRunHint is the US6 empty-session cue: a calm welcome that teaches the
-// command palette and the mouse affordances so a new user is never faced with a
-// blank screen. It disappears the moment the first turn is added.
-func (m *Model) firstRunHint() string {
-	lines := []string{
-		m.palette.brand.Render(m.glyphs.brand + " Welcome to MuhiyaCode"),
-		"",
-		m.palette.muted.Render("Type a request below, or press ") + m.palette.brandSoft.Render("/") + m.palette.muted.Render(" for commands."),
-		m.palette.faint.Render("Project instructions (MUHIYA.md) and saved memory load automatically."),
-		m.palette.faint.Render("Drag to select · Ctrl+C copies · click a tool row to expand it."),
-	}
-	return indentLines(strings.Join(lines, "\n"), transcriptGutter)
 }
 
 // renderTextBlock renders one cacheable text item (user/assistant/system). It is

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/muhiya/muhiyacode/internal/mcpclient"
 	"github.com/muhiya/muhiyacode/internal/state"
 	"github.com/muhiya/muhiyacode/internal/tui"
+	"github.com/muhiya/muhiyacode/internal/updatecheck"
 	"github.com/muhiya/muhiyacode/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -79,14 +81,27 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 		return err
 	}
 	defer app.Close()
+	// Ask the registry whether a newer version exists, on its own goroutine so
+	// startup never waits on it. Cached for a day, silent on failure, and the
+	// result is read at hydration — by then it has either landed or it has not,
+	// and either way the session proceeds.
+	updateCh := make(chan string, 1)
+	go func() {
+		updateCh <- updatecheck.Refresh(cmd.Context(), filepath.Join(app.paths.CacheDir, "update_check.json"))
+	}()
 	hydrate := func(ctx context.Context) (tui.HydratedRuntime, error) {
 		if err := app.Hydrate(ctx); err != nil {
 			return tui.HydratedRuntime{}, err
 		}
 		// One-shot startup notices are read from the now-live engine: config gaps,
 		notice := configurationNotice(*app.Settings(), app.secrets)
+		latest := ""
+		select {
+		case latest = <-updateCh:
+		default: // still in flight — the header simply shows nothing this run
+		}
 		return tui.HydratedRuntime{
-			Runtime: app.Runtime(), Actions: app.Actions(), Recent: app.Recent(), Notice: notice,
+			Runtime: app.Runtime(), Actions: app.Actions(), Recent: app.Recent(), Notice: notice, LatestVersion: latest,
 		}, nil
 	}
 	return tui.Run(tui.Options{

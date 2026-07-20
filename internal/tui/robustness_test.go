@@ -99,20 +99,20 @@ func TestTranscriptTrimsByBytes(t *testing.T) {
 	}
 }
 
-// TestFirstRunCueShownThenReplaced (US6) proves the empty session shows a welcome
-// cue and that it disappears once a real turn arrives.
-func TestFirstRunCueShownThenReplaced(t *testing.T) {
+// TestFirstRunTranscriptIsEmptyThenFills (v1.1.0) proves an empty session
+// renders nothing (the welcome cue was removed) and that a real turn fills it.
+func TestFirstRunTranscriptIsEmptyThenFills(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m = updated.(*Model)
 	m.refreshViewport(true)
-	if !strings.Contains(m.transcriptContent, "Welcome to MuhiyaCode") {
-		t.Fatal("empty session did not show the first-run cue")
+	if strings.TrimSpace(m.transcriptContent) != "" {
+		t.Fatalf("empty session rendered content: %q", m.transcriptContent)
 	}
 	m.items = append(m.items, item{kind: "user", content: "hello"})
 	m.refreshViewport(true)
-	if strings.Contains(m.transcriptContent, "Welcome to MuhiyaCode") {
-		t.Fatal("first-run cue persisted after a turn was added")
+	if !strings.Contains(m.transcriptContent, "hello") {
+		t.Fatal("a real turn did not render")
 	}
 }
 

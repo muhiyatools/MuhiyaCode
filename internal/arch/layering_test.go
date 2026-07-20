@@ -29,8 +29,11 @@ const modulePath = "github.com/muhiya/muhiyacode"
 // injected vars), so tui may import it for the crash report's build identity
 // (Stability Overhaul T052) with no cycle risk.
 var allowedInternalImports = map[string][]string{
-	"arch":         {},
-	"buildinfo":    {},
+	"arch":      {},
+	"buildinfo": {},
+	// updatecheck is a fourth foundation leaf: stdlib only (net/http, os, json),
+	// no internal imports, so tui may render its verdict with no cycle risk.
+	"updatecheck":  {},
 	"contract":     {},
 	"instructions": {"contract"},
 	"gateway":      {"contract", "instructions"},
@@ -38,7 +41,7 @@ var allowedInternalImports = map[string][]string{
 	"state":        {"contract"},
 	"mcpclient":    {"contract", "state"},
 	"orchestrator": {"contract", "gateway", "instructions"},
-	"tui":          {"contract", "gateway", "orchestrator", "buildinfo"},
+	"tui":          {"contract", "gateway", "orchestrator", "buildinfo", "updatecheck"},
 	"command":      {"*"},
 }
 
