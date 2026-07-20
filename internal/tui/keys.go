@@ -1,13 +1,12 @@
 package tui
 
 import (
-	"sort"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/muhiya/muhiyacode/internal/app"
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"golang.org/x/text/unicode/norm"
 )
 
 func (m *Model) handleKey(key tea.KeyPressMsg) tea.Cmd {
@@ -212,13 +211,11 @@ func (m *Model) submit(prompt string) tea.Cmd {
 	// exact reconstructed paste content. Assembly happens once, here, at the send
 	// boundary, then the stash is released.
 	display := prompt
-	prompt = m.expandPastes(prompt)
+	// Paste expansion and NFC normalization live in the core (app.AssemblePrompt)
+	// so every frontend sends identical bytes; skills are folded in below, after
+	// the steering branch, because a queued steering message carries none.
+	prompt = app.AssemblePrompt(m.ctx, prompt, nil, m.expandPastes, nil)
 	m.releasePastes()
-	// 006 (T030, FR-013): the model receives normalized logical Unicode. NFC is
-	// idempotent and meaning-preserving; it never introduces presentation forms or
-	// reordering, and it rides the user message (dynamic) so the cached prefix is
-	// untouched. Digit systems are preserved as written.
-	prompt = norm.NFC.String(prompt)
 	// T1: a fresh prompt clears the persistent usage footer so prior
 	// duration / effort / totals no longer mislead.
 	m.lastStats = nil
@@ -233,27 +230,13 @@ func (m *Model) submit(prompt string) tea.Cmd {
 	m.history = append(m.history, prompt)
 	m.historyIndex = -1
 	if len(m.selectedSkills) > 0 {
-		var names []string
+		queued := make([]Skill, 0, len(m.selectedSkills))
 		for _, skill := range m.selectedSkills {
-			names = append(names, skill.Name)
+			queued = append(queued, skill)
 		}
-		sort.Strings(names)
-		var sections []string
-		for _, name := range names {
-			skill := m.selectedSkills[name]
-			body := strings.TrimSpace(skill.Instructions)
-			// 003 (T036): load the body on demand for selected skills only.
-			if body == "" && skill.Path != "" && m.actions.LoadSkill != nil {
-				if loaded, err := m.actions.LoadSkill(m.ctx, skill.Path); err == nil {
-					body = strings.TrimSpace(loaded)
-				}
-			}
-			if body == "" {
-				body = skill.Description
-			}
-			sections = append(sections, "<skill name=\""+skill.Name+"\">\n"+body+"\n</skill>")
-		}
-		prompt = "Follow the selected skill instructions when relevant to this turn.\n\n" + strings.Join(sections, "\n\n") + "\n\nUser prompt:\n" + prompt
+		// Already expanded and normalized above, so pass no expander: the core
+		// orders the skills, loads bodies on demand, and wraps them.
+		prompt = app.AssemblePrompt(m.ctx, prompt, queued, nil, m.actions.LoadSkill)
 		m.selectedSkills = make(map[string]Skill)
 	}
 	// A fresh task starts its live counters from zero — without this reset the

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	appcore "github.com/muhiya/muhiyacode/internal/app"
 	"github.com/muhiya/muhiyacode/internal/buildinfo"
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/gateway"
@@ -124,7 +125,7 @@ func runOneShot(cmd *cobra.Command, cwd, prompt string, fresh, noMCP bool) error
 	if notice := configurationNotice(*app.Settings(), app.secrets); notice != "" {
 		return errors.New(notice)
 	}
-	answer, stats, err := app.Runtime().Engine.Run(cmd.Context(), prompt)
+	answer, stats, err := app.Runtime().Engine.Run(cmd.Context(), appcore.AssemblePrompt(cmd.Context(), prompt, nil, nil, nil))
 	if err != nil {
 		// Feature 011 T004a: the benchmark runner needs a summary even for a
 		// failed run (recorded as completed:false), before the error propagates.

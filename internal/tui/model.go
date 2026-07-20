@@ -9,69 +9,26 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/muhiya/muhiyacode/internal/app"
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"github.com/muhiya/muhiyacode/internal/orchestrator"
 )
 
-type Runtime struct {
-	Engine   *orchestrator.Engine
-	Session  contract.Session
-	Settings *contract.Settings
-}
+// The frontend-service types live in internal/app so a second frontend (the
+// planned desktop app) can be written against the same core without importing
+// this terminal UI. They are aliases, not copies: tui.Runtime IS app.Runtime,
+// so internal/command satisfies both names with one value.
+type Runtime = app.Runtime
 
-type Skill struct {
-	Name, Description, Instructions, Path string
-}
+type Skill = app.Skill
 
 // UsageData is the account usage shown by /usage (003 US5), mapped from the
 // gateway GET /v1/usage response. Credits are in credits (1 credit = $0.01);
 // window/spend figures are USD.
-type UsageData struct {
-	PlanName       string
-	Windows        []UsageWindow
-	ExtraTotal     float64
-	ExtraRemaining float64
-	SpendTodayUSD  float64
-}
+type UsageData = app.UsageData
 
-type UsageWindow struct {
-	Name            string
-	BudgetUSD       float64
-	CurrentSpentUSD float64
-	ResetTime       string
-	DurationSeconds int
-}
+type UsageWindow = app.UsageWindow
 
-type Actions struct {
-	SaveSettings  func(context.Context, *contract.Settings) error
-	SetPermission func(context.Context, contract.PermissionMode) error
-	Rewind        func(context.Context) (string, error)
-	NewSession    func(context.Context) (Runtime, []contract.Event, error)
-	ListSessions  func(context.Context) ([]contract.Session, error)
-	Resume        func(context.Context, string) (Runtime, []contract.Event, error)
-	SetAPIKey     func(context.Context, string) error
-	Logout        func(context.Context) error
-	// LoginViaBrowser runs the browser sign-in (loopback + PKCE) and returns the
-	// signed-in email. It powers bare `/login` when a key is not pasted directly.
-	LoginViaBrowser func(context.Context) (string, error)
-	MCP             MCPActions
-	ListSkills      func(context.Context) ([]Skill, error)
-	// LoadSkill loads one skill's instruction body on demand (003 T036), so the
-	// /skills modal opens without reading every skill file.
-	LoadSkill func(context.Context, string) (string, error)
-	// FetchUsage retrieves account usage from the gateway with the stored key
-	// (003 US5). IsLoggedIn reports whether an API key is present, driving the
-	// /login / /usage / /logout command visibility.
-	FetchUsage func(context.Context) (*UsageData, error)
-	IsLoggedIn func() bool
-	// DiscoverModels re-queries the gateway's model catalog, merges it into
-	// settings, and returns the models now available. No restart needed.
-	DiscoverModels func(context.Context) ([]contract.Model, error)
-	// TranscriptPage (005 US1 T020) loads a keyset page of the durable transcript
-	// from SQLite for on-demand scroll-back. Nil ⇒ paging is disabled and the TUI
-	// shows only the recent window it was given.
-	TranscriptPage func(context.Context, contract.TranscriptPageRequest) (contract.TranscriptPage, error)
-}
+type Actions = app.Actions
 
 type Options struct {
 	Runtime Runtime
@@ -95,15 +52,7 @@ type Options struct {
 
 // HydratedRuntime is the result of the deferred runtime build (T021): everything
 // the model needs to switch from the loading shell to the live session.
-type HydratedRuntime struct {
-	Runtime Runtime
-	Actions Actions
-	Recent  []contract.Event
-	Notice  string
-	// LatestVersion is the newest published version, if the background update
-	// check finished in time. Empty means unknown — the header shows nothing.
-	LatestVersion string
-}
+type HydratedRuntime = app.HydratedRuntime
 
 // hydratedMsg delivers the deferred runtime (or an error) to the loading model.
 type hydratedMsg struct {

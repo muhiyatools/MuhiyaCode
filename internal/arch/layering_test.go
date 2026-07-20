@@ -41,8 +41,13 @@ var allowedInternalImports = map[string][]string{
 	"state":        {"contract"},
 	"mcpclient":    {"contract", "state"},
 	"orchestrator": {"contract", "gateway", "instructions"},
-	"tui":          {"contract", "gateway", "orchestrator", "buildinfo", "updatecheck"},
-	"command":      {"*"},
+	// app is the frontend-neutral core seam: it holds the types and prompt
+	// assembly every frontend shares, so it may reach the orchestrator but must
+	// NEVER import a frontend (tui). That one-way edge is what lets the planned
+	// desktop app reuse the core without pulling in the terminal renderer.
+	"app":     {"contract", "orchestrator"},
+	"tui":     {"contract", "gateway", "orchestrator", "buildinfo", "updatecheck", "app"},
+	"command": {"*"},
 }
 
 func TestInternalLayeringHasNoForbiddenEdges(t *testing.T) {

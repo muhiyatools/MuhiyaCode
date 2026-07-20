@@ -10,7 +10,7 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"golang.org/x/text/unicode/norm"
+	"github.com/muhiya/muhiyacode/internal/app"
 )
 
 func Run(options Options) error {
@@ -87,7 +87,7 @@ func RunLine(options Options, input io.Reader, output io.Writer) error {
 	runPrompt := func(prompt string) error {
 		// 006 (T030, FR-013): the model receives normalized logical Unicode, same as
 		// the TUI submit path.
-		answer, _, err := options.Runtime.Engine.Run(options.Context, norm.NFC.String(prompt))
+		answer, _, err := options.Runtime.Engine.Run(options.Context, app.AssemblePrompt(options.Context, prompt, nil, nil, nil))
 		if err != nil {
 			return err
 		}
