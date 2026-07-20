@@ -239,6 +239,14 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			turnCap = min(hardTurnCeiling, max(turnCap, turns-1+liveBudget.MaxTurns))
 			convergeNoted, finalNoted = false, false
 		}
+		// Fold in the executor's writes BEFORE the runway check reads them.
+		// trackChanged only sees main-loop outcomes, and under the plan/execute
+		// split the main model writes nothing but tasks.md — so a task whose real
+		// work all happened in the execution agent used to look like a task that
+		// changed nothing, and the escape hatch below never fired. It then
+		// hard-stopped at the un-escalated cap, mid-work. The executor's changes
+		// ARE the task's changes; the runway must be sized against them.
+		e.mergeChangedFiles(filesChanged)
 		if turns >= turnCap && len(filesChanged) > 0 && !escalated && currentClass != ClassEpic {
 			escalated = true
 			currentClass = EscalateClass(currentClass)

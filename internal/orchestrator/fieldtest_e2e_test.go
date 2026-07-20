@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -145,6 +146,53 @@ func TestFieldTestCompleteReportIsNotReVerified(t *testing.T) {
 	// The report's own status is what licensed that trust.
 	if got := parseReportStatus("Verification: go test ./config passed.\nSTATUS: COMPLETE"); got != ReportStatusComplete {
 		t.Fatalf("status parse = %q, want complete", got)
+	}
+}
+
+// TestExecutorWorkExtendsTheRunway is the budget removal's blind spot. Deleting
+// the agent COUNT cap left the turn cap in place, and the turn cap's one escape
+// hatch — "this task outgrew its brief, extend the runway" — only fires when
+// len(filesChanged) > 0. That set was fed by trackChanged, which sees MAIN-LOOP
+// tool outcomes only. Under the plan/execute split the main model cannot write
+// anything but tasks.md, so a task whose real work all happened in the executor
+// looked like a task that changed nothing: the escape hatch never fired and the
+// loop hard-stopped at the un-escalated cap, mid-work, with "[governor] Final
+// step: do not call tools."
+//
+// The executor's writes are the task's writes. They must extend the runway.
+func TestExecutorWorkExtendsTheRunway(t *testing.T) {
+	responses := []contract.ChatResponse{
+		// The main model delegates; the executor changes a file and reports.
+		{ToolCalls: []contract.ToolCall{
+			contract.NewToolCall("d1", "run_subagent", `{"agent":"general","role":"layout-builder","task":"Rebuild the page shell in index.html."}`),
+		}},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("r1", "read_file", `{"path":"index.html"}`)}},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("w1", "write_file", `{"path":"index.html","content":"<main>rebuilt</main>"}`)}},
+		{Content: "Changes made with file:line: index.html:1 rebuilt the shell.\nVerification: re-read index.html, markup is correct.\nProblems: none.\nSTATUS: COMPLETE"},
+	}
+	// The main model keeps investigating past the chat cap. Distinct patterns so
+	// neither the repeat limiter nor the duplicate-read dedupe collapses them,
+	// and grep never fails, so the failure terminators stay out of the way.
+	for i := 0; i < 12; i++ {
+		responses = append(responses, contract.ChatResponse{ToolCalls: []contract.ToolCall{
+			contract.NewToolCall(fmt.Sprintf("g%d", i), "grep", fmt.Sprintf(`{"pattern":"section-%d"}`, i)),
+		}})
+	}
+	engine, _, dir := fieldTestEngine(t, responses...)
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), []byte("<main>old</main>"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	engine.previous = ClassChat // "Go" after a plan: the narrowest runway there is
+
+	_, stats, err := engine.Run(context.Background(), "Go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body, err := os.ReadFile(filepath.Join(dir, "index.html")); err != nil || !strings.Contains(string(body), "rebuilt") {
+		t.Fatalf("the executor's change did not land, so this test proves nothing: %q err=%v", string(body), err)
+	}
+	if capped := classTurns[ClassChat]; stats.Turns <= capped {
+		t.Fatalf("the task stopped at the un-escalated cap (%d turns, cap %d): the executor changed a file and the runway did not extend", stats.Turns, capped)
 	}
 }
 

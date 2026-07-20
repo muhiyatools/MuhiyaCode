@@ -29,9 +29,14 @@ package orchestrator
 //	duplicate-read dedupe        ✓  ✓  ✓  n/a ✓   benign optimization (Failed:false), NOT telemetered as friction (T033)
 //	dispatch arg-validation      ✓  ✓  ✓  ✓  ✓   H1: re-emit with well-formed args
 //	failed-call short-circuit    ✓  ✓  ✓  ✓  ✓   H2: change approach; telemetered as gate/repeat-failed-call
-//	subagent budget              ✓  ✓  ✓  ✓  ✓   states remaining allowance; escalates to a closed door
 //	subagent turn-cap            ✓  ✓  ✓  ✓  ✓   forced wrap-up, never a fatal error (INV-3/T035)
 //	H5 failure terminator        ✓  ✓  ✓  ✓  ✓   windowed breaker; clean terminate reason, stats stamped
+//
+// v1.1.0 DELETED the subagent-budget gate (it stated a remaining allowance and
+// escalated to a closed door). A count cap plus the plan/execute split was
+// jointly incoherent — the main model could neither edit nor delegate — so
+// delegation scale is now the model's judgment. Nothing in this inventory caps
+// HOW MANY agents run. What remains bounds LIVENESS only: a task must end.
 //
 // The duplicate-read guard is deliberately NOT counted as friction (clause d
 // "n/a"): it is the cache working correctly (the model is handed the result it

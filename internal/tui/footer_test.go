@@ -62,6 +62,10 @@ func TestEffortLabel(t *testing.T) {
 
 // TestEffortStyle proves each level maps to its distinct palette token (A1 T011).
 func TestEffortStyle(t *testing.T) {
+	// Ambient NO_COLOR strips every foreground, so each assertion below would
+	// compare nil to nil and pass without testing anything (visibility_test.go
+	// clears it for the same reason). Pin the color path explicitly.
+	t.Setenv("NO_COLOR", "")
 	colors := newPalette("")
 	fg := func(effort contract.EffortLevel) any { return effortStyle(colors, effort).GetForeground() }
 	if !reflect.DeepEqual(fg(contract.EffortLow), colors.faint.GetForeground()) {
@@ -84,6 +88,7 @@ func TestEffortStyle(t *testing.T) {
 
 // TestContextMeterStyle pins the urgency ramp thresholds against used share (A1 T015).
 func TestContextMeterStyle(t *testing.T) {
+	t.Setenv("NO_COLOR", "") // as above: without this the ramp is untested, not tested-and-passing
 	colors := newPalette("")
 	fg := func(pct float64, has bool) any { return contextMeterStyle(colors, pct, has).GetForeground() }
 	if !reflect.DeepEqual(fg(59, true), colors.text.GetForeground()) {
