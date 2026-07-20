@@ -94,6 +94,7 @@ func SystemPrompt(c PromptContext) string {
 		instructions.PromptOperatingContractBody,
 		instructions.PromptContextEditDisciplineBody,
 		instructions.PromptCacheDisciplineBody,
+		instructions.PromptPlanningBody,
 		instructions.PromptToolsAndRecoveryBody,
 		agents,
 		instructions.PromptCommunicationBody,

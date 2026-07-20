@@ -96,3 +96,32 @@ func TestRunSubagentDefinitionRichAndDeterministic(t *testing.T) {
 		t.Fatal("task-field guidance missing from the marshaled schema (DG-4)")
 	}
 }
+
+// TestPlanningSkillContent pins the internal planning skill (Phase 4): the
+// discipline the model applies when work is genuinely large or the user asks
+// for a plan. Its memory clauses are what makes it "deeply connected to
+// memory" — it recalls before designing and records after settling; a
+// consult-only integration would forget every decision at session end.
+func TestPlanningSkillContent(t *testing.T) {
+	prompt := SystemPrompt(delegationPromptContext())
+	for _, want := range []string{
+		"PLANNING",
+		"or the user asks for a plan",   // explicit-request trigger
+		"not planned",                   // small tasks are executed, not ceremonied
+		"Recall project memory first",   // memory READ
+		"Save the durable decisions",    // memory WRITE — the deep half
+		"never plan against assumption", // grounded in real code
+		"as tasks.md items",             // the plan artifact is the checklist
+		"the plan IS the deliverable",   // plan-only requests stop at the plan
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("PLANNING section missing %q", want)
+		}
+	}
+	// Planning must not resurrect a mode: no approval pause, no lifecycle.
+	for _, forbidden := range []string{"exit_plan_mode", "plan mode", "awaiting approval", "proceed now"} {
+		if strings.Contains(strings.ToLower(prompt), strings.ToLower(forbidden)) {
+			t.Fatalf("the prompt reintroduces planning ceremony: %q", forbidden)
+		}
+	}
+}

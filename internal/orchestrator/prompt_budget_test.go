@@ -20,12 +20,12 @@ import (
 // pins the exact rendered result). Prior baselines: 3642 (feature 004), 4522
 // (feature 008), 5709 (feature 009), 5789 (feature 010).
 //
-// v1.1.0 (native agent) RE-BASELINED DOWNWARD to 4900: deleting the
-// ORCHESTRATION PIPELINE section shrank the rendered prompt from 5777 to 4798
-// chars; naming the tasks.md checklist format in the operating contract added
-// 88 back (4886). The ratchet is a ceiling, so shrinkage never fails CI — this
-// tightening is deliberate, so the budget keeps meaning something.
-const promptBaselineChars = 4900
+// v1.1.0 (native agent) baseline 5450, still BELOW the 5789 it replaced —
+// which is the point: the transformation added a plan/execute contract, a
+// tasks.md checklist convention, and a PLANNING section, and still ships a
+// smaller prompt than the pipeline prose it deleted. The ratchet is a ceiling,
+// so every one of those additions had to be paid for by tightening elsewhere.
+const promptBaselineChars = 5450
 
 func TestSystemPromptSizeWithinBudget(t *testing.T) {
 	ctx := PromptContext{

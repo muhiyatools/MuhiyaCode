@@ -176,3 +176,28 @@ var (
 	skillsHeaderText = Register(Text{ID: "prompt.skills.header", Audience: MainStatic, Cache: Prefix, Body: SkillsHeaderBody})
 	skillsHintText   = Register(Text{ID: "prompt.skills.hint", Audience: MainStatic, Cache: Prefix, Body: SkillsHintBody, MentionsTools: []string{"read_file"}, AllowlistCtx: "main-loop"})
 )
+
+// PromptPlanningBody is the agent's internal planning skill. It is not a mode,
+// a lifecycle, or a tool — it is the discipline the model applies when a task
+// genuinely needs structure, or when the user asks for a plan outright.
+//
+// It lives in the cached prefix rather than a loadable file for two reasons:
+// the skill store sits under ~/.muhiya, a sensitive root the model's file tools
+// cannot read; and once cached, a short section costs nothing per turn while a
+// lazily-loaded one costs a round trip every time it is needed.
+//
+// The memory clauses are the point of "deeply connected to memory": planning
+// starts by recalling what this project already decided, and ends by recording
+// what this plan decided, so the next session does not relitigate it.
+const PromptPlanningBody = `PLANNING
+Plan when the work is genuinely large or the user asks for a plan; small clear tasks are executed, not planned.
+1. Recall project memory first — constraints, past decisions, similar plans.
+2. Read the code you intend to change; never plan against assumptions. One explore agent only if the area is unknown.
+3. Write the plan as tasks.md items: verifiable actions naming their files, about one commit each.
+4. If the user asked for a PLAN, the plan IS the deliverable — present it and stop. Otherwise start executing.
+5. Save the durable decisions and constraints to memory when the work settles.`
+
+var promptPlanningText = Register(Text{
+	ID: "prompt.planning", Audience: MainStatic, Cache: Prefix, Body: PromptPlanningBody,
+	MentionsTools: []string{"read_file", "run_subagent", "recall_memory", "save_memory"}, AllowlistCtx: "main-loop",
+})
