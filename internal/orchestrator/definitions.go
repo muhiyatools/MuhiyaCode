@@ -10,7 +10,7 @@ import (
 // sessionDefinitions returns the full, session-stable tool schema set. It never
 // varies by task class or effort, so the tool block stays byte-identical across
 // turns and remains inside DeepSeek's cached prefix. Per-turn permission comes
-// from the task brief (e.g. agents<=0) and is enforced at execution time, not
+// at execution time by the role gate and the liveness guards, not
 // by adding or removing schemas.
 func (e *Engine) sessionDefinitions() []contract.ToolDefinition {
 	definitions := e.registry.BaseDefinitions(nil)

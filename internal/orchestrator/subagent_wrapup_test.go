@@ -75,8 +75,18 @@ func TestWrapUpStillEmptyReturnsGuidedPartialNotForbiddenString(t *testing.T) {
 	if strings.Contains(strings.ToLower(result.Report), "bounded turn limit") {
 		t.Fatalf("INV-3 violated: report surfaced the forbidden 'bounded turn limit' string: %q", result.Report)
 	}
-	if !strings.Contains(result.Report, "partial progress") || !strings.Contains(result.Report, "continue it directly") {
+	// The synthetic partial must carry a STATUS line: without it the caller
+	// reads "no verification shown" and has no named next action. It says
+	// BLOCKED + dispatch-a-continuation, because under the role split the caller
+	// cannot finish the work itself.
+	if !strings.Contains(result.Report, "partial progress") {
 		t.Fatalf("expected a guided partial report, got: %q", result.Report)
+	}
+	if !strings.Contains(result.Report, "STATUS: BLOCKED") || !strings.Contains(result.Report, "dispatch a continuation") {
+		t.Fatalf("partial report must state a status and an actionable next step: %q", result.Report)
+	}
+	if strings.Contains(result.Report, "continue it directly") {
+		t.Fatalf("the partial report tells the caller to do work the role split forbids: %q", result.Report)
 	}
 	if !hasHarnessEvent(engine.HarnessEvents(), contract.HarnessRecovery, "subagent-turn-budget") {
 		t.Fatalf("turn-budget exhaustion was not telemetered: %+v", engine.HarnessEvents())

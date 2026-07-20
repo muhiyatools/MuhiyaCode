@@ -81,8 +81,8 @@ func SystemPrompt(c PromptContext) string {
 	}
 	// DELEGATION (feature 008 US1, contract DG-1..3): the affirmative, criteria-based
 	// delegation section. Session-invariant (SubagentModel is fixed per session), so
-	// it is byte-stable in the prefix; the dynamic allowance number stays on the
-	// user-message tail as the task brief's "agents<=N". Positioned as its own
+	// it is byte-stable in the prefix. There is no allowance number anywhere —
+	// delegation scale is the model's judgment (v1.1.0). Positioned as its own
 	// section — not a trailing environment clause — because instruction salience is
 	// part of the contract for the driven model family.
 	agents := instructions.PromptDelegationOffBody

@@ -23,6 +23,10 @@ var forbiddenStrings = []string{
 	"Run /plan again",                // removed /plan toggle notice (P1)
 	"Proceed with Plan",              // removed plan-approval affordance (Phase 1 planning-pipeline removal)
 	"Plan mode",                      // removed plan mode entirely (Phase 1 planning-pipeline removal)
+	"agents=0",                       // removed subagent budgets (FS-1) — this exact brief starved the "Go" turn
+	"budget exhausted",               // removed subagent budgets (FS-1)
+	"run(s) remaining",               // removed subagent budgets (FS-1)
+	"no subagent budget",             // removed subagent budgets (FS-1)
 }
 
 // alwaysToolCallProvider never produces final text — every turn is another tool

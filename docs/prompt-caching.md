@@ -1,8 +1,8 @@
 # Prompt caching
 
 MuhiyaCode keeps the system prompt, tool schemas, and settled conversation history byte-stable
-across a session. Per-turn details such as the date, task class, and budgets are appended to the
-latest user message. MCP schemas are pinned at the session boundary; a changed MCP configuration
+across a session. Per-turn details such as the date, task class, and its tool/turn budgets are
+appended to the latest user message. MCP schemas are pinned at the session boundary; a changed MCP configuration
 is applied at the next deliberate boundary and recorded as an invalidation event.
 
 Use a concrete model such as `deepseek-v4-flash` instead of a router that may choose a different
@@ -79,10 +79,31 @@ DISCIPLINE, PLANNING, TOOLS AND RECOVERY, DELEGATION, COMMUNICATION, SAFETY, ENV
 
 Relative to v1.0.6 this epoch removed the planning-pipeline prose and its tools (`update_plan`,
 `exit_plan_mode`, `read_plan`) and added a plan/execute contract, a `tasks.md` checklist
-convention, and the PLANNING section. It still came out smaller: the system prompt went 5777 →
-5421 chars and the tool JSON 20317 → 18134 bytes. A compile-time ratchet caps the prompt at 5440
-chars and a wire golden pins the exact prefix bytes, so every addition has to be paid for by
-tightening something else.
+convention, the PLANNING section, and the field-test fixes below. It still came out smaller: the
+system prompt went 5777 → 5246 chars and the tool JSON 20317 → 18578 bytes. A compile-time ratchet
+caps the prompt at 5700 chars and a wire golden pins the exact prefix bytes, so every addition has
+to be paid for by tightening something else.
+
+The ratchet moved once inside this release, 5440 → 5700, tracking a +257-char growth in the
+composed prompt (5428 → 5685 as measured with web + subagents available; the wire golden composes
+a few less without web). The reasoning is recorded in `prompt_budget_test.go` rather than in the
+commit alone, because a ratchet that rises without a stated reason is not a ratchet. Those chars
+buy exactly two things, both of which remove *recurring per-task* waste at a *one-time* prefix
+cost:
+
+- **Trust the report (contract rule 5).** The field test exposed a contradiction — the contract
+  said "run the checks yourself" while DELEGATION said "treat its report as ground truth" — and
+  the model resolved it by re-reading, on the main stream, every file an agent had just verified.
+  A one-time prompt cost that deletes a per-task re-verification loop is the cheapest trade
+  available at this size. `CACHE DISCIPLINE` now names agent reports as current truth alongside
+  past reads, searches, and edit diffs, so re-checking a verified report is cache waste by
+  definition.
+- **The executor-ready standard (PLANNING step 3).** A `tasks.md` item must be runnable by the
+  cheaper executor without further design decisions; an under-specified item costs far more in
+  executor turns than the sentence costs in prefix.
+
+Paid for in part by deleting the old rule 5 (it duplicated DELEGATION), the agent-allowance
+clauses, and handoff detail that was stated twice.
 
 Two things deliberately stay **out** of the prefix:
 
@@ -91,7 +112,9 @@ Two things deliberately stay **out** of the prefix:
   The harness instead observes writes to that path in the shared dispatch gate (so main-loop and
   subagent edits both count), re-parses it, and feeds the to-do panel. The model reads it on
   demand like any other file.
-- **Per-turn dynamics** — date, task class, and budgets still ride the newest user message.
+- **Per-turn dynamics** — date, task class, and its tool/turn budgets still ride the newest user
+  message. The brief carries no subagent count: delegation scale is the model's judgment, so there
+  is no allowance to render, spend down, or keep consistent with an enforced cap.
 
 Resumed sessions pay one attributed cold start the first time they run on v1.1.0, then the new
 prefix is byte-stable.

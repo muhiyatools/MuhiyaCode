@@ -253,7 +253,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[governor] Final step: do not call tools. Give the complete factual final answer now: outcome, verification, and genuine remaining work."})
 		} else if !isFinal && turns >= turnCap-2 && !convergeNoted {
 			convergeNoted = true
-			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[governor] Two steps remain. Batch only essential edits, verify, and finish."})
+			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[governor] Two steps remain. Dispatch only what is essential, accept the report, and finish."})
 		}
 		// T039 ladder: soft advisory band [0.50, 0.60) mutates NOTHING — it just
 		// warns once per compaction cycle that context is filling (Reasonix
@@ -449,7 +449,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				continue
 			}
 			// DG-7 (feature 008): AutoReview — at max effort, when substantial
-			// file-changing work is about to finalize with agent allowance left,
+			// file-changing work is about to finalize after substantial file-changing work,
 			// nudge ONCE for an independent review pass. A dynamic tail rider
 			// (never prefix), fired at most once per task, skipped when nothing
 			// meaningful changed.
@@ -470,7 +470,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 					if trimmed != "" {
 						_ = e.persistAssistant(ctx, trimmed)
 					}
-					e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[review] Before finishing: run one %s review subagent over the files you changed and fix only verified findings, then give the final answer.", decision.Tier)})
+					e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[review] Before finishing: run one %s review subagent over the files that changed, then dispatch fixes for verified findings only and give the final answer.", decision.Tier)})
 					continue
 				}
 			}
@@ -556,7 +556,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			e.taskMu.Lock()
 			e.taskOverBudget = toolCalls - budget.ToolCalls
 			e.taskMu.Unlock()
-			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[governor] The estimated tool budget is passed. Keep required work moving, but converge: avoid new exploration, finish edits, verify once, and report."})
+			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[governor] The estimated tool budget is passed. Keep required work moving, but converge: avoid new exploration, finish the outstanding dispatch, and report."})
 		}
 	}
 }

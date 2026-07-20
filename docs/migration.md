@@ -72,7 +72,7 @@ model catalog.
 The system prompt and tool schemas changed, so the first request after upgrading cannot read the
 previous cache. Resumed sessions pay one cold start, attributed as such in `/context` and the task
 summary, then return to normal steady-state rates. The new prefix is smaller than the one it
-replaces (system prompt 5777 → 5421 chars, tool JSON 20317 → 18134 bytes).
+replaces (system prompt 5777 → 5246 chars, tool JSON 20317 → 18578 bytes).
 
 ### Update notice
 

@@ -124,7 +124,7 @@ func (e *Engine) proposeChanges(ctx context.Context, raw json.RawMessage) (strin
 	if e.callbacks.Ask == nil {
 		// 004 US3 (T036): label the non-interactive verdict honestly — no human
 		// reviewed this proposal, so the model must not read it as human approval.
-		return `{"verdict":"auto_approved","note":"auto-approved by non-interactive policy — no human reviewed this proposal; proceed minimally and verify each change yourself"}`, nil
+		return `{"verdict":"auto_approved","note":"auto-approved by non-interactive policy — no human reviewed this proposal; dispatch minimally and check the agent report for each change"}`, nil
 	}
 	var input struct {
 		Summary        string `json:"summary"`
@@ -143,10 +143,10 @@ func (e *Engine) proposeChanges(ctx context.Context, raw json.RawMessage) (strin
 		index = answers[0].Index
 	}
 	if index == 2 {
-		return `{"verdict":"rejected","instruction":"Do not edit; summarize the plan and wait."}`, nil
+		return `{"verdict":"rejected","instruction":"Do not dispatch this change; summarize the plan and wait."}`, nil
 	}
 	if index == 1 {
-		return `{"verdict":"approved_with_caution","instruction":"Make the smallest changes and verify each file."}`, nil
+		return `{"verdict":"approved_with_caution","instruction":"Dispatch the smallest change that works, and check the report for each file."}`, nil
 	}
-	return `{"verdict":"approved","instruction":"Execute and verify the plan."}`, nil
+	return `{"verdict":"approved","instruction":"Dispatch the plan to the execution agent and confirm its report."}`, nil
 }

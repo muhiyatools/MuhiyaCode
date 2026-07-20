@@ -83,7 +83,7 @@ const (
 	// exactly the incoherence fix (a) closes: an advertised capability the
 	// executor cannot honor.
 	SubagentGeneralDescription = "Full-tool agent for an isolated, self-contained coding subtask."
-	SubagentGeneralSystem      = "Complete the isolated subtask end to end. Inspect before editing, make focused changes, and RUN the check that proves the change works. Your caller trusts your report instead of re-checking your work, so it must earn that: end with STATUS: COMPLETE only when you ran the check and it passed. If you could not run it, end with STATUS: NEEDS-VERIFY: <the exact command>. If something stopped you, end with STATUS: BLOCKED: <what>. Never claim COMPLETE for work you did not verify. Do not ask the user questions."
+	SubagentGeneralSystem      = EditDisciplineBody + " Complete the isolated subtask end to end. Inspect before editing, make focused changes, and RUN the check that proves the change works. Your caller trusts your report instead of re-checking your work, so it must earn that: end with STATUS: COMPLETE only when you ran the check and it passed. If you could not run it, end with STATUS: NEEDS-VERIFY: <the exact command>. If something stopped you, end with STATUS: BLOCKED: <what>. Never claim COMPLETE for work you did not verify. Do not ask the user questions."
 )
 
 var (
@@ -139,7 +139,7 @@ const (
 // between them.
 const (
 	CapabilityStatementPrefix = "Tools available to you: "
-	CapabilityStatementSuffix = ". Anything not listed is unavailable to you — do not attempt it. Return your findings or diffs; when you hit ambiguity or an architectural choice, report it back to the caller rather than deciding it yourself."
+	CapabilityStatementSuffix = ". Anything not listed is unavailable to you — do not attempt it. Report what you did and what you verified; when a genuine architectural choice has no defensible default, say so in your report rather than guessing."
 )
 
 // HandoffContract label bodies (subagent.go HandoffContract.Render).
@@ -184,3 +184,17 @@ Rules:
 - Never propose a premium model for a session that starts with chat, questions, or a small fix.`
 
 var advisorSystemText = Register(Text{ID: "advisor.system", Audience: Subagent, Cache: Sidecar, Body: AdvisorSystemBody})
+
+// EditDisciplineBody is the editing half of the old CONTEXT AND EDIT
+// DISCIPLINE section, delivered to the agent that actually edits files. Under
+// the plan/execute split these rules sat in the MAIN model's cached prefix —
+// taught, at ~640 bytes per session, exclusively to the one model forbidden
+// from using them, while the executor learned edit_file's contract only by
+// violating it.
+const EditDisciplineBody = "Change existing files with surgical edit_file/multi_edit edits only. " + WriteFilePermissionRuleBody +
+	" edit_file oldString must be exact, unique, and different from newString; if it is ambiguous extend the surrounding context, and if it is not found use the returned nearest region. Batch same-file changes with multi_edit."
+
+var editDisciplineText = Register(Text{
+	ID: "subagent.edit-discipline", Audience: Subagent, Cache: Sidecar, Body: EditDisciplineBody,
+	StatesRule: RuleWriteFilePermission, MentionsTools: []string{"edit_file", "multi_edit", "write_file"}, AllowlistCtx: "subagent.general",
+})

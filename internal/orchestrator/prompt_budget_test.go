@@ -20,29 +20,29 @@ import (
 // pins the exact rendered result). Prior baselines: 3642 (feature 004), 4522
 // (feature 008), 5709 (feature 009), 5789 (feature 010).
 //
-// v1.1.0 (native agent) baseline 5700 against an actual 5685 in THIS context
-// (HasWeb+HasSubagents; the wire golden composes ~14 fewer without web).
-// Fifteen chars of headroom, deliberately tight.
+// v1.1.0 (native agent) baseline 5270 against an actual 5253 in THIS context
+// (HasWeb+HasSubagents; the wire golden composes 5246 without web). Seventeen
+// chars of headroom, deliberately tight.
 //
-// This release still ships SMALLER than the 5789 it replaced, while adding a
+// The release ships 536 chars SMALLER than the 5789 it replaced while ADDING a
 // plan/execute contract, a tasks.md convention, a PLANNING section, and the
-// field-test fixes. The +257 over the mid-release 5428 buys exactly two
-// things, both of which stop recurring per-task waste:
+// trust-the-report protocol. Two deletions paid for all of it:
 //
-//   - Trust-the-report (rule 5). The field test exposed a CONTRADICTION: the
-//     contract said "run the checks yourself" while DELEGATION said "treat its
-//     report as ground truth", and the model resolved it by re-reading every
-//     file an agent had just verified. A one-time prompt cost that removes a
-//     per-task re-verification loop is the cheapest trade available here.
-//   - The executor-ready standard (PLANNING step 3). Items must be runnable by
-//     a cheaper model without design decisions — that IS the plan/execute
-//     split's payoff, and an under-specified item costs far more in executor
-//     turns than the sentence costs in prefix.
+//   - The ORCHESTRATION PIPELINE section, gone with the pipeline itself.
+//   - CONTEXT AND EDIT DISCIPLINE's editing half (~640 chars), which moved to
+//     the EXECUTOR. Under the plan/execute split it was teaching edit_file's
+//     oldString contract, multi_edit batching, and the write_file rule to the
+//     one model forbidden from editing — every session, in cached bytes —
+//     while the agent that actually edits received none of it. A coherence
+//     audit found it; the move fixes the audit finding and the budget at once.
 //
-// Paid for in part by deleting the old rule 5 (duplicated DELEGATION), the
-// agent-allowance clauses, and the handoff detail now stated once in
-// DELEGATION instead of twice.
-const promptBaselineChars = 5700
+// What the additions buy, so a future reader knows what NOT to trim first:
+// trust-the-report (rule 5) resolves a contradiction that made the model
+// re-read every file an agent had just verified, and PLANNING step 3's
+// executor-ready standard is the whole payoff of the split — an
+// under-specified item costs far more in executor turns than the sentence
+// costs in prefix.
+const promptBaselineChars = 5270
 
 func TestSystemPromptSizeWithinBudget(t *testing.T) {
 	ctx := PromptContext{

@@ -118,14 +118,24 @@ func TestCanonicalCopy_ReportFormatFieldListsAreSingleSource(t *testing.T) {
 }
 
 // TestCanonicalCopy_WriteFilePermissionSentenceIsTokenIdentical pins fix (d):
-// the write_file tool description IS the canonical sentence, and the system
-// prompt's CONTEXT AND EDIT DISCIPLINE section contains it verbatim.
+// the write_file tool description IS the canonical sentence, and the edit
+// discipline delivered to the EXECUTOR contains it verbatim. v1.1.0 moved that
+// discipline out of the main model's cached prefix — under the plan/execute
+// split it was teaching edit mechanics to the one model forbidden from
+// editing, while the executor never received them at all.
 func TestCanonicalCopy_WriteFilePermissionSentenceIsTokenIdentical(t *testing.T) {
 	if ToolWriteFileDescription != WriteFilePermissionRuleBody {
 		t.Errorf("tool.write_file.desc (%q) is not token-identical to the canonical write_file rule sentence (%q)", ToolWriteFileDescription, WriteFilePermissionRuleBody)
 	}
-	if !strings.Contains(PromptContextEditDisciplineBody, WriteFilePermissionRuleBody) {
-		t.Error("the system prompt's CONTEXT AND EDIT DISCIPLINE section no longer contains the canonical write_file rule sentence verbatim")
+	if !strings.Contains(EditDisciplineBody, WriteFilePermissionRuleBody) {
+		t.Error("the executor's edit discipline no longer contains the canonical write_file rule sentence verbatim")
+	}
+	// It must reach the executor, not merely exist as a constant.
+	if !strings.Contains(SubagentGeneralSystem, WriteFilePermissionRuleBody) {
+		t.Error("the general executor's system message does not carry the write_file rule")
+	}
+	if !strings.Contains(SubagentGeneralSystem, "oldString must be exact") {
+		t.Error("the general executor's system message does not carry the edit_file contract")
 	}
 }
 

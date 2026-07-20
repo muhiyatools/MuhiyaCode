@@ -446,11 +446,11 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			// overspend: the subagent reports what it covered and what remains.
 			wrapUp = true
 			ceilingHit = true
-			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Token budget reached: stop calling tools and return your report NOW — state exactly what you covered and what you did NOT get to."})
+			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Token budget reached: stop calling tools and return your report NOW — state exactly what you covered and what you did NOT get to, and end with the STATUS line."})
 		}
 		if !wrapUp && turn >= maxTurns {
 			wrapUp = true
-			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Turn budget reached: stop calling tools and return your complete report NOW with everything you found, verified or partial."})
+			messages = append(messages, contract.Message{Role: contract.RoleUser, Content: "Turn budget reached: stop calling tools and return your complete report NOW with everything you found, verified or partial, ending with the STATUS line."})
 		}
 	}
 	if ceilingHit && result.Status == "done" {
@@ -515,10 +515,17 @@ func (e *Engine) emitAgent(event contract.AgentEvent) {
 // exhausted its turn budget: a guided partial that tells the parent to finish the
 // work directly. It NEVER contains the forbidden "bounded turn limit" phrasing.
 func turnBudgetPartialReport(lastText string) string {
-	base := "Subagent exhausted its turn budget before finishing; returning partial progress. The remaining work is unfinished — continue it directly."
+	// The STATUS line matters here: this report is synthesized by the harness,
+	// not the executor, so without it the caller reads "no verification shown"
+	// and has no named check to run. BLOCKED with the next action stated keeps
+	// the trust rule actionable, and "dispatch a continuation" respects the role
+	// split — the caller cannot finish this work itself.
+	const status = "\nSTATUS: BLOCKED: the run hit its turn ceiling before verifying — dispatch a continuation to finish the remaining work."
+	base := "Subagent exhausted its turn budget before finishing; returning partial progress."
 	if s := strings.TrimSpace(lastText); s != "" {
-		return base + " Last interim note: " + contract.Digest(s, 300)
+		return base + " Last interim note: " + contract.Digest(s, 300) + status
 	}
+	base += status
 	return base
 }
 

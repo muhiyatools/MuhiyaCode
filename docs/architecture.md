@@ -26,8 +26,9 @@ The only compatibility boundary is the user's durable data in `~/.muhiya` (or
   Feature 012 adds subagent context linking (`contextlink.go`/
   `contextrecord.go`: continuation-first stream reuse with verbatim transcript
   records under the session's `agents/` sidecars). v1.1.0 adds the plan/execute
-  role gate (`rolesplit.go`), the `tasks.md` checklist observer
-  (`checklist.go`), and the once-per-session model advisor (`advisor.go`).
+  role gate (`rolesplit.go`), the `tasks.md` checklist observer and the
+  executor's `STATUS`-line parser (`checklist.go`), and the once-per-session
+  model advisor (`advisor.go`).
 - `internal/app`: the frontend-neutral core seam. It holds the types a frontend
   needs to drive a session — `Runtime`, `Actions`, `Skill`, `UsageData`, and the
   MCP view models — plus `app.AssemblePrompt`, the single prompt-assembly path
@@ -68,11 +69,12 @@ goroutines are allowed.
    the main prefix and break the execution agent's continuation chain. The user
    does not manage models; there is no `/model`.
 6. All task classes use one stable full prompt and pinned tool surface. Task
-   sizing sets budgets and turn caps only — it never selects a different
-   execution path or prompt. Prompt and schema regression budgets are enforced
-   in tests.
-7. Independent subagents may run concurrently, but edits and ordinary tools
-   stay ordered. Read-only subagents have physically restricted tool registries.
+   sizing sets tool and turn budgets only — it never selects a different
+   execution path or prompt, and never a number of subagent runs. Prompt and
+   schema regression budgets are enforced in tests.
+7. Subagents run one at a time and ordinary tools stay ordered; a batch of
+   dispatches executes serially, announced up front so the queue is visible.
+   Read-only subagents have physically restricted tool registries.
    There are exactly three capability classes — `explore`, `general`, `review` —
    and only `general` can change the workspace. Each kind carries its own
    provider cache pin (`:sub:<kind>`), an optional provider-reported token
@@ -84,8 +86,14 @@ goroutines are allowed.
    workspace. The dispatch gate refuses main-loop file writes, patches,
    mutating shell, and MCP calls with an actionable, escalating message, with
    exactly four carve-outs: the `tasks.md` checklist, read-only shell, memory
-   writes, and every subagent scope. Per-class agent budgets (`0/1/1/2/5/8`)
-   guarantee that any class able to change files can afford its executor.
+   writes, and every subagent scope. There is deliberately **no** subagent
+   budget: a per-class allowance plus the split left a `chat`-sized turn unable
+   to edit and unable to delegate, so delegation scale is the model's judgment,
+   bounded by the one-at-a-time rule and the liveness guards rather than by a
+   quota. The caller trusts a report that shows its checks — it re-verifies only
+   on the executor's own `STATUS: NEEDS-VERIFY` / `BLOCKED` or a missing status,
+   and then runs exactly the named check. A missing status is never read as
+   success.
 8. A task never silently dies at a turn cap: it escalates once when warranted,
    receives a convergence warning, then lands with tools disabled and a factual
    final report.
@@ -94,7 +102,15 @@ goroutines are allowed.
    token palette (dark/light, `NO_COLOR`-aware); the terminal's own background is
    respected rather than force-filled, and all non-ASCII glyphs route through a
    single table with an ASCII fallback. Below a 60×20 floor the UI shows one
-   clean "terminal too small" message instead of a collapsed layout.
+   clean "terminal too small" message instead of a collapsed layout. Header
+   line 1 carries brand+version, the workspace path, an optional update notice,
+   and the context meter; the path is the one flexible segment — the fixed
+   segments are measured first and it takes what is left, left-truncated so the
+   most specific directories survive and the meter is never pushed off.
+   Structured tool payloads are rendered as what they represent, not as raw
+   JSON (an `ask_user` result reads as the question and the chosen answer; the
+   payload itself is the model-facing contract and is unchanged), with a
+   fallback to the generic rendering when a payload does not parse.
 10. Per-task cost is measured, never estimated: credits shown in the task summary
     and `/context` come only from the gateway's per-request `muhiya_log` cost
     field (USD, ×100 = credits), summed over the task's own usage records; any

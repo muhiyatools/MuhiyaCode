@@ -54,9 +54,15 @@ func TestDelegationSectionContent(t *testing.T) {
 	if strings.Contains(prompt, "delegate only independent exploration, review, or isolated work") {
 		t.Fatal("the old hedged delegation clause must be replaced")
 	}
-	// FR-018 edit discipline lives in the same epoch.
-	if !strings.Contains(prompt, "never rewrite a whole existing file") {
-		t.Fatal("edit-discipline guidance missing (FR-018)")
+	// FR-018 edit discipline moved to the EXECUTOR in v1.1.0 — under the
+	// plan/execute split it was ~640 cached chars teaching edit mechanics to the
+	// one model forbidden from editing. The main prompt keeps only reading
+	// discipline; instructions/audit_test.go pins delivery to the executor.
+	if !strings.Contains(prompt, "ranged reads over whole large files") {
+		t.Fatal("context/reading discipline missing from the main prompt")
+	}
+	if strings.Contains(prompt, "oldString must be exact") {
+		t.Fatal("edit mechanics are back in the main prompt; they belong to the executor")
 	}
 	// MT-3: memory saves route through the tool now.
 	if !strings.Contains(prompt, "save_memory") || strings.Contains(prompt, "record it by editing MEMORY.md with your normal file tools") {

@@ -17,7 +17,7 @@ package instructions
 // RuleWriteFilePermission is the rule ID linking the write_file permission
 // sentence used identically (token-for-token, IS-5) in both the tool
 // description (instructions.ToolWriteFileDescription) and this system
-// prompt's CONTEXT AND EDIT DISCIPLINE section.
+// the executor's edit-discipline text (delivered via SubagentGeneralSystem).
 const RuleWriteFilePermission = "rule.write-file-permission"
 
 // WriteFilePermissionRuleBody is the ONE canonical sentence stating when
@@ -45,8 +45,8 @@ When rules conflict, order priority: safety, the user's explicit request, this c
 2. You plan; the execution agent executes. For ANY workspace change, investigate, then run_subagent (agent "general") — see DELEGATION for what the handoff must carry. Read freely; never edit files yourself. tasks.md is the one file you write.
 3. Search first, then read only the ranges you need, batching independent reads into one turn.
 4. For work of three or more steps keep a tasks.md checklist current (see PLANNING for item shape) and state "DONE =" criteria before the first change. Skip it for small tasks; never claim completion while an item is open.
-5. Trust the report. A report showing its checks and their results is final — never re-read its files or re-run its checks. Re-verify ONLY on NEEDS-VERIFY, BLOCKED, or no verification shown, and then run exactly the named check.
-6. Wrap up flat: accept the report, tick tasks.md, answer. No second pass, no unrequested features or cleanup.
+5. Trust the report. A report showing its checks and their results is final — never re-read its files or re-run its checks. Re-verify ONLY on NEEDS-VERIFY (run the command it names), BLOCKED (fix the blocker or report it), or no verification shown (dispatch one run to finish and verify).
+6. Wrap up flat: accept the report, tick tasks.md, answer. The only extra pass allowed is a review agent when the work was substantial; never a re-check of your own.
 7. Final answer: outcome, verification performed, genuine remaining risk.`
 
 var promptOperatingContractText = Register(Text{
@@ -54,16 +54,18 @@ var promptOperatingContractText = Register(Text{
 	StatesRule: RuleExecutionBelongsToAgent, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
 })
 
-// PromptContextEditDisciplineBody's first bullet embeds
-// WriteFilePermissionRuleBody verbatim (fix d).
-const PromptContextEditDisciplineBody = `CONTEXT AND EDIT DISCIPLINE
-- Change existing files with surgical edit_file/multi_edit edits only. ` + WriteFilePermissionRuleBody + `
-- edit_file oldString must be exact, unique, and different from newString. If it is ambiguous, extend surrounding context; if not found, use the returned nearest region. Batch same-file changes with multi_edit.
+// PromptContextEditDisciplineBody is the MAIN model's half of the old
+// edit-discipline section: how to READ efficiently. The editing half —
+// oldString exactness, multi_edit batching, the write_file permission rule —
+// moved to EditDisciplineBody, which is delivered to the execution agent that
+// actually edits. Under the plan/execute split it was ~640 cached chars
+// teaching the one model forbidden from using them.
+const PromptContextEditDisciplineBody = `CONTEXT DISCIPLINE
 - Prefer grep/glob and <=200-line ranged reads over whole large files. Never restate tool output back to the model or the user.`
 
 var promptContextEditDisciplineText = Register(Text{
 	ID: "prompt.context-edit-discipline", Audience: MainStatic, Cache: Prefix, Body: PromptContextEditDisciplineBody,
-	StatesRule: RuleWriteFilePermission, MentionsTools: []string{"edit_file", "multi_edit", "write_file", "grep", "glob"}, AllowlistCtx: "main-loop",
+	MentionsTools: []string{"grep", "glob"}, AllowlistCtx: "main-loop",
 })
 
 const PromptCacheDisciplineBody = `CACHE DISCIPLINE
@@ -133,8 +135,8 @@ var (
 
 // PromptDelegationOffBody / PromptDelegationOnTemplate: the DELEGATION
 // section. Session-invariant (HasSubagents/SubagentModel are fixed per
-// session); the dynamic per-task allowance number stays on the user-message
-// tail as the task brief's "agents<=N" (never here).
+// session). v1.1.0 removed every subagent allowance, so neither this section
+// nor the task brief carries a run count.
 const PromptDelegationOffBody = "DELEGATION\nSubagents are unavailable this session; do all work directly."
 
 var promptDelegationOffText = Register(Text{ID: "prompt.delegation.off", Audience: MainStatic, Cache: Prefix, Body: PromptDelegationOffBody})
@@ -144,7 +146,7 @@ Agents (model: %s) do the work. There is no run limit — your judgment is: matc
 - "general" executes every workspace change. Chain each follow-up to it: a continuation reuses its warm context, so the second change costs far less than the first.
 - "explore" earns a run only for broad reading of code NOT already in context; "review" for an independent verdict after substantial edits. One agent at a time — never spawn a second while one is running.
 - Each run gets ONE deliverable and the minimum context; it cannot see this conversation and cannot ask you anything. Name it for the job it does.
-- Treat its report as ground truth: re-read only ranges you must reason about, and never re-explore a scope you delegated.`
+- Treat its report as ground truth: never re-explore a scope you delegated.`
 
 var promptDelegationOnText = Register(Text{
 	ID: "prompt.delegation.on", Audience: MainStatic, Cache: Prefix, Body: PromptDelegationOnTemplate,
@@ -192,7 +194,7 @@ var (
 const PromptPlanningBody = `PLANNING
 Plan when the work is genuinely large or the user asks for a plan; small clear tasks are executed, not planned.
 1. Recall project memory first — constraints, past decisions, similar plans.
-2. Read the code you intend to change; never plan against assumptions. One explore agent only if the area is unknown.
+2. Read the code you intend to change; never plan against assumptions. Use an explore agent only where the area is genuinely unknown to you.
 3. Write the plan INTO tasks.md: each item names its files, its change, and its check, executable by the agent WITHOUT further design decisions — put the thinking in the item, not in your head. Add a Notes section for constraints and risks.
 4. If the user asked for a PLAN, write tasks.md FIRST, then summarize it and stop — the file is the deliverable. Otherwise start executing.
 5. Save the durable decisions and constraints to memory when the work settles.`
