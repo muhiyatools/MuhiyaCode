@@ -1,4 +1,4 @@
-INSTRUCTION SYSTEM DUMP — 74 texts, 1 examples
+INSTRUCTION SYSTEM DUMP — 75 texts, 1 examples
 
 ################ AUDIENCE: main-static ################
 
@@ -201,7 +201,11 @@ INSTRUCTION SYSTEM DUMP — 74 texts, 1 examples
   example: example.delegation-task
   mentions: run_subagent (ctx: main-loop)
   ---
-  Run a subagent in its own isolated session; only its final report returns to you. Use it to (a) keep broad exploration of code you have NOT read out of this conversation, (b) hand off an independent, self-contained sub-task so parallel parts proceed at once, or (c) get an independent review of substantial edits before you finish. Example: 'find every caller of ApplyDiscount across services/, check which pass a nil tax table, and report file:line for each'. Kinds: explore = read-only investigation with grounded findings; plan = read-only implementation planning; review = read-only correctness/security review of changes; general = full-tool isolated coding sub-task. Issue genuinely independent runs together in one turn; the task brief's agents<=N is your allowance.
+  Run an agent in its own isolated session; only its final report returns to you. general is the executor: EVERY workspace change goes through it, and chaining each follow-up to it continues the previous run's warm context, so the second change costs far less than the first. explore earns a run only for broad reading of code you have NOT read; review for an independent verdict on substantial edits. Never spawn a second agent while one is running. Example: 'find every caller of ApplyDiscount across services/, check which pass a nil tax table, and report file:line for each'. Kinds: explore = read-only investigation with grounded findings; review = read-only correctness/security review of changes; general = full-tool execution. The task brief's agents<=N is your allowance.
+
+[tool.run_subagent.role-property]
+  ---
+  What this agent IS for this task, in 2-4 words — "auth-flow-mapper", "settings-page-builder", "migration-reviewer". Name it for the job, never a generic label. Expected on every dispatch.
 
 [tool.run_subagent.task-property]
   example: example.delegation-task

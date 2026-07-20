@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
 // linkTestEngine builds an engine whose subagent model resolves to the
@@ -183,15 +184,20 @@ func TestMinorityStalenessRereads(t *testing.T) {
 	}
 }
 
+// TestFollowUpRelatednessPredicate pins the cross-task relatedness bar. It is
+// tested on "explore" because v1.1.0 deliberately exempts the EXECUTION chain
+// from it (TestSessionChainContinuesGeneralAcrossTasks): general makes every
+// change in the session, so the workspace is its shared subject. Research
+// context stays topic-scoped and must still decline unrelated follow-ups.
 func TestFollowUpRelatednessPredicate(t *testing.T) {
 	e := linkTestEngine(t)
 	writeWorkspaceFile(t, e, "billing.go", "package billing")
-	bankLinkableRecord(t, e, "prev-task", "general", 7, []string{"billing.go"}, nil) // lineage != current taskSeq (1)
-	related := e.decideLink(subagentInput{Agent: "general", Task: "now fix the billing.go rounding"}, e.subagentSpecs()["general"], e.subagentModelID())
+	bankLinkableRecord(t, e, "prev-task", "explore", 7, []string{"billing.go"}, nil) // lineage != current taskSeq (1)
+	related := e.decideLink(subagentInput{Agent: "explore", Task: "now map the billing.go rounding"}, e.subagentSpecs()["explore"], e.subagentModelID())
 	if related.Decision != linkContinued {
 		t.Fatalf("related follow-up must link, got %+v", related)
 	}
-	unrelated := e.decideLink(subagentInput{Agent: "general", Task: "tweak the css theme"}, e.subagentSpecs()["general"], e.subagentModelID())
+	unrelated := e.decideLink(subagentInput{Agent: "explore", Task: "tweak the css theme"}, e.subagentSpecs()["explore"], e.subagentModelID())
 	if unrelated.Decision != linkFresh || unrelated.Reason != "relatedness-miss" {
 		t.Fatalf("unrelated follow-up must be fresh/relatedness-miss, got %+v", unrelated)
 	}
@@ -282,5 +288,75 @@ func TestLinkNoticeLine(t *testing.T) {
 	}
 	if line := linkNoticeLine(contract.LinkOutcome{Decision: linkFresh}); line != "" {
 		t.Fatalf("fresh dispatches emit no link notice: %q", line)
+	}
+}
+
+// TestSessionChainContinuesGeneralAcrossTasks is the owner's sub-agent cache
+// directive (v1.1.0): when the user continues a session with a new prompt, the
+// execution agent reuses the previous run's stream and context. Under the
+// plan/execute split "general" makes every change in the session, so the
+// workspace is the shared subject — cross-task continuation needs no topic
+// overlap, and the session-frozen executor model keeps stream identity valid.
+func TestSessionChainContinuesGeneralAcrossTasks(t *testing.T) {
+	e := linkTestEngine(t)
+	writeWorkspaceFile(t, e, "exporter.go", "package reporting")
+	// A predecessor from an EARLIER task, about unrelated work.
+	bankLinkableRecord(t, e, "impl1", "general", 1, []string{"exporter.go"}, []string{"exporter.go"})
+	e.taskSeq = 2 // the user came back with a new prompt
+
+	decision := e.decideLink(subagentInput{Agent: "general", Task: "rename the login button label"}, e.subagentSpecs()["general"], e.subagentModelID())
+	if decision.Decision != linkContinued {
+		t.Fatalf("execution chain did not continue across tasks: %+v", decision)
+	}
+	if decision.Reason != "session-chain" {
+		t.Fatalf("cross-task execution continuation must be attributable in the ledger, got reason %q", decision.Reason)
+	}
+}
+
+// TestSessionChainDoesNotWidenExploreOrReview: research context is topic
+// specific. Carrying an unrelated investigation forward would pollute the
+// reasoning rather than save tokens, so those kinds keep the relatedness bar.
+func TestSessionChainDoesNotWidenExploreOrReview(t *testing.T) {
+	for _, kind := range []string{"explore", "review"} {
+		t.Run(kind, func(t *testing.T) {
+			e := linkTestEngine(t)
+			writeWorkspaceFile(t, e, "exporter.go", "package reporting")
+			bankLinkableRecord(t, e, "prior1", kind, 1, []string{"exporter.go"}, nil)
+			e.taskSeq = 2
+
+			decision := e.decideLink(subagentInput{Agent: kind, Task: "rename the login button label"}, e.subagentSpecs()[kind], e.subagentModelID())
+			if decision.Decision == linkContinued {
+				t.Fatalf("%s continued into unrelated work: %+v", kind, decision)
+			}
+			if decision.Reason != "relatedness-miss" {
+				t.Fatalf("expected the relatedness bar to decline, got %q", decision.Reason)
+			}
+		})
+	}
+}
+
+// TestRoleNameIsDisplayOnly is the cache-safety half of LLM-named agents: the
+// model's role name reaches the chip and the handoff, but the capability
+// class — and with it the pin, the stable system message, and the record's
+// Kind — stays fixed, so a novel name can never fragment the provider cache.
+func TestRoleNameIsDisplayOnly(t *testing.T) {
+	named := subagentInput{Agent: "general", Role: "auth-flow-mapper", Title: "auth work", Task: "wire the login handler"}
+	if got := displayRole(named); got != "auth-flow-mapper" {
+		t.Fatalf("chip identity = %q, want the model's role name", got)
+	}
+	handoff := handoffFor(named, "")
+	if !strings.Contains(handoff.Role, "auth-flow-mapper") || !strings.Contains(handoff.Role, "implement-step") {
+		t.Fatalf("handoff Role = %q, want the model's name AND the canonical role", handoff.Role)
+	}
+	// The report format is chosen by CLASS, never by the free-form name.
+	if handoff.OutputFormat != instructions.ReportFormatImplementation {
+		t.Fatalf("a role name changed the report format: %q", handoff.OutputFormat)
+	}
+	// Fallbacks: title, then the class — a bare "general" is the last resort.
+	if got := displayRole(subagentInput{Agent: "general", Title: "auth work", Task: "x"}); got != "auth work" {
+		t.Fatalf("unnamed dispatch chip = %q, want the title", got)
+	}
+	if got := displayRole(subagentInput{Agent: "general", Task: "x"}); got != "general" {
+		t.Fatalf("last-resort chip = %q", got)
 	}
 }

@@ -79,9 +79,19 @@ func (e *Engine) decideLink(input subagentInput, spec subagentSpec, modelID stri
 	fallback := func(reason string) linkDecision {
 		return linkDecision{Decision: linkDigestSeeded, Reason: reason, Predecessor: candidate, CarryForward: digestCarryForward(candidate, e.session.WorkspacePath)}
 	}
-	if !sameTask && !relatedFollowUp(input.Task, candidate) {
+	// Cross-task continuation. The EXECUTION chain ("general") continues across
+	// tasks unconditionally: under the plan/execute split it makes every change
+	// in the session, so the workspace itself is the shared subject and the
+	// session-frozen executor model guarantees stream identity holds all
+	// session. That is what makes the sub-agent cache persist across prompts.
+	//
+	// explore/review keep the relatedness requirement: research context is
+	// topic-specific, and carrying an unrelated investigation forward pollutes
+	// the reasoning instead of saving tokens.
+	if !sameTask && input.Agent != "general" && !relatedFollowUp(input.Task, candidate) {
 		return linkDecision{Decision: linkFresh, Reason: "relatedness-miss"}
 	}
+	crossTaskChain := !sameTask && input.Agent == "general"
 	// 2. Kind pair (Clarification Q3): same-kind chains, plus review
 	// continuing the implementer whose work it reviews.
 	form := ""
@@ -125,10 +135,16 @@ func (e *Engine) decideLink(input subagentInput, spec subagentSpec, modelID stri
 	if profile := gateway.ResolveModelProfile(continuationModel); profile.ContinuationLinking != gateway.ContinuationSupported {
 		return fallback("provider:" + profile.Family)
 	}
+	reason := "eligible"
+	if crossTaskChain {
+		// Distinguishable in the ledger and the bench JSON so session-long chain
+		// reuse is measurable, not assumed.
+		reason = "session-chain"
+	}
 	return linkDecision{
 		Decision:    linkContinued,
 		Form:        form,
-		Reason:      "eligible",
+		Reason:      reason,
 		Predecessor: candidate,
 		Reread:      changed,
 		Inherited:   total - len(changed),

@@ -73,14 +73,15 @@ var (
 // subagent's own handoff contract renders (instructions.ReportFormat*),
 // instead of the pre-010 paraphrase that used "/" separators and silently
 // dropped "/unknowns" from the research format.
-const ToolRunSubagentDescription = "Run a subagent in its own isolated session; only its final report returns to you. " +
-	"Use it to (a) keep broad exploration of code you have NOT read out of this conversation, " +
-	"(b) hand off an independent, self-contained sub-task so parallel parts proceed at once, or " +
-	"(c) get an independent review of substantial edits before you finish. " +
+const ToolRunSubagentDescription = "Run an agent in its own isolated session; only its final report returns to you. " +
+	"general is the executor: EVERY workspace change goes through it, and chaining each follow-up to it continues " +
+	"the previous run's warm context, so the second change costs far less than the first. " +
+	"explore earns a run only for broad reading of code you have NOT read; review for an independent verdict on " +
+	"substantial edits. Never spawn a second agent while one is running. " +
 	"Example: '" + DelegationTaskExampleBody + "'. " +
-	"Kinds: explore = read-only investigation with grounded findings; plan = read-only implementation planning; " +
-	"review = read-only correctness/security review of changes; general = full-tool isolated coding sub-task. " +
-	"Issue genuinely independent runs together in one turn; the task brief's agents<=N is your allowance."
+	"Kinds: explore = read-only investigation with grounded findings; " +
+	"review = read-only correctness/security review of changes; general = full-tool execution. " +
+	"The task brief's agents<=N is your allowance."
 
 const ToolRunSubagentTaskPropertyDescription = "What the subagent must accomplish. It does not see this conversation — " +
 	"state the deliverable precisely, name the exact paths/symbols in scope, and say what the report must contain. " +
@@ -139,3 +140,14 @@ const ToolEditMemoryDescription = "Update or delete one saved project-memory ent
 	"Deleting a topic's last entry removes the topic file and its index pointer."
 
 var toolEditMemoryText = Register(Text{ID: "tool.edit_memory.desc", Audience: MainStatic, Cache: Prefix, Body: ToolEditMemoryDescription, MentionsTools: []string{"edit_memory"}, AllowlistCtx: "main-loop"})
+
+// ToolRunSubagentRolePropertyDescription teaches the model to NAME each
+// dispatch for the job it does. The role is display-and-handoff only: the
+// capability class, the cache pin, the stable system message, and the context
+// record's kind all stay keyed on `agent`, so a novel role name can never
+// fragment the provider cache.
+const ToolRunSubagentRolePropertyDescription = "What this agent IS for this task, in 2-4 words — \"auth-flow-mapper\", \"settings-page-builder\", \"migration-reviewer\". Name it for the job, never a generic label. Expected on every dispatch."
+
+var toolRunSubagentRolePropertyText = Register(Text{
+	ID: "tool.run_subagent.role-property", Audience: MainStatic, Cache: Prefix, Body: ToolRunSubagentRolePropertyDescription,
+})

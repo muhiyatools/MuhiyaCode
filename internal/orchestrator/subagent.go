@@ -22,6 +22,11 @@ type subagentSpec struct {
 
 type subagentInput struct {
 	Agent string `json:"agent"`
+	// Role is the model's own name for this dispatch ("auth-flow-mapper").
+	// DISPLAY AND HANDOFF ONLY: cache identity — the pin, the stable system
+	// message, the context record's Kind — stays keyed on Agent, so a novel role
+	// name can never fragment the provider cache.
+	Role  string `json:"role"`
 	Title string `json:"title"`
 	Task  string `json:"task"`
 	// TokenCeiling (feature 011 D3, contracts/subagent-handoff.md §3) bounds this
@@ -85,7 +90,26 @@ func handoffFor(input subagentInput, context string) HandoffContract {
 		deliverable = instructions.HandoffDeliverableReview
 		format = instructions.ReportFormatReview
 	}
+	// The model's own name for this dispatch leads the Role line when it gave
+	// one — it tells the agent what it IS here, which the generic class cannot.
+	// This rides the per-run user message, never the stable system prefix.
+	if named := strings.TrimSpace(input.Role); named != "" {
+		role = named + " (" + role + ")"
+	}
 	return HandoffContract{Role: role, Scope: contract.TruncateEllipsis(input.Task, 1200), Context: context, Deliverable: deliverable, OutputFormat: format}
+}
+
+// displayRole is what the transcript chip shows: the model's role name, then
+// its free-form title, and only as a last resort the internal capability class
+// — a user should never see a bare "general" as an agent's identity.
+func displayRole(input subagentInput) string {
+	if named := strings.TrimSpace(input.Role); named != "" {
+		return named
+	}
+	if title := strings.TrimSpace(input.Title); title != "" {
+		return title
+	}
+	return input.Agent
 }
 
 func (e *Engine) subagentSpecs() map[string]subagentSpec {
@@ -237,7 +261,9 @@ func (e *Engine) executeSubagent(ctx context.Context, runID string, input subage
 			break
 		}
 	}
-	role := handoffRole(input.Agent)
+	// The event carries the DISPLAY role (the model's name for this agent); the
+	// internal class stays on AgentEvent.Agent for anything keying on capability.
+	role := displayRole(input)
 	plan := e.planDispatch(input, spec, modelID)
 	decision, streamSpec, capture := plan.decision, plan.streamSpec, plan.capture
 	system, definitions, messages, handoff := plan.system, plan.definitions, plan.messages, plan.handoff

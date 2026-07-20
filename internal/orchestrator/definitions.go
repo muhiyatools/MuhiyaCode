@@ -57,7 +57,8 @@ func runSubagentDefinition(specs map[string]subagentSpec) contract.ToolDefinitio
 	}
 	sort.Strings(names)
 	return definition("run_subagent", instructions.ToolRunSubagentDescription, map[string]any{
-		"agent": map[string]any{"type": "string", "enum": names, "description": "explore | plan | review | general — pick by the work's shape, not by habit."},
+		"agent": map[string]any{"type": "string", "enum": names, "description": "explore | review | general — the capability class, picked by the work's shape."},
+		"role":  map[string]any{"type": "string", "description": instructions.ToolRunSubagentRolePropertyDescription},
 		"title": map[string]any{"type": "string", "description": "Short human-readable label shown in the transcript."},
 		"task":  map[string]any{"type": "string", "description": instructions.ToolRunSubagentTaskPropertyDescription},
 	}, []string{"agent", "task"})
