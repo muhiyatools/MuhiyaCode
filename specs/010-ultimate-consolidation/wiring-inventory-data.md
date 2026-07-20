@@ -207,7 +207,7 @@ conditional surfaces to name).
 | Callbacks Member | ToolStart | A tool call is starting (name + raw arguments) | internal/orchestrator/dispatch.go:100,182 (producer) + internal/tui/bridge_test.go:56 (TestBridgeFlushClearsBuffers) | wired |
 | Callbacks Member | ToolOutput | Streaming tool/shell output chunks | internal/tui/bridge_test.go:28 (TestBridgeCoalescesToolOutputPerTool) | wired |
 | Callbacks Member | ToolEnd | A tool call finished (name + final output) | internal/orchestrator/dispatch.go:242 (producer) + internal/tui/bridge_test.go:56 (TestBridgeFlushClearsBuffers) | wired |
-| Callbacks Member | PlanUpdate | The tasks.md checklist changed | internal/tui/ingest_test.go:75 (TestContextPlanAndMCPStatusMessagesUpdateModel) | wired |
+| Callbacks Member | PlanUpdate | The workspace tasks.md checklist changed (parsed by the shared dispatch gate after any successful write) | internal/orchestrator/checklist_test.go (TestChecklistWriteFeedsThePanel) + internal/tui/ingest_test.go:75 | wired |
 | Callbacks Member | Usage | A token-usage delta for the in-flight request | internal/orchestrator/usage.go:118 (producer) + internal/tui/usage_display_test.go:10 (TestMixedProviderUsageRowsAndUnavailableCache) | wired |
 | Callbacks Member | Context | The current context-window usage snapshot | internal/orchestrator/contextreport.go:152-153 (producer) + internal/tui/ingest_test.go:75 (TestContextPlanAndMCPStatusMessagesUpdateModel) | wired |
 | Callbacks Member | Agent | A subagent lifecycle event (see AgentEvent kinds above) | internal/orchestrator/subagent.go:398-399 (producer) + internal/tui/ingest_test.go:18 (TestApplyAgentEventKindsUpdateAgentView) | wired |

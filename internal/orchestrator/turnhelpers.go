@@ -78,11 +78,23 @@ func (e *Engine) finalize(ctx context.Context, content string) string {
 }
 
 // appendCompletionDisclosure keeps the final answer honest against the
-// workspace checklist: if tasks.md still has open items, the answer says so
-// instead of implying the work is finished. Placeholder until the checklist
-// feed lands; see NATIVE_AGENT_PLAN.md §4.
+// workspace checklist: when tasks.md still has open items, the answer states
+// which ones instead of implying the work is finished. Research B3 recorded
+// that the model over-claims completion; this is the recorded-state-only
+// guard against it (no extra model call, no extra turn).
 func (e *Engine) appendCompletionDisclosure(content string) string {
-	return content
+	open := e.openChecklistItems()
+	if len(open) == 0 || strings.Contains(strings.ToLower(content), "incomplete:") {
+		return content
+	}
+	e.mu.Lock()
+	total := len(e.checklist.Steps)
+	e.mu.Unlock()
+	shown := open
+	if len(shown) > 3 {
+		shown = shown[:3]
+	}
+	return content + fmt.Sprintf("\n\n— %d of %d to-dos incomplete: %s", len(open), total, strings.Join(shown, "; "))
 }
 
 func (e *Engine) redact(value string) string {

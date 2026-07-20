@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -172,26 +171,6 @@ func approvalMessage(request workspace.ApprovalRequest) string {
 		label += " outside the workspace"
 	}
 	return fmt.Sprintf("%s?\n%s", label, request.Path)
-}
-
-var planLine = regexp.MustCompile(`^- \[([ xX])\] (.+) \((pending|in_progress|completed)\)$`)
-
-func parsePlan(content string) contract.Plan {
-	var plan contract.Plan
-	var notes []string
-	for _, line := range strings.Split(strings.TrimSpace(content), "\n") {
-		match := planLine.FindStringSubmatch(strings.TrimSpace(line))
-		if len(match) == 4 {
-			plan.Steps = append(plan.Steps, contract.PlanStep{Title: match[2], Status: contract.PlanStatus(match[3])})
-		} else if strings.TrimSpace(line) != "" && line != "No task has been planned yet." {
-			notes = append(notes, line)
-		}
-	}
-	if len(plan.Steps) > 0 {
-		plan.Note = strings.Join(notes, "\n")
-		plan.UpdatedAt = time.Now().UTC()
-	}
-	return plan
 }
 
 // addDiscoveredModels merges a fresh gateway model list into settings: it upserts

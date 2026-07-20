@@ -121,6 +121,12 @@ func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, defin
 		sc.counters.mu.Lock()
 		delete(sc.counters.failedCalls, signature)
 		sc.counters.mu.Unlock()
+		// The workspace checklist feed lives here, at the ONE point both the
+		// main loop and every subagent pass through, so a subagent checking off
+		// its work refreshes the panel exactly like a main-loop edit does.
+		if e.touchesChecklist(call) {
+			e.refreshChecklist()
+		}
 	}
 	return toolOutcome{Call: call, Output: output, Failed: failed, Err: dispatchErr}
 }

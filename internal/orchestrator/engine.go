@@ -325,6 +325,9 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 			ModelID:    config.InitialPrefixShape.ModelID,
 		}
 	}
+	// Seed the checklist from the workspace so a resumed session shows the work
+	// already in flight. Best-effort: a missing tasks.md just leaves it empty.
+	engine.refreshChecklist()
 	return engine, nil
 }
 
