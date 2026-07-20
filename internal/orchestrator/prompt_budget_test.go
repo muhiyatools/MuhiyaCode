@@ -42,7 +42,14 @@ import (
 // executor-ready standard is the whole payoff of the split — an
 // under-specified item costs far more in executor turns than the sentence
 // costs in prefix.
-const promptBaselineChars = 5270
+// v1.1.0 hardening epoch (+73, actual 5326): rule 5 gained the BLOCKED:
+// QUESTION branch. The executor cannot reach the user, so before this an
+// executor blocked on a decision only the user could make had two bad options —
+// guess, or return BLOCKED with no route to an answer. The clause costs 73
+// cached chars and buys the missing edge in the main/executor protocol: the
+// executor names the decision, the planner asks with ask_user, and re-dispatches
+// with the answer. Still 463 chars below the 5789 this release replaced.
+const promptBaselineChars = 5340
 
 func TestSystemPromptSizeWithinBudget(t *testing.T) {
 	ctx := PromptContext{

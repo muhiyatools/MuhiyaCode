@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
 // The handoff-fidelity guards (G1). Each one covers a way the main model and the
@@ -61,6 +62,37 @@ func TestHandoffDoesNotSendTheTaskTwice(t *testing.T) {
 	}
 	if strings.Contains(handoff.Scope, "\n") {
 		t.Fatalf("Scope must be a single-line label, got %q", handoff.Scope)
+	}
+}
+
+// The executor cannot reach the user. Before the QUESTION relay, an executor
+// blocked on a decision only the user could make had two bad options: guess, or
+// return BLOCKED with no route to an answer. Both protocol halves must be
+// present, or the executor names a question nobody is listening for.
+func TestQuestionRelayProtocolIsStatedOnBothSides(t *testing.T) {
+	const marker = "BLOCKED: QUESTION"
+	// The executor is told the form exists and that it cannot ask directly.
+	if !strings.Contains(instructions.SubagentGeneralSystem, marker) {
+		t.Error("the executor is never told it can escalate a decision to the user")
+	}
+	if !strings.Contains(instructions.SubagentGeneralSystem, "cannot reach the user") {
+		t.Error("the executor is not told WHY it must escalate rather than ask")
+	}
+	if !strings.Contains(instructions.ReportFormatImplementation, marker) {
+		t.Error("the report format does not carry the QUESTION branch, so the shape is unadvertised")
+	}
+	// The planner is told what to DO with one.
+	contract := instructions.PromptOperatingContractBody
+	if !strings.Contains(contract, marker) {
+		t.Fatal("the operating contract never mentions BLOCKED: QUESTION — the executor would be escalating into silence")
+	}
+	if !strings.Contains(contract, "ask_user") {
+		t.Error("the contract does not name the tool that answers a relayed question")
+	}
+	// And the machine-readable status stays parseable: QUESTION is a BLOCKED
+	// refinement, not a fourth status that the trust rule would fail to match.
+	if got := parseReportStatus("Could not proceed.\nSTATUS: BLOCKED: QUESTION: which auth provider?"); got != ReportStatusBlocked {
+		t.Fatalf("status = %q, want blocked — QUESTION must refine BLOCKED, not replace it", got)
 	}
 }
 

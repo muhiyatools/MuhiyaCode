@@ -33,7 +33,11 @@ func FriendlyRequestError(err error) string {
 		case httpErr.Status == 402:
 			return "out of credits — top up your MuhiyaCode balance to continue."
 		case httpErr.Status == 429:
-			if strings.Contains(strings.ToLower(httpErr.Body), "budget limit") {
+			// insufficient_quota is the gateway's explicit "this is not
+			// throttling" signal; the budget-limit substring is the older shape,
+			// kept so an un-upgraded gateway still reads correctly.
+			body := strings.ToLower(httpErr.Body)
+			if strings.Contains(body, "insufficient_quota") || strings.Contains(body, "budget limit") || strings.Contains(body, "budget exhausted") {
 				return "your plan's budget window is used up — it resets automatically when the window rolls over; to continue sooner, raise the window budget in the gateway admin panel."
 			}
 			return "rate limited — the request was retried automatically; try again in a moment."
