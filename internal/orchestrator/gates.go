@@ -68,6 +68,13 @@ func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, defin
 		e.recordFailedCall(sc, signature, output)
 		return toolOutcome{Call: call, Output: output, Failed: true}
 	}
+	// The plan/execute split: the main model instructs, the execution agent
+	// executes. Placed after the capability gates above (they are about what a
+	// scope MAY do) and before the repeat limiter, so a refused mutation is not
+	// counted as a repeat.
+	if outcome, blocked := e.executionRoleGate(ctx, sc, call); blocked {
+		return outcome
+	}
 	// Repeat limiter.
 	sc.counters.mu.Lock()
 	sc.counters.callCounts[signature]++
@@ -127,6 +134,10 @@ func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, defin
 		if e.touchesChecklist(call) {
 			e.refreshChecklist()
 		}
+		// Record changed files from EITHER scope. Under the plan/execute split
+		// the executor makes every workspace change, so a main-loop-only tally
+		// would report zero files changed and silently disable the review gate.
+		e.noteChangedFiles(call)
 	}
 	return toolOutcome{Call: call, Output: output, Failed: failed, Err: dispatchErr}
 }

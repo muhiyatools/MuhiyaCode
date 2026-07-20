@@ -102,9 +102,12 @@ func TestDelegationDenialTextsUnchanged(t *testing.T) {
 }
 
 // TestBriefAgentFormatAndClassCaps (T013): the tail brief's agents field format
-// and the per-class caps are unchanged by feature 008.
+// and the per-class caps. v1.1.0 raised tiny/small from 0 to 1: under the
+// plan/execute split the main model cannot mutate files, so a class with no
+// agent budget could never apply its change (see TestEveryMutatingClassCan
+// AffordAnExecutionAgent). Chat stays at 0 — it never touches the workspace.
 func TestBriefAgentFormatAndClassCaps(t *testing.T) {
-	if got := classAgents; got[ClassChat] != 0 || got[ClassTiny] != 0 || got[ClassSmall] != 0 || got[ClassStandard] != 2 || got[ClassLarge] != 5 || got[ClassEpic] != 8 {
+	if got := classAgents; got[ClassChat] != 0 || got[ClassTiny] != 1 || got[ClassSmall] != 1 || got[ClassStandard] != 2 || got[ClassLarge] != 5 || got[ClassEpic] != 8 {
 		t.Fatalf("classAgents caps changed: %+v", got)
 	}
 	assessment := Classify("hi", "")
@@ -127,11 +130,19 @@ func TestAutoReviewNudgeFiresOnceAtMax(t *testing.T) {
 	// files must be genuinely review-worthy — two auth-path files trip hard rule
 	// H4 (risk outranks size). Two trivial .txt writes would correctly SKIP under
 	// the gate (that suppression is covered by reviewgate_test.go).
+	// Under the plan/execute split the MAIN model cannot write files, so the
+	// changed files arrive through the execution agent — which is exactly the
+	// path the nudge must still see (the shared gate tallies both scopes).
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
+		{ToolCalls: []contract.ToolCall{
+			contract.NewToolCall("d1", "run_subagent", `{"agent":"general","title":"auth files","task":"Update the two auth config files for the deploy."}`),
+		}},
+		// The execution agent's own stream: apply the edits, then report.
 		{ToolCalls: []contract.ToolCall{
 			contract.NewToolCall("w1", "write_file", `{"path":"internal/auth/handler.go","content":"x"}`),
 			contract.NewToolCall("w2", "write_file", `{"path":"internal/auth/session.go","content":"y"}`),
 		}},
+		{Content: "Updated internal/auth/handler.go and internal/auth/session.go for the deploy configuration change."},
 		{Content: "all done"},
 		{Content: "final answer after review nudge"},
 	}}

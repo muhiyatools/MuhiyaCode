@@ -195,7 +195,14 @@ type Engine struct {
 	// taskTerminalReads counts run_shell invocations that merely read a file
 	// where a dedicated tool sufficed (feature 011 SC-006 violation counter).
 	taskTerminalReads int
-	runCounter        int
+	// taskRoleBlocks counts main-loop mutations refused by the execution role
+	// gate this task; the refusal escalates once it repeats (gate policy: never
+	// return the same sentence forever).
+	taskRoleBlocks int
+	// taskFilesChanged is the scope-agnostic tally of files this task changed —
+	// the execution agent's writes count exactly like the main loop's would.
+	taskFilesChanged map[string]bool
+	runCounter       int
 	// harnessEvents is the bounded (harnessEventRingCap) in-memory ring of
 	// harness-caused friction events (T010), guarded by taskMu. It backs /errors
 	// and the task-summary friction marker without a DB read; the same events are
@@ -339,7 +346,8 @@ func (e *Engine) resetTaskState(budget Budget) {
 	e.taskAgentUsage = contract.Usage{}
 	e.taskAgentRuns, e.taskAgentReused, e.taskDuplicates, e.taskOverBudget = 0, 0, 0, 0
 	e.taskAgentDenied = 0
-	e.taskReviewDecision, e.taskTerminalReads = nil, 0
+	e.taskReviewDecision, e.taskTerminalReads, e.taskRoleBlocks = nil, 0, 0
+	e.taskFilesChanged = nil
 	e.resetLinkTaskState()
 	e.taskAgentCap = budget.MaxAgentRuns
 	e.taskPeakContext = 0

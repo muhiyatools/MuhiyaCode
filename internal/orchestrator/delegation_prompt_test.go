@@ -31,14 +31,18 @@ func TestSystemPromptByteStableAcrossConstructions(t *testing.T) {
 
 func TestDelegationSectionContent(t *testing.T) {
 	prompt := SystemPrompt(delegationPromptContext())
-	// DG-1..3: dedicated section, positive criteria, negative criteria, brief
-	// semantics, cache reconciliation.
+	// DG-1..3: dedicated section, brief semantics, per-kind criteria, cache
+	// reconciliation. v1.1.0: the negative criterion is no longer "do it
+	// yourself when it is one linear thread" — under the plan/execute split
+	// every workspace change is delegated, so the guidance now bounds WHICH
+	// extra agents earn a run and insists on chaining to keep the cache warm.
 	for _, want := range []string{
 		"DELEGATION",
 		"agents<=N",                              // brief semantics taught statically
-		"independent",                            // positive criteria
-		"one linear thread",                      // negative criteria
-		"NEW broad reading",                      // CACHE DISCIPLINE reconciliation
+		"executes every workspace change",        // the split, stated positively
+		"Chain each follow-up",                   // continuation is the cheap path
+		"One agent at a time",                    // the serial directive
+		"NOT already in context",                 // cache reconciliation
 		"cannot see this conversation",           // deliverable focus
 		"never re-explore a scope you delegated", // report consumption (DG-13)
 	} {

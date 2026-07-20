@@ -69,3 +69,29 @@ var gateSubagentShellBlockedText = Register(Text{
 	ID: "gate.subagent.run_shell-blocked", Audience: Gate, Cache: Sidecar, Body: GateSubagentShellBlockedBody,
 	EnforcesRule: RuleReadOnlyShell, MentionsTools: []string{"run_shell", "grep", "read_file"}, AllowlistCtx: "subagent.read-only",
 })
+
+// RuleExecutionBelongsToAgent is the plan/execute split (owner directive
+// 2026-07-20): the main session plans and instructs; the execution agent does
+// the work. Stated in advance by the operating contract and the run_subagent
+// description, enforced by the execution role gate.
+const RuleExecutionBelongsToAgent = "rule.execution-belongs-to-agent"
+
+// GateRoleExecutionBody fires when the main model tries to change a workspace
+// file itself. It names the exact reason and the one affordable next action.
+const GateRoleExecutionBody = "Execution runs in the execution agent, not here. Call run_subagent (agent \"general\") with the specific change, the files involved, and the check that proves it works. This session plans, instructs, and reviews — tasks.md is the one file you edit directly."
+
+var gateRoleExecutionText = Register(Text{
+	ID: "gate.role.execution", Audience: Gate, Cache: Sidecar, Body: GateRoleExecutionBody,
+	EnforcesRule: RuleExecutionBelongsToAgent, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
+})
+
+// GateRoleExecutionEscalatedTmpl replaces the standard refusal once the model
+// has attempted several direct mutations. A gate that repeats one sentence
+// forever reads as a loop; escalating proves the harness is responding and
+// converges the model onto the delegation path.
+const GateRoleExecutionEscalatedTmpl = "[loop guard] %d direct edits attempted in this task. They will all be refused — this session cannot change workspace files. Call run_subagent (agent \"general\") with the full change now, or give the final answer explaining what is blocked."
+
+var gateRoleExecutionEscalatedText = Register(Text{
+	ID: "gate.role.execution-escalated", Audience: Gate, Cache: Sidecar, Body: GateRoleExecutionEscalatedTmpl,
+	EnforcesRule: RuleExecutionBelongsToAgent, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
+})

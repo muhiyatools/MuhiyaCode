@@ -151,7 +151,13 @@ func Classify(raw string, previous TaskClass) Assessment {
 
 var classToolBase = map[TaskClass]int{ClassChat: 3, ClassTiny: 8, ClassSmall: 15, ClassStandard: 30, ClassLarge: 60, ClassEpic: 100}
 var classTurns = map[TaskClass]int{ClassChat: 6, ClassTiny: 10, ClassSmall: 16, ClassStandard: 26, ClassLarge: 44, ClassEpic: 64}
-var classAgents = map[TaskClass]int{ClassChat: 0, ClassTiny: 0, ClassSmall: 0, ClassStandard: 2, ClassLarge: 5, ClassEpic: 8}
+
+// classAgents is the per-class subagent allowance. Every class that can
+// involve a workspace change affords at least ONE run: under the plan/execute
+// split the main model cannot mutate files itself, so a tiny/small task with a
+// zero budget would be unfixable — the model would be told to delegate and
+// then denied. Only chat, which never touches the workspace, stays at zero.
+var classAgents = map[TaskClass]int{ClassChat: 0, ClassTiny: 1, ClassSmall: 1, ClassStandard: 2, ClassLarge: 5, ClassEpic: 8}
 var classVerify = map[TaskClass]string{ClassChat: "none", ClassTiny: "targeted", ClassSmall: "targeted", ClassStandard: "standard", ClassLarge: "thorough", ClassEpic: "thorough"}
 var effortScale = map[contract.EffortLevel]float64{contract.EffortLow: .75, contract.EffortMedium: 1, contract.EffortHigh: 1.3, contract.EffortMax: 1.8}
 

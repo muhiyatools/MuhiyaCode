@@ -134,6 +134,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		allEvents := e.InvalidationEvents()
 		if eventStart < len(allEvents) {
 			stats.Invalidations = append([]contract.InvalidationEvent(nil), allEvents[eventStart:]...)
+			e.mergeChangedFiles(filesChanged)
 		}
 		for file := range filesChanged {
 			stats.FilesChanged = append(stats.FilesChanged, file)
@@ -448,6 +449,9 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			// nudge ONCE for an independent review pass. A dynamic tail rider
 			// (never prefix), fired at most once per task, skipped when nothing
 			// meaningful changed.
+			// Fold in the execution agent's writes: under the plan/execute split
+			// they ARE the task's file changes.
+			e.mergeChangedFiles(filesChanged)
 			if profile.AutoReview && !autoReviewNudged && len(filesChanged) >= 2 && e.taskAgentRuns < e.taskAgentCap {
 				autoReviewNudged = true
 				// Feature 011 T019: the nudge consults the review gate first — a

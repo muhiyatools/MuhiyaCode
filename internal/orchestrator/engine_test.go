@@ -30,12 +30,16 @@ func seededWorkspace(t *testing.T) string {
 	return dir
 }
 
+// TestEngineExecutesToolAndFinalizes drives one full turn: a tool call, a
+// final answer, and the stats/events they produce. It uses read_file because
+// under the plan/execute split the main loop reads and instructs — a direct
+// write from this scope is refused by design (see rolesplit_test.go).
 func TestEngineExecutesToolAndFinalizes(t *testing.T) {
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
-		{Content: "DONE = a.txt exists", ToolCalls: []contract.ToolCall{contract.NewToolCall("c1", "write_file", `{"path":"a.txt","content":"ok"}`)}, Usage: contract.Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110}},
+		{Content: "DONE = a.txt exists", ToolCalls: []contract.ToolCall{contract.NewToolCall("c1", "read_file", `{"path":"a.txt"}`)}, Usage: contract.Usage{PromptTokens: 100, CompletionTokens: 10, TotalTokens: 110}},
 		{Content: "Created `a.txt` and verified the write.", Usage: contract.Usage{PromptTokens: 120, CompletionTokens: 12, TotalTokens: 132}},
 	}}
-	tool := &recordingTool{name: "write_file"}
+	tool := &recordingTool{name: "read_file"}
 	settings := engineSettings()
 	var events []string
 	engine, err := NewEngine(EngineConfig{
