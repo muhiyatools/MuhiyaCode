@@ -173,7 +173,7 @@ func TestExecutorWorkExtendsTheRunway(t *testing.T) {
 	// The main model keeps investigating past the chat cap. Distinct patterns so
 	// neither the repeat limiter nor the duplicate-read dedupe collapses them,
 	// and grep never fails, so the failure terminators stay out of the way.
-	for i := 0; i < 12; i++ {
+	for i := 0; i < 30; i++ {
 		responses = append(responses, contract.ChatResponse{ToolCalls: []contract.ToolCall{
 			contract.NewToolCall(fmt.Sprintf("g%d", i), "grep", fmt.Sprintf(`{"pattern":"section-%d"}`, i)),
 		}})
@@ -193,6 +193,12 @@ func TestExecutorWorkExtendsTheRunway(t *testing.T) {
 	}
 	if capped := classTurns[ClassChat]; stats.Turns <= capped {
 		t.Fatalf("the task stopped at the un-escalated cap (%d turns, cap %d): the executor changed a file and the runway did not extend", stats.Turns, capped)
+	}
+	// The ladder must climb more than once. A single escalation put a ceiling of
+	// twelve turns on any chat-classified turn — and "Go" after a plan IS chat.
+	const singleEscalationCeiling = 12
+	if stats.Turns <= singleEscalationCeiling {
+		t.Fatalf("the runway extended only once (%d turns): a task still doing real work must keep earning runway up to the epic bound", stats.Turns)
 	}
 }
 

@@ -221,7 +221,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 
 	currentClass := assessment.Class
 	turnCap := budget.MaxTurns
-	escalated, convergeNoted, finalNoted := false, false, false
+	convergeNoted, finalNoted := false, false
 	sawToolCall, emptyFinalRetries, consecutiveFailures := false, 0, 0
 	intentFinalRetries := 0   // FR-004b: bounded retries when a turn narrates an action without calling a tool
 	autoReviewNudged := false // DG-7: the max-effort review nudge fires at most once per task
@@ -247,13 +247,19 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// hard-stopped at the un-escalated cap, mid-work. The executor's changes
 		// ARE the task's changes; the runway must be sized against them.
 		e.mergeChangedFiles(filesChanged)
-		if turns >= turnCap && len(filesChanged) > 0 && !escalated && currentClass != ClassEpic {
-			escalated = true
+		// The ladder may climb more than once. It used to fire a single time per
+		// task, so a turn classified chat topped out at twelve turns however much
+		// real work it was doing — and "Go" after a plan classifies as chat, which
+		// is exactly the prompt that kicks off the largest builds. Re-escalation is
+		// self-limiting: each step raises turnCap, so this goes quiet until the new
+		// cap is reached, and it only fires while files are genuinely changing.
+		// ClassEpic and hardTurnCeiling are the terminal bounds.
+		if turns >= turnCap && len(filesChanged) > 0 && currentClass != ClassEpic {
 			currentClass = EscalateClass(currentClass)
 			bigger := BudgetFor(Assessment{Class: currentClass, Risky: assessment.Risky}, live)
 			turnCap = min(hardTurnCeiling, max(turnCap+6, bigger.MaxTurns))
 			convergeNoted, finalNoted = false, false
-			e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[governor] Task outgrew its brief; class=%s and runway extended once. Complete, verify once, and report.", currentClass)})
+			e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[governor] Task outgrew its brief; class=%s and runway extended. Keep going if work remains; otherwise complete, verify once, and report.", currentClass)})
 		}
 		isFinal := turns >= turnCap
 		if isFinal && !finalNoted {
