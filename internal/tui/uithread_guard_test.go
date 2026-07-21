@@ -32,23 +32,16 @@ import (
 func TestNoBlockingEngineCallsOnUIThread(t *testing.T) {
 	allowed := map[string]string{
 		// Read-only reads (return a copy/snapshot; no callbacks, no I/O).
-		"ContextReport":      "read-only snapshot",
-		"PlanMode":           "read-only lifecycle predicate",
-		"LifecycleState":     "read-only state",
-		"Lifecycle":          "read-only copy",
-		"CurrentPlan":        "read-only plan copy",
-		"GoalSnapshot":       "read-only goal copy",
-		"LastGoalResult":     "read-only goal tombstone",
-		"Usage":              "read-only usage copy",
-		"UsageAggregate":     "read-only aggregate copy",
-		"HarnessEvents":      "read-only ring copy (T012)",
-		"PendingPlan":        "read-only predicate",
-		"RestoredGoalNotice": "read-only one-shot notice",
-		"RestoredPlanNotice": "read-only one-shot notice",
+		"ContextReport":    "read-only snapshot",
+		"CurrentChecklist": "read-only checklist copy",
+		"Usage":            "read-only usage copy",
+		"UsageAggregate":   "read-only aggregate copy",
+		"HarnessEvents":    "read-only ring copy (T012)",
 		// Fast in-memory mutations (no persistence I/O, no callback/Send).
-		"QueueUserMessage": "mu-guarded steering append",
-		"SetEffort":        "effortMu-guarded field set",
-		"Cancel":           "cancels the task context",
+		"QueueUserMessage":  "mu-guarded steering append",
+		"SetEffort":         "liveSettingsMu-guarded field set",
+		"SetPermissionMode": "liveSettingsMu-guarded field set",
+		"Cancel":            "cancels the task context",
 	}
 
 	files, err := filepath.Glob("*.go")

@@ -23,33 +23,25 @@ func (m *Model) renderTodos() string {
 	if len(steps) == 0 {
 		return ""
 	}
-	lifecycle := contract.LifecycleDirect
-	if m.runtime.Engine != nil {
-		lifecycle = m.runtime.Engine.LifecycleState()
+	// Every item checked off means the checklist is done; the panel retires
+	// rather than showing a wall of completed rows.
+	remaining := 0
+	for _, s := range steps {
+		if s.Status != contract.PlanCompleted {
+			remaining++
+		}
 	}
-	// A finished / superseded / discarded plan retires the panel entirely.
-	if lifecycle.IsTerminal() {
+	if remaining == 0 {
 		return ""
 	}
 	if !m.busy {
-		// Idle with a resumable plan (pending / interrupted): one faint line invites
-		// resumption without redrawing the whole checklist.
-		if lifecycle.InvitesProceed() {
-			remaining := 0
-			for _, s := range steps {
-				if s.Status != contract.PlanCompleted {
-					remaining++
-				}
-			}
-			line := fmt.Sprintf("   %s %d to-dos remaining — say 'proceed' to resume", m.glyphs.todoPending, remaining)
-			return "\n" + fitLine(m.palette.faint.Render(line), m.width)
-		}
-		return ""
+		// Idle with open items: one faint line, not the whole checklist.
+		line := fmt.Sprintf("   %s %d to-dos remaining in tasks.md", m.glyphs.todoPending, remaining)
+		return "\n" + fitLine(m.palette.faint.Render(line), m.width)
 	}
-	// Busy: the live checklist, unless the user hid it with Ctrl+T.
-	if !m.todoVisible {
-		return ""
-	}
+	// Busy: the live checklist, always (013 FR-025/FR-026). The Ctrl+T hide is
+	// gone — while the agent is working, what it is working through is exactly
+	// what the user wants on screen, so hiding it was a setting nobody needed.
 	rows := m.todoRows(steps)
 	if len(rows) == 0 {
 		return ""

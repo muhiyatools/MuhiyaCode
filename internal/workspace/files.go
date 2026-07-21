@@ -56,6 +56,12 @@ func (w *Workspace) List(ctx context.Context, options ListOptions) (ListResult, 
 		if entry.IsDir() && ignoredNames[entry.Name()] {
 			return filepath.SkipDir
 		}
+		if w.skipSensitive(path, entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
 		depth := strings.Count(filepath.Clean(path), string(filepath.Separator)) - baseDepth
 		if !options.Recursive && depth > 1 {
 			if entry.IsDir() {
@@ -108,9 +114,11 @@ func (w *Workspace) Read(ctx context.Context, options ReadOptions) (ReadResult, 
 	end := min(len(lines), start+limit)
 	selected := append([]string(nil), lines[start:end]...)
 	for i, line := range selected {
-		if len(line) > 500 {
-			selected[i] = line[:500] + " ..."
-		}
+		// Truncate on RUNE boundaries, not byte 500: a byte slice through a
+		// multi-byte rune (em dash, arrow, CJK) emits an invalid UTF-8 fragment
+		// that marshals to U+FFFD, and a >500-byte line could never be retrieved
+		// in full for an exact edit oldString. Matches Grep's truncation (C-3).
+		selected[i] = contract.TruncateEllipsis(line, 500)
 	}
 	w.readLedger.add(target)
 	return ReadResult{Path: relativeSlash(w.root, target), Offset: start + 1, TotalLines: len(lines), Lines: selected, Outline: buildOutline(lines), Remaining: len(lines) - end}, nil
@@ -145,7 +153,7 @@ func (w *Workspace) Grep(ctx context.Context, options GrepOptions) (SearchResult
 	}
 	files := []string{target}
 	if info.IsDir() {
-		files, err = collectFiles(target, 20_000)
+		files, err = collectFiles(target, 20_000, w.skipSensitive)
 		if err != nil {
 			return SearchResult{}, err
 		}
@@ -202,6 +210,12 @@ func (w *Workspace) Glob(ctx context.Context, options GlobOptions) ([]GlobMatch,
 		}
 		if entry.IsDir() && ignoredNames[entry.Name()] && path != target {
 			return filepath.SkipDir
+		}
+		if w.skipSensitive(path, entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if entry.IsDir() {
 			return nil
@@ -281,6 +295,9 @@ func (w *Workspace) MultiEdit(ctx context.Context, path string, edits []Edit) (E
 	result.Changed = true
 	result.Diff = compactDiff(result.Path, before, current, 120)
 	result.Summary = fmt.Sprintf("Edited %s (%d edit(s), %d replacement(s)).", result.Path, result.AppliedEdits, result.Replacements)
+	if warn := oversizeChangeWarning(int64(len(data)), false); warn != "" {
+		result.Notes = append(result.Notes, warn)
+	}
 	w.readLedger.add(target)
 	return result, nil
 }
@@ -312,7 +329,13 @@ func (w *Workspace) Write(ctx context.Context, path, content string) (WriteResul
 		return WriteResult{}, err
 	}
 	w.readLedger.add(target)
-	return WriteResult{Path: relativeSlash(w.root, target), Created: !existed, Changed: true, LineCount: len(splitLines(content)), Summary: "Wrote " + relativeSlash(w.root, target) + ".", Diff: compactDiff(relativeSlash(w.root, target), before, content, 120)}, nil
+	summary := "Wrote " + relativeSlash(w.root, target) + "."
+	if existed {
+		if warn := oversizeChangeWarning(int64(len(beforeBytes)), true); warn != "" {
+			summary += "\n" + warn
+		}
+	}
+	return WriteResult{Path: relativeSlash(w.root, target), Created: !existed, Changed: true, LineCount: len(splitLines(content)), Summary: summary, Diff: compactDiff(relativeSlash(w.root, target), before, content, 120)}, nil
 }
 
 func (w *Workspace) RunShell(ctx context.Context, command string, timeout time.Duration) (ShellResult, error) {
@@ -361,6 +384,31 @@ func (w *Workspace) authorizePath(ctx context.Context, action Action, requested 
 	return w.guard.ApprovePath(ctx, action, target)
 }
 
+// skipSensitive is the traversal-tools containment check. authorizePath approves
+// only the single root a walk starts at; every descendant it enumerates must be
+// re-checked here, or a search rooted at a non-sensitive ancestor would read
+// straight through a protected credential root. Passed to collectFiles and used
+// inline by the List/Glob walks.
+func (w *Workspace) skipSensitive(path string, _ fs.DirEntry) bool {
+	return w.guard.IsSensitive(path)
+}
+
+// oversizeChangeWarning warns when a changed file is too large to checkpoint, so
+// a wrong-but-complete change has no automatic rollback (C-7). For a whole-file
+// write_file overwrite it also reminds that the ENTIRE file is replaced — a
+// partial read is enough to unlock the overwrite, so an unseen remainder would be
+// lost (C-6).
+func oversizeChangeWarning(size int64, wholeFileOverwrite bool) string {
+	if size <= MaxSnapshotBytes {
+		return ""
+	}
+	warning := fmt.Sprintf("Warning: this file is %d bytes (over the %d-byte checkpoint limit), so this change was NOT checkpointed and cannot be auto-rolled back — double-check it is correct.", size, MaxSnapshotBytes)
+	if wholeFileOverwrite {
+		warning += " write_file replaces the ENTIRE file; make sure you have seen all of it, not only the part you read."
+	}
+	return warning
+}
+
 func (w *Workspace) canOverwrite(target string) bool {
 	if w.readLedger.has(target) {
 		return true
@@ -375,35 +423,68 @@ func applyEditText(content string, edit Edit) (string, int, string, error) {
 	if edit.Old == edit.New {
 		return content, 0, instructions.WorkspaceEditIdenticalBody, nil
 	}
-	newline := "\n"
-	if strings.Contains(content, "\r\n") {
-		newline = "\r\n"
-	}
 	normalize := func(value string) string { return strings.ReplaceAll(value, "\r\n", "\n") }
 	current, old, nextValue := normalize(content), normalize(edit.Old), normalize(edit.New)
+	// New text adopts the file's DOMINANT line ending; untouched bytes keep their
+	// own (see the byte-preserving splice below).
+	newText := nextValue
+	if dominantCRLF(content) {
+		newText = strings.ReplaceAll(nextValue, "\n", "\r\n")
+	}
 	count := strings.Count(current, old)
 	if count == 0 {
 		if nextValue != "" && strings.Contains(current, nextValue) {
 			return content, 0, instructions.WorkspaceEditAlreadyPresentBody, nil
 		}
-		current, count = trailingWhitespaceMatch(current, old)
-		if count == 0 {
+		// Fuzzy trailing-whitespace fallback (rare): the matched region is itself
+		// rewritten, so reconstruct in normalized space and re-encode with the
+		// dominant ending rather than attempting a byte-exact splice.
+		adjusted, fuzzy := trailingWhitespaceMatch(current, old)
+		if fuzzy == 0 {
 			return content, 0, instructions.WorkspaceEditNotFoundPrefix + closestRegion(normalize(content), old), nil
 		}
+		result := strings.Replace(adjusted, old, nextValue, 1)
+		if dominantCRLF(content) {
+			result = strings.ReplaceAll(result, "\n", "\r\n")
+		}
+		return result, fuzzy, "", nil
 	}
 	if count > 1 && !edit.ReplaceAll {
 		return content, 0, fmt.Sprintf(instructions.WorkspaceEditAmbiguousTmpl, count), nil
 	}
+	// Byte-preserving splice: match `old` in the ORIGINAL content, tolerating a
+	// \r\n or \n at each line boundary, and replace only the matched byte range.
+	// Every untouched byte — including a minority line's own terminator — stays
+	// exactly as it was, so a one-line edit to a mixed-ending file no longer
+	// rewrites every other line's ending (C-2).
+	re, err := regexp.Compile(strings.ReplaceAll(regexp.QuoteMeta(old), "\n", `\r?\n`))
+	if err != nil {
+		result := strings.Replace(current, old, nextValue, 1)
+		if dominantCRLF(content) {
+			result = strings.ReplaceAll(result, "\n", "\r\n")
+		}
+		return result, 1, "", nil
+	}
 	if edit.ReplaceAll {
-		current = strings.ReplaceAll(current, old, nextValue)
-	} else {
-		current = strings.Replace(current, old, nextValue, 1)
-		count = 1
+		return re.ReplaceAllLiteralString(content, newText), count, "", nil
 	}
-	if newline == "\r\n" {
-		current = strings.ReplaceAll(current, "\n", "\r\n")
+	loc := re.FindStringIndex(content)
+	if loc == nil { // normalized matched but the raw regex did not; fall back safely
+		result := strings.Replace(current, old, nextValue, 1)
+		if dominantCRLF(content) {
+			result = strings.ReplaceAll(result, "\n", "\r\n")
+		}
+		return result, 1, "", nil
 	}
-	return current, count, "", nil
+	return content[:loc[0]] + newText + content[loc[1]:], 1, "", nil
+}
+
+// dominantCRLF reports whether CRLF is the file's majority line ending. Using the
+// majority (not "contains any CRLF") is what keeps a mostly-LF file from being
+// flipped wholesale to CRLF, and vice versa.
+func dominantCRLF(content string) bool {
+	crlf := strings.Count(content, "\r\n")
+	return crlf > strings.Count(content, "\n")-crlf
 }
 
 // trailingWhitespaceMatch returns a normalized content variant where the
@@ -475,7 +556,7 @@ func compactDiff(path, before, after string, maxLines int) string {
 // the read-not-found error path, so a bounded workspace walk is acceptable.
 func (w *Workspace) suggestByBaseName(missing string) []string {
 	base := filepath.Base(missing)
-	files, err := collectFiles(w.root, 20_000)
+	files, err := collectFiles(w.root, 20_000, w.skipSensitive)
 	if err != nil {
 		return nil
 	}
@@ -491,7 +572,7 @@ func (w *Workspace) suggestByBaseName(missing string) []string {
 	return suggestions
 }
 
-func collectFiles(root string, maxFiles int) ([]string, error) {
+func collectFiles(root string, maxFiles int, skip func(path string, entry fs.DirEntry) bool) ([]string, error) {
 	var files []string
 	errStop := errors.New("enough files")
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
@@ -500,6 +581,12 @@ func collectFiles(root string, maxFiles int) ([]string, error) {
 		}
 		if entry.IsDir() && ignoredNames[entry.Name()] && path != root {
 			return filepath.SkipDir
+		}
+		if skip != nil && skip(path, entry) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if entry.Type().IsRegular() {
 			files = append(files, path)

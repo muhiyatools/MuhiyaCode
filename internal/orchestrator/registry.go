@@ -126,6 +126,20 @@ func (r *Registry) MCPDefinitions(allowed map[string]bool) []contract.ToolDefini
 	return result
 }
 
+// DeclaresReadOnly reports whether the named tool has declared itself
+// non-mutating (contract.ReadOnlyDeclaring). Queried live rather than cached at
+// registration: an MCP tool learns its annotation when its server connects,
+// which for a lazily-connected server happens after the tool is registered.
+// Unknown tools and tools that do not implement the interface answer false, so
+// every caller stays fail-closed.
+func (r *Registry) DeclaresReadOnly(name string) bool {
+	r.mu.RLock()
+	tool := r.tools[name]
+	r.mu.RUnlock()
+	declaring, ok := tool.(contract.ReadOnlyDeclaring)
+	return ok && declaring.DeclaresReadOnly()
+}
+
 func (r *Registry) Names() []string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -145,11 +159,13 @@ func (r *Registry) Execute(ctx context.Context, name string, arguments json.RawM
 		// clear message instead of the generic "unknown tool" so the model
 		// does not waste turns retrying it.
 		if strings.HasPrefix(name, "mcp__") {
+			//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
 			return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
 		}
 		// 004 US3 (T034): point a hallucinated tool name at the closest real one so
 		// the model corrects in one step instead of guessing again.
 		if suggestion := r.nearestToolName(name, allowed); suggestion != "" {
+			//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
 			return "", fmt.Errorf("unknown tool %s. Closest available: %s.", name, suggestion)
 		}
 		return "", fmt.Errorf("unknown tool %s", name)

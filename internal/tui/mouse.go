@@ -22,7 +22,6 @@ type targetKind int
 const (
 	targetNone targetKind = iota
 	targetTranscript
-	targetAgentChip
 	targetToolChip
 	targetInput
 	targetPasteBar
@@ -43,11 +42,10 @@ func (r rect) contains(x, y int) bool {
 // agent chips instead carry a direct reference (tool pointer / agent run ID) so a
 // click acts on the exact chip even if item indices shift.
 type interactionTarget struct {
-	kind    targetKind
-	id      int
-	rect    rect
-	tool    *toolView
-	agentID string
+	kind targetKind
+	id   int
+	rect rect
+	tool *toolView
 }
 
 // interactionMap is the hit map for one rendered frame. It is rebuilt on every
@@ -67,13 +65,13 @@ func (im *interactionMap) add(kind targetKind, id int, r rect) {
 	im.targets = append(im.targets, interactionTarget{kind: kind, id: id, rect: r})
 }
 
-// addChip appends a transcript tool/agent chip target carrying its direct
-// reference so a click acts on the exact chip regardless of index shifts.
-func (im *interactionMap) addChip(kind targetKind, r rect, tool *toolView, agentID string) {
+// addChip appends a transcript tool chip target carrying its direct reference
+// so a click acts on the exact chip regardless of index shifts.
+func (im *interactionMap) addChip(kind targetKind, r rect, tool *toolView) {
 	if r.w <= 0 || r.h <= 0 {
 		return
 	}
-	im.targets = append(im.targets, interactionTarget{kind: kind, rect: r, tool: tool, agentID: agentID})
+	im.targets = append(im.targets, interactionTarget{kind: kind, rect: r, tool: tool})
 }
 
 // hit returns the highest-priority target whose rectangle contains (x, y).
@@ -109,14 +107,6 @@ func (m *Model) handleMouseClick(msg tea.MouseClickMsg) tea.Cmd {
 			m.clearSelection()
 			if t.tool != nil {
 				t.tool.expanded = !t.tool.expanded
-				m.needsTranscriptRefresh = true
-			}
-			return nil
-		case targetAgentChip:
-			// Open this subagent's detail view — the same state Tab/Alt+number reach.
-			m.clearSelection()
-			if t.agentID != "" {
-				m.viewAgent = t.agentID
 				m.needsTranscriptRefresh = true
 			}
 			return nil
@@ -188,53 +178,38 @@ func (m *Model) handleMouseMotion(msg tea.MouseMotionMsg) (changed bool) {
 		}
 		return changed
 	case targetToolChip:
-		return m.setHover(t.tool, "")
-	case targetAgentChip:
-		return m.setHover(nil, t.agentID)
+		return m.setHover(t.tool)
 	default:
 		return m.clearHover()
 	}
 }
 
-// setHover marks the tool or agent chip under the pointer as hovered (the source
-// of the clickable underline affordance) and clears any previously hovered row.
-// It returns true and requests a transcript refresh only when the hovered row
+// setHover marks the tool chip under the pointer as hovered (the source of the
+// clickable underline affordance) and clears any previously hovered row. It
+// returns true and requests a transcript refresh only when the hovered row
 // actually changed, so moving within one chip stays free.
-func (m *Model) setHover(tool *toolView, agentID string) bool {
-	changed := false
-	if m.hoveredTool != tool {
-		if m.hoveredTool != nil {
-			m.hoveredTool.hovered = false
-		}
-		if tool != nil {
-			tool.hovered = true
-		}
-		m.hoveredTool = tool
-		changed = true
+func (m *Model) setHover(tool *toolView) bool {
+	if m.hoveredTool == tool {
+		return false
 	}
-	if m.hoveredAgent != agentID {
-		if prev := m.agentByID[m.hoveredAgent]; prev != nil {
-			prev.hovered = false
-		}
-		if next := m.agentByID[agentID]; next != nil {
-			next.hovered = true
-		}
-		m.hoveredAgent = agentID
-		changed = true
+	if m.hoveredTool != nil {
+		m.hoveredTool.hovered = false
 	}
-	if changed {
-		m.needsTranscriptRefresh = true
+	if tool != nil {
+		tool.hovered = true
 	}
-	return changed
+	m.hoveredTool = tool
+	m.needsTranscriptRefresh = true
+	return true
 }
 
 // clearHover drops any hover affordance. It returns true (and asks for a refresh)
 // only when a row was actually hovered.
 func (m *Model) clearHover() bool {
-	if m.hoveredTool == nil && m.hoveredAgent == "" {
+	if m.hoveredTool == nil {
 		return false
 	}
-	return m.setHover(nil, "")
+	return m.setHover(nil)
 }
 
 // handleMouseRelease finalizes a drag: a real selection is kept for copy, while a
@@ -290,12 +265,12 @@ func (m *Model) handleMouseWheel(msg tea.MouseWheelMsg) {
 		} else {
 			m.commandIndex = min(len(matches)-1, m.commandIndex+1)
 		}
-	case targetTranscript, targetToolChip, targetAgentChip:
+	case targetTranscript, targetToolChip:
 		// Scroll the transcript. Chips are transcript rows too, so including them is
 		// the fix — before, a chip's higher hit priority swallowed the wheel and made
-		// scrolling feel stuck wherever the pointer sat on a tool/agent row. Three
-		// rows per detent is the terminal-standard step; the viewport clamps at the
-		// ends so this is stable. Chrome (input, paste bar, mode line) does not scroll.
+		// scrolling feel stuck wherever the pointer sat on a tool row. Three rows per
+		// detent is the terminal-standard step; the viewport clamps at the ends so
+		// this is stable. Chrome (input, paste bar, mode line) does not scroll.
 		const wheelStep = 3
 		if up {
 			m.viewport.ScrollUp(wheelStep)

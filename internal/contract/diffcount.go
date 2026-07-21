@@ -21,19 +21,27 @@ func DiffLines(output string) []string {
 
 // DiffCounts counts added/removed lines in an embedded diff payload, excluding
 // the +++/--- file headers. ok is false when there is no diff to count.
+//
+// Counting is HUNK-AWARE: only lines inside a hunk (after an "@@ … @@" header)
+// are counted. File headers always precede the first "@@", so they are excluded
+// by position rather than by a fragile "+++ "/"--- " space heuristic — which
+// mis-skipped a body line that deletes "-- x" (rendered "--- x") or adds "++ y"
+// (rendered "+++ y"), under-reporting real changes (E-1).
 func DiffCounts(output string) (add, remove int, ok bool) {
 	diff := DiffLines(output)
 	if len(diff) == 0 {
 		return 0, 0, false
 	}
+	inHunk := false
 	for _, line := range diff {
-		switch {
-		// File headers are always space-delimited ("+++ b/x", "--- a/x").
-		// Requiring the space keeps added code that itself starts with "++"
-		// (e.g. "+++counter;" for an added "++counter;") counted as a real
-		// change instead of being skipped as a header.
-		case strings.HasPrefix(line, "+++ ") || strings.HasPrefix(line, "--- "):
+		if strings.HasPrefix(line, "@@") {
+			inHunk = true
 			continue
+		}
+		if !inHunk {
+			continue // file-header preamble (--- / +++ / diff --git / index)
+		}
+		switch {
 		case strings.HasPrefix(line, "+"):
 			add++
 		case strings.HasPrefix(line, "-"):

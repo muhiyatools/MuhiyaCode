@@ -39,11 +39,19 @@ func TestChromeReflectsBusyMutation(t *testing.T) {
 // TestChromeReflectsResize proves the mode line is re-rendered at the new width
 // each frame (never served stale across a resize).
 func TestChromeReflectsResize(t *testing.T) {
+	// The pane is multi-line (chips + cycle hint), so measure its widest line.
+	widestLine := func(pane string) int {
+		widest := 0
+		for _, line := range strings.Split(pane, "\n") {
+			widest = max(widest, ansi.StringWidth(line))
+		}
+		return widest
+	}
 	m := todoModel(t)
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 120, Height: 30})
-	wide := ansi.StringWidth(m.chromeModeLine())
+	wide := widestLine(m.chromeModeLine())
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 64, Height: 30})
-	narrow := ansi.StringWidth(m.chromeModeLine())
+	narrow := widestLine(m.chromeModeLine())
 	if narrow > 64 || narrow >= wide {
 		t.Fatalf("mode line did not shrink on resize: wide=%d narrow=%d", wide, narrow)
 	}

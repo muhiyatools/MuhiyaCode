@@ -29,17 +29,29 @@ const modulePath = "github.com/muhiya/muhiyacode"
 // injected vars), so tui may import it for the crash report's build identity
 // (Stability Overhaul T052) with no cycle risk.
 var allowedInternalImports = map[string][]string{
-	"arch":         {},
-	"buildinfo":    {},
+	"arch":      {},
+	"buildinfo": {},
+	// updatecheck is a fourth foundation leaf: stdlib only (net/http, os, json),
+	// no internal imports, so tui may render its verdict with no cycle risk.
+	"updatecheck":  {},
 	"contract":     {},
 	"instructions": {"contract"},
+	// shellsafe is a foundation leaf (stdlib only): the shared command tokenizer
+	// used by both destructive-command gates (workspace.ClassifyShell and
+	// orchestrator.IsReadOnlyShell), so the two cannot drift.
+	"shellsafe":    {},
 	"gateway":      {"contract", "instructions"},
-	"workspace":    {"contract", "instructions"},
+	"workspace":    {"contract", "instructions", "shellsafe"},
 	"state":        {"contract"},
 	"mcpclient":    {"contract", "state"},
-	"orchestrator": {"contract", "gateway", "instructions"},
-	"tui":          {"contract", "gateway", "orchestrator", "buildinfo"},
-	"command":      {"*"},
+	"orchestrator": {"contract", "gateway", "instructions", "shellsafe"},
+	// app is the frontend-neutral core seam: it holds the types and prompt
+	// assembly every frontend shares, so it may reach the orchestrator but must
+	// NEVER import a frontend (tui). That one-way edge is what lets the planned
+	// desktop app reuse the core without pulling in the terminal renderer.
+	"app":     {"contract", "orchestrator"},
+	"tui":     {"contract", "gateway", "orchestrator", "buildinfo", "updatecheck", "app"},
+	"command": {"*"},
 }
 
 func TestInternalLayeringHasNoForbiddenEdges(t *testing.T) {

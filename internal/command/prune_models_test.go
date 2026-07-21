@@ -7,17 +7,16 @@ import (
 )
 
 // A model the gateway stops offering must be pruned from settings on refresh,
-// except when it is the active or subagent model — those are kept (so the running
-// session is never stranded) and reported. Manually-added models are never pruned.
+// except when it is the model the session is running on — that one is kept (so
+// the running session is never stranded) and reported. Manually-added models
+// are never pruned.
 func TestPruneStaleDiscoveredModels(t *testing.T) {
 	settings := &contract.Settings{}
 	settings.Provider.ActiveModelID = "keep-active"
-	settings.Provider.SubagentModelID = "keep-sub"
 	settings.Provider.Models = []contract.Model{
 		{ID: "fresh", Source: "endpoint"},
 		{ID: "gone", Source: "endpoint"},
 		{ID: "keep-active", Source: "endpoint"},
-		{ID: "keep-sub", Source: "endpoint"},
 		{ID: "manual", Source: "manual"},
 	}
 	fresh := []contract.Model{{ID: "fresh"}}
@@ -31,7 +30,7 @@ func TestPruneStaleDiscoveredModels(t *testing.T) {
 	if present["gone"] {
 		t.Fatal("a stale endpoint model absent from the fresh list must be pruned")
 	}
-	for _, id := range []string{"fresh", "manual", "keep-active", "keep-sub"} {
+	for _, id := range []string{"fresh", "manual", "keep-active"} {
 		if !present[id] {
 			t.Fatalf("model %q was wrongly pruned: %v", id, present)
 		}
@@ -40,11 +39,11 @@ func TestPruneStaleDiscoveredModels(t *testing.T) {
 	for _, s := range stranded {
 		strandedSet[s] = true
 	}
-	if !strandedSet["keep-active"] || !strandedSet["keep-sub"] {
-		t.Fatalf("stranded active/subagent models must be reported, got %v", stranded)
+	if !strandedSet["keep-active"] {
+		t.Fatalf("the stranded active model must be reported, got %v", stranded)
 	}
 	if strandedSet["gone"] || strandedSet["manual"] {
-		t.Fatalf("only still-selected models should be reported stranded, got %v", stranded)
+		t.Fatalf("only a still-selected model should be reported stranded, got %v", stranded)
 	}
 }
 

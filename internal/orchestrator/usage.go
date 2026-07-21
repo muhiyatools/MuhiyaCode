@@ -2,20 +2,17 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
-func (e *Engine) addTaskAgentUsage(usage contract.Usage) {
-	e.taskMu.Lock()
-	e.taskAgentUsage = e.taskAgentUsage.Add(usage)
-	e.taskMu.Unlock()
-}
-
 func (e *Engine) recordMainUsage(ctx context.Context, observation mainUsageObservation) error {
+	e.usageWriteMu.Lock()
+	defer e.usageWriteMu.Unlock()
+
 	e.taskMu.Lock()
-	defer e.taskMu.Unlock()
 	previous := lastMainUsageRecord(e.usageRecords)
 	newTail := estimatedNewTail(previous, observation.usage)
 	attribution := e.mainCacheAttribution(cacheMissContext{previous: previous, usage: observation.usage, newTail: newTail, previousMessageCount: e.lastSentMessageCount, currentMessageCount: observation.messageCount}, observation.changeReasons)
@@ -23,8 +20,25 @@ func (e *Engine) recordMainUsage(ctx context.Context, observation mainUsageObser
 	if previous != nil && (observation.usage.PromptTokensAvailable || observation.usage.PromptTokens != 0) {
 		record.NewTailTokens = intPointer(newTail)
 	}
-	if err := e.appendUsageLocked(ctx, &record); err != nil {
+	e.taskMu.Unlock()
+
+	if err := e.appendUsage(ctx, &record); err != nil {
 		return err
+	}
+	e.taskMu.Lock()
+	defer e.taskMu.Unlock()
+	// This model has now seen the conversation at this revision, so a later task
+	// may return to it cheaply (switchcost.go).
+	e.noteModelWarm(observation.model, observation.rewriteVersion)
+	// An upstream flip invalidates that warmth for real, whatever our own bytes
+	// say — retire it so the next switch decision is not priced against a cache
+	// that no longer exists, and queue the explanation for the caller to emit.
+	if notice := e.noteUpstreamFlip(observation.usage.Upstream); notice != "" {
+		e.warmPrefix = nil
+		e.pendingUpstreamNotice = notice
+		// Re-arm the shape sidecar so a later resume pins to where we ended up,
+		// not where we started. Same re-arming the model switch already does.
+		e.prefixShapeSaved = false
 	}
 	if observation.usage.PromptTokensAvailable || observation.usage.PromptTokens != 0 {
 		e.latestPromptTokens = observation.usage.PromptTokens
@@ -61,10 +75,10 @@ func (e *Engine) mainCacheAttribution(missContext cacheMissContext, changeReason
 }
 
 func (e *Engine) recordAuxUsage(ctx context.Context, model, pin string, usage contract.Usage, durationMS *int64) error {
-	e.taskMu.Lock()
-	defer e.taskMu.Unlock()
+	e.usageWriteMu.Lock()
+	defer e.usageWriteMu.Unlock()
 	record := usageRecord(usageRecordInput{model: model, stream: contract.UsageStreamAux, pin: pin, usage: usage, attribution: contract.CacheAttributionNA, durationMS: durationMS})
-	return e.appendUsageLocked(ctx, &record)
+	return e.appendUsage(ctx, &record)
 }
 
 // elapsedMS returns the whole milliseconds since start as a nullable pointer —
@@ -122,34 +136,21 @@ func (e *Engine) drainUsageEmissions() {
 	}
 }
 
-func (e *Engine) recordIsolatedUsage(ctx context.Context, model, pin string, usage contract.Usage, coldStart bool, reasons []string, durationMS *int64) error {
+func (e *Engine) appendUsage(ctx context.Context, record *contract.UsageRecord) error {
 	e.taskMu.Lock()
-	defer e.taskMu.Unlock()
-	attribution := contract.CacheAttributionNA
-	if usage.CacheReadTokens != nil && usage.CacheMissTokens != nil {
-		switch {
-		case coldStart:
-			attribution = contract.CacheAttributionColdStart
-		case len(reasons) > 0:
-			attribution = contract.CacheAttributionAgent
-		default:
-			attribution = contract.CacheAttributionProvider
-		}
-	}
-	record := usageRecord(usageRecordInput{model: model, stream: contract.UsageStreamSubagent, pin: pin, usage: usage, reasons: reasons, attribution: attribution, durationMS: durationMS})
-	return e.appendUsageLocked(ctx, &record)
-}
-
-func (e *Engine) appendUsageLocked(ctx context.Context, record *contract.UsageRecord) error {
 	record.Seq = e.requestSeq + 1
 	if record.At.IsZero() {
 		record.At = time.Now().UTC()
 	}
+	e.taskMu.Unlock()
+
 	if e.persistence.AppendUsage != nil {
 		if err := e.persistence.AppendUsage(ctx, *record); err != nil {
 			return err
 		}
 	}
+	e.taskMu.Lock()
+	defer e.taskMu.Unlock()
 	e.requestSeq = record.Seq
 	e.usageRecords = append(e.usageRecords, cloneUsageRecord(*record))
 	e.usageAggregate = contract.AggregateUsage(e.usageRecords)
@@ -181,8 +182,49 @@ func usageRecord(input usageRecordInput) contract.UsageRecord {
 		CostUSD:            cloneFloatPointer(input.usage.CostUSD),
 		CostEstimated:      input.usage.CostEstimated,
 		LogID:              input.usage.CostLogID,
+		Upstream:           input.usage.Upstream,
 		DurationMS:         input.durationMS,
 	}
+}
+
+// upstreamPin is the upstream provider this session has already warmed, sent on
+// every later request so a routing layer sends us back to it (see
+// contract.ChatRequest.PinUpstream). Empty until the first response names one,
+// and empty forever on a direct connection — both correctly meaning "no
+// preference".
+//
+// Learning the value instead of configuring it is the point: the set of
+// upstreams behind a model slug changes without notice, so any hardcoded list
+// would rot, and a wrong name is worse than none. Whoever served us first is by
+// definition both available and holding our prefix.
+func (e *Engine) upstreamPin() string {
+	e.taskMu.Lock()
+	defer e.taskMu.Unlock()
+	return e.lastUpstream
+}
+
+// noteUpstreamFlip surfaces a change in the provider a routing layer served
+// this session from. Prefix caches are per-upstream, so a flip cold-starts a
+// cache that every byte we send says should still be warm — the miss looks like
+// unexplained drift and there is nothing on our side to find. Saying it once,
+// when it happens, is the difference between a diagnosable event and a mystery.
+//
+// It also re-pins: whoever served this request is the one holding our prefix
+// from here on, so a fallback during an outage self-heals into the new affinity
+// rather than fighting it every turn.
+//
+// Silent when the field is absent, which is every direct provider connection.
+// Called under taskMu from recordMainUsage.
+func (e *Engine) noteUpstreamFlip(upstream string) string {
+	if upstream == "" {
+		return ""
+	}
+	previous := e.lastUpstream
+	e.lastUpstream = upstream
+	if previous == "" || previous == upstream {
+		return ""
+	}
+	return fmt.Sprintf("Upstream changed: %s → %s. Prefix caches are per-upstream, so this request started cold.", previous, upstream)
 }
 
 func lastMainUsageRecord(records []contract.UsageRecord) *contract.UsageRecord {
@@ -247,6 +289,7 @@ func usageFromAggregate(aggregate contract.SessionUsageAggregate) contract.Usage
 }
 
 func cloneUsageAggregate(value contract.SessionUsageAggregate) contract.SessionUsageAggregate {
+	value.AllStreamHitRate = cloneFloatPointer(value.AllStreamHitRate)
 	value.SessionHitRate = cloneFloatPointer(value.SessionHitRate)
 	value.SteadyStateHitRate = cloneFloatPointer(value.SteadyStateHitRate)
 	value.PrefixStabilityRate = cloneFloatPointer(value.PrefixStabilityRate)

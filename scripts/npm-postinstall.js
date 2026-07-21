@@ -1,97 +1,126 @@
 #!/usr/bin/env node
-// Downloads the prebuilt MuhiyaCode binary that matches this machine from the
-// GitHub Release whose tag is "v<package.json version>", then unpacks it next to
-// the npm package so bin/muhiyacode.js can launch it. Runs automatically on
-// `npm install`. Pure Node built-ins — no dependencies.
+"use strict";
 
+const crypto = require("crypto");
 const fs = require("fs");
-const os = require("os");
-const path = require("path");
 const https = require("https");
+const path = require("path");
 const { execFileSync } = require("child_process");
+const { pipeline } = require("stream/promises");
 
-// --- edit this if your repository owner/name differs -----------------------
-const REPO = "muhiyatools/MuhiyaCode";
-// ---------------------------------------------------------------------------
-
-const pkg = require(path.join(__dirname, "..", "package.json"));
-const version = pkg.version; // must equal the GitHub release tag WITHOUT the leading "v"
-const vendorDir = path.join(__dirname, "..", "vendor");
-
-// Map Node's platform/arch names to the ones GoReleaser uses in archive names.
+const REPOSITORY = "muhiyatools/MuhiyaCode";
 const PLATFORMS = { darwin: "darwin", linux: "linux", win32: "windows" };
-const ARCHES = { x64: "amd64", arm64: "arm64" };
+const ARCHITECTURES = { x64: "amd64", arm64: "arm64" };
+const packageRoot = path.join(__dirname, "..");
+const version = require(path.join(packageRoot, "package.json")).version;
+const vendorDir = path.join(packageRoot, "vendor");
 
-function fail(msg) {
-  console.error("\nMuhiyaCode install failed: " + msg);
-  console.error(
-    "You can install manually from https://github.com/" + REPO + "/releases\n"
-  );
+function fail(message) {
+  console.error("\nMuhiyaCode install failed: " + message);
+  console.error(`Install manually from https://github.com/${REPOSITORY}/releases/tag/v${version}`);
   process.exit(1);
 }
 
-const goos = PLATFORMS[process.platform];
-const goarch = ARCHES[process.arch];
-if (!goos || !goarch) {
-  fail("unsupported platform " + process.platform + "/" + process.arch);
-}
-
-const isWindows = process.platform === "win32";
-const ext = isWindows ? "zip" : "tar.gz";
-const binName = isWindows ? "muhiyacode.exe" : "muhiyacode";
-const archiveName = `muhiyacode_${version}_${goos}_${goarch}.${ext}`;
-const url = `https://github.com/${REPO}/releases/download/v${version}/${archiveName}`;
-
-// Escape hatch: skip the download entirely and reuse a local build.
-if (process.env.MUHIYACODE_SKIP_DOWNLOAD) {
-  console.log("MuhiyaCode: MUHIYACODE_SKIP_DOWNLOAD set, skipping binary download.");
-  process.exit(0);
-}
-
-function download(fromUrl, toFile, redirects) {
+function download(fromUrl, destination, redirects = 5) {
   return new Promise((resolve, reject) => {
-    https
-      .get(fromUrl, { headers: { "User-Agent": "muhiyacode-npm-installer" } }, (res) => {
-        // GitHub release assets redirect to a storage host — follow it.
-        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          if (redirects <= 0) return reject(new Error("too many redirects"));
-          res.resume();
-          return resolve(download(res.headers.location, toFile, redirects - 1));
-        }
-        if (res.statusCode !== 200) {
-          res.resume();
-          return reject(new Error("HTTP " + res.statusCode + " for " + fromUrl));
-        }
-        const out = fs.createWriteStream(toFile);
-        res.pipe(out);
-        out.on("finish", () => out.close(resolve));
-        out.on("error", reject);
-      })
-      .on("error", reject);
+    const request = https.get(fromUrl, { headers: { "User-Agent": "muhiyacode-npm-installer" } });
+    request.setTimeout(30_000, () => request.destroy(new Error("download timed out")));
+    request.on("error", reject);
+    request.on("response", (response) => {
+      if (response.statusCode >= 300 && response.statusCode < 400 && response.headers.location) {
+        response.resume();
+        if (redirects === 0) return reject(new Error("too many redirects"));
+        return resolve(download(new URL(response.headers.location, fromUrl), destination, redirects - 1));
+      }
+      if (response.statusCode !== 200) {
+        response.resume();
+        return reject(new Error(`HTTP ${response.statusCode} for ${fromUrl}`));
+      }
+      return resolve(pipeline(response, fs.createWriteStream(destination)));
+    });
   });
 }
 
-async function main() {
-  fs.mkdirSync(vendorDir, { recursive: true });
-  const archivePath = path.join(vendorDir, archiveName);
-
-  console.log("MuhiyaCode: downloading " + archiveName + " …");
-  await download(url, archivePath, 5);
-
-  // Windows ships bsdtar (`tar`) since Win10 1803 and it extracts BOTH .zip and
-  // .tar.gz, so a single `tar` call covers every platform.
-  const args = ext === "zip" ? ["-xf", archivePath] : ["-xzf", archivePath];
-  execFileSync("tar", args, { cwd: vendorDir, stdio: "inherit" });
-
-  const binPath = path.join(vendorDir, binName);
-  if (!fs.existsSync(binPath)) {
-    fail("binary " + binName + " not found in archive");
+function expectedChecksum(checksumsPath, archiveName) {
+  const line = fs.readFileSync(checksumsPath, "utf8").split(/\r?\n/)
+    .find((entry) => entry.trim().endsWith(`  ${archiveName}`));
+  if (!line || !/^[a-f0-9]{64}  /i.test(line)) {
+    throw new Error(`checksum for ${archiveName} is missing or invalid`);
   }
-  if (!isWindows) fs.chmodSync(binPath, 0o755);
-  try {
-    fs.unlinkSync(archivePath);
-  } catch {}
-  console.log("MuhiyaCode: installed " + binName);
+  return line.slice(0, 64).toLowerCase();
 }
 
-main().catch((err) => fail(err.message));
+function actualChecksum(archivePath) {
+  const hash = crypto.createHash("sha256");
+  hash.update(fs.readFileSync(archivePath));
+  return hash.digest("hex");
+}
+
+async function downloadReleaseFiles(releaseBase, archiveName, archivePath, checksumsPath) {
+  const results = await Promise.allSettled([
+    download(`${releaseBase}/${archiveName}`, archivePath),
+    download(`${releaseBase}/checksums.txt`, checksumsPath),
+  ]);
+  const failed = results.find((result) => result.status === "rejected");
+  if (failed) throw failed.reason;
+}
+
+function removeIfPresent(target) {
+  try {
+    fs.rmSync(target, { force: true, recursive: true });
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+}
+
+function extractArchive(archivePath, destination, isWindows) {
+  fs.mkdirSync(destination, { recursive: true });
+  const args = isWindows ? ["-xf", archivePath] : ["-xzf", archivePath];
+  execFileSync("tar", args, { cwd: destination, stdio: "inherit" });
+}
+
+function platformDetails() {
+  const goos = PLATFORMS[process.platform];
+  const goarch = ARCHITECTURES[process.arch];
+  if (!goos || !goarch) {
+    throw new Error(`unsupported platform ${process.platform}/${process.arch}`);
+  }
+  const isWindows = process.platform === "win32";
+  return { goos, goarch, isWindows, binaryName: isWindows ? "muhiyacode.exe" : "muhiyacode" };
+}
+
+async function install() {
+  const { goos, goarch, isWindows, binaryName } = platformDetails();
+  const archiveName = `muhiyacode_${version}_${goos}_${goarch}.${isWindows ? "zip" : "tar.gz"}`;
+  const releaseBase = `https://github.com/${REPOSITORY}/releases/download/v${version}`;
+  const archivePath = path.join(vendorDir, archiveName);
+  const checksumsPath = path.join(vendorDir, "checksums.txt");
+  const stagingDir = path.join(vendorDir, `.install-${process.pid}`);
+
+  fs.mkdirSync(vendorDir, { recursive: true });
+  removeIfPresent(stagingDir);
+  console.log("MuhiyaCode: downloading and verifying " + archiveName + "...");
+  try {
+    await downloadReleaseFiles(releaseBase, archiveName, archivePath, checksumsPath);
+    if (actualChecksum(archivePath) !== expectedChecksum(checksumsPath, archiveName)) {
+      throw new Error(`checksum mismatch for ${archiveName}`);
+    }
+    extractArchive(archivePath, stagingDir, isWindows);
+    const stagedBinary = path.join(stagingDir, binaryName);
+    if (!fs.existsSync(stagedBinary)) throw new Error(`${binaryName} not found in archive`);
+    removeIfPresent(path.join(vendorDir, binaryName));
+    fs.renameSync(stagedBinary, path.join(vendorDir, binaryName));
+    if (!isWindows) fs.chmodSync(path.join(vendorDir, binaryName), 0o755);
+  } finally {
+    removeIfPresent(archivePath);
+    removeIfPresent(checksumsPath);
+    removeIfPresent(stagingDir);
+  }
+  console.log("MuhiyaCode: installed " + binaryName);
+}
+
+if (process.env.MUHIYACODE_SKIP_DOWNLOAD) {
+  console.log("MuhiyaCode: MUHIYACODE_SKIP_DOWNLOAD set; skipping binary download.");
+} else {
+  install().catch((error) => fail(error.message));
+}

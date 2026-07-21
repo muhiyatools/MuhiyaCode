@@ -17,7 +17,7 @@ import (
 // recorded epoch this feature is allowed to spend (FR-018).
 var update = flag.Bool("update", false, "regenerate the instruction-system goldens")
 
-var audienceOrder = []Audience{MainStatic, MainDynamic, Subagent, Gate}
+var audienceOrder = []Audience{MainStatic, MainDynamic, Gate}
 var cacheOrder = []Cache{Prefix, Tail, Sidecar}
 
 // renderFullDump renders every registered Text, grouped by Audience then

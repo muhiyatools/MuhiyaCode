@@ -9,16 +9,19 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	appcore "github.com/muhiya/muhiyacode/internal/app"
 	"github.com/muhiya/muhiyacode/internal/buildinfo"
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/gateway"
 	"github.com/muhiya/muhiyacode/internal/mcpclient"
 	"github.com/muhiya/muhiyacode/internal/state"
 	"github.com/muhiya/muhiyacode/internal/tui"
+	"github.com/muhiya/muhiyacode/internal/updatecheck"
 	"github.com/muhiya/muhiyacode/internal/workspace"
 	"github.com/spf13/cobra"
 )
@@ -79,21 +82,27 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 		return err
 	}
 	defer app.Close()
+	// Ask the registry whether a newer version exists, on its own goroutine so
+	// startup never waits on it. Cached for a day, silent on failure, and the
+	// result is read at hydration — by then it has either landed or it has not,
+	// and either way the session proceeds.
+	updateCh := make(chan string, 1)
+	go func() {
+		updateCh <- updatecheck.Refresh(cmd.Context(), filepath.Join(app.paths.CacheDir, "update_check.json"))
+	}()
 	hydrate := func(ctx context.Context) (tui.HydratedRuntime, error) {
 		if err := app.Hydrate(ctx); err != nil {
 			return tui.HydratedRuntime{}, err
 		}
 		// One-shot startup notices are read from the now-live engine: config gaps,
-		// plus any restored goal/plan-state resurrected from the sidecars (G4/P2).
 		notice := configurationNotice(*app.Settings(), app.secrets)
-		if restored := app.Runtime().Engine.RestoredGoalNotice(); restored != "" {
-			notice = joinNotice(notice, restored)
-		}
-		if restored := app.Runtime().Engine.RestoredPlanNotice(); restored != "" {
-			notice = joinNotice(notice, restored)
+		latest := ""
+		select {
+		case latest = <-updateCh:
+		default: // still in flight — the header simply shows nothing this run
 		}
 		return tui.HydratedRuntime{
-			Runtime: app.Runtime(), Actions: app.Actions(), Recent: app.Recent(), Notice: notice,
+			Runtime: app.Runtime(), Actions: app.Actions(), Recent: app.Recent(), Notice: notice, LatestVersion: latest,
 		}, nil
 	}
 	return tui.Run(tui.Options{
@@ -106,14 +115,6 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 	})
 }
 
-// joinNotice appends add to base on its own line, tolerating an empty base.
-func joinNotice(base, add string) string {
-	if base == "" {
-		return add
-	}
-	return base + "\n" + add
-}
-
 func runOneShot(cmd *cobra.Command, cwd, prompt string, fresh, noMCP bool) error {
 	callbacks := newConsoleCallbacks(cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
 	app, err := OpenApplication(ApplicationOptions{Context: cmd.Context(), Workspace: cwd, NewSession: fresh, Title: promptTitle(prompt), Callbacks: callbacks, DisableMCP: noMCP})
@@ -124,7 +125,7 @@ func runOneShot(cmd *cobra.Command, cwd, prompt string, fresh, noMCP bool) error
 	if notice := configurationNotice(*app.Settings(), app.secrets); notice != "" {
 		return errors.New(notice)
 	}
-	answer, stats, err := app.Runtime().Engine.Run(cmd.Context(), prompt)
+	answer, stats, err := app.Runtime().Engine.Run(cmd.Context(), appcore.AssemblePrompt(cmd.Context(), prompt, nil, nil, nil))
 	if err != nil {
 		// Feature 011 T004a: the benchmark runner needs a summary even for a
 		// failed run (recorded as completed:false), before the error propagates.
@@ -277,7 +278,7 @@ func newConfigCommand() *cobra.Command {
 			if err := state.SaveSettings(settings, paths); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Discovered %d model(s). Main: %s; subagent: %s.\n", len(models), settings.Provider.ActiveModelID, settings.Provider.SubagentModelID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Discovered %d model(s). Using %s.\n", len(models), settings.Provider.ActiveModelID)
 			if len(stranded) > 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "No longer offered (still selected): %s. Pick a new one with `muhiyacode config set model <id>`.\n", strings.Join(stranded, ", "))
 			}
@@ -535,11 +536,7 @@ func mcpSecretValues(paths state.Paths) []string {
 	}
 	var values []string
 	for _, server := range secrets.OAuth {
-		for _, value := range server {
-			if text, ok := value.(string); ok && text != "" {
-				values = append(values, text)
-			}
-		}
+		collectSecretStrings(server, &values)
 	}
 	for _, server := range secrets.Env {
 		for _, value := range server {
@@ -549,6 +546,28 @@ func mcpSecretValues(paths state.Paths) []string {
 		}
 	}
 	return values
+}
+
+// collectSecretStrings walks an OAuth entry (nested maps/slices) and appends every
+// string leaf long enough to be a credential. The real secrets — access/refresh
+// tokens under "tokens", client_secret under "clientInformation" — are NESTED, so
+// a top-level-only scan collected only harmless URLs and left a bare opaque token
+// (e.g. ya29.a0Af…) to be written verbatim to memory/transcripts/events (I-4).
+func collectSecretStrings(value any, out *[]string) {
+	switch v := value.(type) {
+	case string:
+		if len(v) >= 8 {
+			*out = append(*out, v)
+		}
+	case map[string]any:
+		for _, item := range v {
+			collectSecretStrings(item, out)
+		}
+	case []any:
+		for _, item := range v {
+			collectSecretStrings(item, out)
+		}
+	}
 }
 
 func configurationNotice(settings contract.Settings, secrets contract.Secrets) string {

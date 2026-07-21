@@ -59,9 +59,12 @@ func (m *Model) applyHydration(msg hydratedMsg) tea.Cmd {
 	m.status = "Ready"
 	m.loadEvents(msg.result.Recent)
 	if m.runtime.Engine != nil {
-		m.plan = m.runtime.Engine.CurrentPlan()
+		m.plan = m.runtime.Engine.CurrentChecklist()
 		report := m.runtime.Engine.ContextReport()
 		m.context = contract.ContextInfo{HistoryTokens: report.HistoryTokens, ContextLimit: report.ContextLimit, Percent: report.Percent}
+	}
+	if msg.result.LatestVersion != "" {
+		m.latestVersion = msg.result.LatestVersion
 	}
 	if strings.TrimSpace(msg.result.Notice) != "" {
 		m.warn(msg.result.Notice)
@@ -126,7 +129,6 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	beforeOffset := m.viewport.YOffset()
 	beforeItems := len(m.items)
 	beforeWidth := m.width
-	beforeViewAgent := m.viewAgent
 	dirty := false
 	var commandsOut []tea.Cmd
 	switch value := message.(type) {
@@ -187,8 +189,6 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.usage = contract.Usage(value)
 	case contextMsg:
 		m.context = contract.ContextInfo(value)
-	case agentMsg:
-		m.applyAgent(contract.AgentEvent(value))
 	case statsMsg:
 		// T1: snapshot on statsMsg. The persistent per-task summary is appended
 		// to the transcript on the resultMsg that follows (taskSummaryLine);
@@ -198,48 +198,15 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		// 004 US1 (T013): the task has ended — no tool or subagent may keep
 		// animating. Reconcile any still-"running" work item to a terminal state.
 		m.sweepRunningWork()
-		// P2: a plan-ready task opens the Proceed now / Proceed later / Keep
-		// planning modal. The engine leaves plan mode ON in interactive runs
-		// so the modal choices can drive it. Clear busy/status HERE, not on the
-		// resultMsg that follows: stats arrive first, and if the user answers
-		// the modal in that window while busy is still true, submit() silently
-		// queues the "Proceed with the approved plan…" prompt instead of
-		// running it — a dead click. The resultMsg handler re-assigns the same
-		// idle values, so the double-clear is idempotent.
-		if value.PlanReady {
-			m.busy = false
-			m.status = "Ready"
-			m.openPlanReadyModal()
-		}
 		// H5: surface a force-finalization reason (token breaker / failure
 		// terminator) as a warn notice so the user knows why the task stopped
 		// short of the turn ceiling.
 		if value.TerminatedReason != "" {
 			m.warn("Task terminated: " + value.TerminatedReason)
 		}
-	case planProceedResultMsg:
-		// The engine transition already ran off-thread (modals.go). Do the UI-thread
-		// follow-up here: a false result is the dead-click guard (plan terminal or
-		// not awaiting approval); otherwise submit the execution prompt.
-		if !value.ok {
-			m.notify("Could not start implementation — the plan is not awaiting approval (say 'proceed' later to run it).")
-			break
-		}
-		m.notify("Proceeding with the approved plan now.")
-		if cmd := m.submit("Proceed with the approved plan. Work through the plan steps in order, keeping update_plan current."); cmd != nil {
-			commandsOut = append(commandsOut, cmd)
-		}
 	case engineNoticeMsg:
 		// An off-thread engine mutation (T021) finished; show its notice.
 		m.notify(value.notice)
-	case planDeferredMsg:
-		m.notify("Plan saved. Say 'proceed' (or 'go ahead') any time to execute it.")
-	case planKeepPlanningMsg:
-		if value.err != nil {
-			m.notify("Could not return to planning: " + value.err.Error())
-			break
-		}
-		m.notify("Plan mode stays on — keep refining the plan.")
 	case mcpStatusMsg:
 		m.warn("MCP · " + string(value))
 	case modalRequest:
@@ -332,7 +299,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	// instant regardless of transcript length. Presentation-only: the provider
 	// request path (and therefore the prefix cache) is untouched.
 	switch message.(type) {
-	case streamMsg, toolStartMsg, toolEndMsg, toolOutputMsg, agentMsg, resultMsg, statsMsg, initialMsg, actionMsg:
+	case streamMsg, toolStartMsg, toolEndMsg, toolOutputMsg, resultMsg, statsMsg, initialMsg, actionMsg:
 		dirty = true
 	}
 	if len(m.items) != beforeItems || m.width != beforeWidth {
@@ -361,27 +328,16 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if scrolled {
 		m.followOutput = m.viewport.AtBottom()
 	}
-	// 009 polish: an agent-view switch (Tab, Alt+N, Esc, or a chip click)
-	// changes which transcript body renders — repaint NOW. Keyboard switches
-	// previously set no dirty signal, so on an idle session (no content events
-	// coming) the header changed but the body never did: the switch looked
-	// dead. Scroll resets deliberately on a switch: a detail view opens at its
-	// top (the "Agent task:" header), and returning to the main session
-	// resumes following the live bottom.
-	viewSwitched := m.viewAgent != beforeViewAgent
-	if viewSwitched {
-		dirty = true
-		m.followOutput = m.viewAgent == ""
-	}
+	// The agent-view switch repaint lived here: switching into or out of a
+	// subagent's detail body changed which transcript rendered, and needed an
+	// explicit dirty signal because a keyboard switch produced no content event.
+	// There is one transcript body now, so the only repaint trigger is content.
 	forceBottom := m.followOutput
 	if dirty {
 		// New content re-renders and pins to the bottom only while following, so a
 		// reader who scrolled up mid-stream is never yanked down.
 		m.frameState.markDirty() // US2 T032: record that the transcript pane changed
 		m.refreshViewport(forceBottom)
-		if viewSwitched && m.viewAgent != "" {
-			m.viewport.GotoTop()
-		}
 	} else if forceBottom && wasBottom {
 		// Content unchanged but the layout may have shifted (input grew): keep the
 		// bottom pinned only when we were already there — never pull a scrolled-up
@@ -408,23 +364,6 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(commandsOut...)
 }
 
-func (m *Model) cycleAgent() {
-	if len(m.agents) == 0 {
-		return
-	}
-	if m.viewAgent == "" {
-		m.viewAgent = m.agents[0].id
-		return
-	}
-	for index, agent := range m.agents {
-		if agent.id == m.viewAgent {
-			if index == len(m.agents)-1 {
-				m.viewAgent = ""
-			} else {
-				m.viewAgent = m.agents[index+1].id
-			}
-			return
-		}
-	}
-	m.viewAgent = ""
-}
+// cycleAgent / cycleAgentBack walked the ring main → agent[0] → … → main,
+// bound to → and ←. Both are gone with the agent views they cycled between;
+// the arrow keys belong entirely to the caret again.

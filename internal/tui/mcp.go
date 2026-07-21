@@ -1,50 +1,24 @@
 package tui
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/muhiya/muhiyacode/internal/app"
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
 // MCPServerInfo is the view model for one MCP server: its configuration plus
 // the manager's live connection status.
-type MCPServerInfo struct {
-	Name      string
-	Transport string // "stdio" | "http"
-	Target    string // command+args, or url
-	Enabled   bool
-	OAuth     bool
-	State     string // "connected" | "connecting" | "error" | "auth_required" | "disabled" | "authorized" | "not connected"
-	Status    string // human-readable message
-	ToolCount int
-}
+type MCPServerInfo = app.MCPServerInfo
 
 // MCPAddSpec describes a server to register.
-type MCPAddSpec struct {
-	Name      string
-	Transport string
-	Command   string
-	Args      []string
-	URL       string
-	OAuth     bool
-}
+type MCPAddSpec = app.MCPAddSpec
 
 // MCPActions is the typed backend the MCP management modal drives. Each call is
 // safe to invoke from the TUI goroutine via actionCommand.
-type MCPActions struct {
-	List       func(context.Context) ([]MCPServerInfo, error)
-	Add        func(context.Context, MCPAddSpec) error
-	Remove     func(context.Context, string) error
-	SetEnabled func(context.Context, string, bool) error
-	Authorize  func(context.Context, string) error
-	Test       func(context.Context, string) ([]MCPServerInfo, error)
-	// Refresh (D2) kicks a background, non-blocking manager refresh so opening
-	// the modal begins connecting lazy servers. Optional (may be nil in tests).
-	Refresh func(context.Context)
-}
+type MCPActions = app.MCPActions
 
 // mcpActionResult is what an MCP mutation returns to handleAction: a message to
 // flash plus the refreshed server list so the modal can redraw.

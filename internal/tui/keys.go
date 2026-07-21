@@ -1,13 +1,12 @@
 package tui
 
 import (
-	"sort"
 	"strings"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/muhiya/muhiyacode/internal/app"
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"golang.org/x/text/unicode/norm"
 )
 
 func (m *Model) handleKey(key tea.KeyPressMsg) tea.Cmd {
@@ -50,10 +49,7 @@ func (m *Model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 			m.clearSelection()
 			return nil
 		}
-		if m.viewAgent != "" {
-			m.viewAgent = ""
-			m.status = "Main session"
-		} else if m.busy {
+		if m.busy {
 			m.runtime.Engine.Cancel()
 			m.status = "Stopping…"
 		} else {
@@ -77,16 +73,12 @@ func (m *Model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "shift+tab":
 		return m.cyclePermission()
-	case "ctrl+t":
-		// Toggle the live to-do checklist panel (Experience Overhaul A3). Pure UI
-		// state — no engine call, no notice.
-		m.todoVisible = !m.todoVisible
-		return nil
 	case "tab":
+		// Tab is autocomplete only (013 FR-027). Its agent-switching branch moved to
+		// the arrow keys; with no leading "/" it now does nothing, which is what a
+		// user pressing Tab mid-sentence expects.
 		if strings.HasPrefix(m.input.Value(), "/") {
 			m.completeCommand()
-		} else {
-			m.cycleAgent()
 		}
 		return nil
 	case "enter":
@@ -134,15 +126,8 @@ func (m *Model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		m.viewport.PageDown()
 		return nil
 	}
-	if strings.HasPrefix(stroke, "alt+") && len(stroke) == 5 && stroke[4] >= '1' && stroke[4] <= '9' {
-		index := int(stroke[4] - '0')
-		for _, agent := range m.agents {
-			if agent.index == index {
-				m.viewAgent = agent.id
-				return nil
-			}
-		}
-	}
+	// left/right agent cycling and alt+1..9 agent jumps were removed with the
+	// subagent views they navigated. Both keys now belong entirely to the caret.
 	updated, command := m.input.Update(key)
 	m.input = updated
 	if strings.HasPrefix(m.input.Value(), "/") {
@@ -212,13 +197,11 @@ func (m *Model) submit(prompt string) tea.Cmd {
 	// exact reconstructed paste content. Assembly happens once, here, at the send
 	// boundary, then the stash is released.
 	display := prompt
-	prompt = m.expandPastes(prompt)
+	// Paste expansion and NFC normalization live in the core (app.AssemblePrompt)
+	// so every frontend sends identical bytes; skills are folded in below, after
+	// the steering branch, because a queued steering message carries none.
+	prompt = app.AssemblePrompt(m.ctx, prompt, nil, m.expandPastes, nil)
 	m.releasePastes()
-	// 006 (T030, FR-013): the model receives normalized logical Unicode. NFC is
-	// idempotent and meaning-preserving; it never introduces presentation forms or
-	// reordering, and it rides the user message (dynamic) so the cached prefix is
-	// untouched. Digit systems are preserved as written.
-	prompt = norm.NFC.String(prompt)
 	// T1: a fresh prompt clears the persistent usage footer so prior
 	// duration / effort / totals no longer mislead.
 	m.lastStats = nil
@@ -226,34 +209,32 @@ func (m *Model) submit(prompt string) tea.Cmd {
 		if m.runtime.Engine.QueueUserMessage(prompt) {
 			m.items = append(m.items, item{kind: "user", content: display, title: "steering"})
 			m.status = "Message queued"
+			return nil
 		}
+		// D1: m.busy is true but the engine has no task to steer — the run is still
+		// starting, or the previous one just finished and its completion has not yet
+		// reached the UI. The enter handler already cleared the composer, so dropping
+		// here would silently lose what the user typed (the reported steering-loss
+		// bug). Restore the text instead: one more Enter delivers it — as steering
+		// once the run is live, or as a fresh task once busy clears. Falling through
+		// to start a task now would race the starting run into "a task is already
+		// running".
+		m.input.SetValue(display)
+		m.input.MoveToEnd()
+		m.notify("One moment — press Enter to send.")
 		return nil
 	}
 	m.items = append(m.items, item{kind: "user", content: display})
 	m.history = append(m.history, prompt)
 	m.historyIndex = -1
 	if len(m.selectedSkills) > 0 {
-		var names []string
+		queued := make([]Skill, 0, len(m.selectedSkills))
 		for _, skill := range m.selectedSkills {
-			names = append(names, skill.Name)
+			queued = append(queued, skill)
 		}
-		sort.Strings(names)
-		var sections []string
-		for _, name := range names {
-			skill := m.selectedSkills[name]
-			body := strings.TrimSpace(skill.Instructions)
-			// 003 (T036): load the body on demand for selected skills only.
-			if body == "" && skill.Path != "" && m.actions.LoadSkill != nil {
-				if loaded, err := m.actions.LoadSkill(m.ctx, skill.Path); err == nil {
-					body = strings.TrimSpace(loaded)
-				}
-			}
-			if body == "" {
-				body = skill.Description
-			}
-			sections = append(sections, "<skill name=\""+skill.Name+"\">\n"+body+"\n</skill>")
-		}
-		prompt = "Follow the selected skill instructions when relevant to this turn.\n\n" + strings.Join(sections, "\n\n") + "\n\nUser prompt:\n" + prompt
+		// Already expanded and normalized above, so pass no expander: the core
+		// orders the skills, loads bodies on demand, and wraps them.
+		prompt = app.AssemblePrompt(m.ctx, prompt, queued, nil, m.actions.LoadSkill)
 		m.selectedSkills = make(map[string]Skill)
 	}
 	// A fresh task starts its live counters from zero — without this reset the

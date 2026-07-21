@@ -7,7 +7,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
 // stateModel builds an 80x24 model ready for state-cue assertions.
@@ -22,12 +21,17 @@ func stateModel(t *testing.T) *Model {
 // visible text, not escape codes.
 func frameText(m *Model) string { return ansi.Strip(m.View().Content) }
 
-// TestFirstRunState (US6 T071/T074) — an empty session shows the welcome cue.
+// TestFirstRunState (v1.1.0) — an empty session renders an empty transcript.
+// The welcome cue is deliberately gone: the composer, header, and mode-line
+// hints orient a new user without a greeting to scroll past every session.
 func TestFirstRunState(t *testing.T) {
 	m := stateModel(t)
 	m.refreshViewport(true)
-	if !strings.Contains(frameText(m), "Welcome to MuhiyaCode") {
-		t.Fatal("first-run state missing its cue")
+	if strings.Contains(frameText(m), "Welcome to MuhiyaCode") {
+		t.Fatal("the removed welcome cue is back")
+	}
+	if strings.TrimSpace(m.transcriptContent) != "" {
+		t.Fatalf("empty session rendered transcript content: %q", m.transcriptContent)
 	}
 }
 
@@ -56,15 +60,9 @@ func TestToolRunningState(t *testing.T) {
 	}
 }
 
-// TestSubagentRunningState (US6 T071/T074) — a running subagent shows its chip.
-func TestSubagentRunningState(t *testing.T) {
-	m := stateModel(t)
-	m.applyAgent(contract.AgentEvent{Kind: "start", RunID: "r1", Agent: "explorer", Title: "Map code", Task: "explore"})
-	m.refreshViewport(true)
-	if !strings.Contains(frameText(m), "Map code") {
-		t.Fatal("subagent-running state cue missing")
-	}
-}
+// The subagent-running state retired with the subagent system: there are no
+// agent chips because there are no agents. The running-tool cue above is the
+// surviving in-flight indicator.
 
 // TestErrorState (US6 T071/T074) — an error surfaces on the notice line.
 func TestErrorState(t *testing.T) {

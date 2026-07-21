@@ -2,57 +2,16 @@ package orchestrator
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
-// recordPlanViolationAndBlock increments the per-task violation counter and
-// returns a blocked toolOutcome whose output escalates from a soft notice
-// (counts 1–2) to a hard governance message (count ≥ 3). (P4.)
-func (e *Engine) recordPlanViolationAndBlock(ctx context.Context, sc dispatchScope, call contract.ToolCall, kind, soft string) toolOutcome {
-	sc.counters.mu.Lock()
-	sc.counters.planViolations++
-	n := sc.counters.planViolations
-	sc.counters.mu.Unlock()
-	out := soft
-	if n >= 3 {
-		out = fmt.Sprintf(instructions.GatePlanModeEscalatedTmpl, n, kind)
-	} else {
-		out = soft + instructions.GatePlanModeSoftSuffix
-	}
-	e.recordHarnessEvent(ctx, contract.HarnessGate, "plan-mode-"+kind+"-block", call.ToolName())
-	if sc.onEnd != nil {
-		sc.onEnd(call, out)
-	}
-	return toolOutcome{Call: call, Output: out, Failed: true}
-}
-
-func (e *Engine) recordPipelineViolationAndBlock(ctx context.Context, sc dispatchScope, call contract.ToolCall, state contract.LifecycleState) toolOutcome {
-	sc.counters.mu.Lock()
-	sc.counters.planViolations++
-	n := sc.counters.planViolations
-	sc.counters.mu.Unlock()
-	phase := pipelineLabel(state)
-	out := fmt.Sprintf(instructions.GatePipelineMutationTmpl, phase)
-	if n >= 3 {
-		out = fmt.Sprintf(instructions.GatePipelineEscalatedTmpl, n, phase)
-	}
-	e.recordHarnessEvent(ctx, contract.HarnessGate, "pipeline-mutation-block", call.ToolName()+" in "+phase)
-	if sc.onEnd != nil {
-		sc.onEnd(call, out)
-	}
-	return toolOutcome{Call: call, Output: out, Failed: true}
-}
-
-// gatedExecute is the SINGLE shared tool-dispatch gate used by both the main
-// loop and every subagent run (contracts/dispatch-gate.md). Scope-specific
-// behaviour is carried by sc, so subagents no longer bypass validation, the
-// failed-call cache, the repeat limiter, or the storm breaker. (B6/T024/T025.)
+// gatedExecute is the single tool-dispatch gate every call passes through
+// (contracts/dispatch-gate.md): argument validation, the verbatim failed-call
+// short-circuit, the repeat limiter, the duplicate-read guard, cancel-safe
+// pairing, and the storm breaker, in that order.
 func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, definitions []contract.ToolDefinition, effort EffortProfile, sc dispatchScope) toolOutcome {
 	name := call.ToolName()
 	if sc.onStart != nil {
@@ -68,7 +27,7 @@ func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, defin
 		output := err.Error() + " Re-emit the call with well-formed arguments."
 		e.recordHarnessEvent(ctx, contract.HarnessGate, "arg-validation:"+name, err.Error())
 		end(output)
-		return toolOutcome{Call: call, Output: output, Failed: true, Err: err}
+		return toolOutcome{Call: call, Output: output, Failed: true, GateRejected: true, Err: err}
 	}
 	// H2: verbatim failed-call short-circuit.
 	signature := callSignature(call)
@@ -77,76 +36,7 @@ func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, defin
 		e.recordHarnessEvent(ctx, contract.HarnessGate, "repeat-failed-call:"+name, prior)
 		end(output)
 		e.recordFailedCall(sc, signature, output)
-		return toolOutcome{Call: call, Output: output, Failed: true}
-	}
-	// Read-only subagents may receive run_shell so they can execute observable
-	// test/vet/status checks. Keep the capability guided at the shared gate:
-	// read-only commands may be chained, but state-changing shell commands
-	// never reach the registry.
-	if sc.readOnly && name == "run_shell" {
-		var args struct {
-			Command string `json:"command"`
-		}
-		if json.Unmarshal([]byte(call.ArgumentsJSON()), &args) != nil || !IsReadOnlyShell(args.Command) {
-			output := instructions.GateSubagentShellBlockedBody
-			e.recordHarnessEvent(ctx, contract.HarnessGate, "shell-readonly-block", args.Command)
-			end(output)
-			e.recordFailedCall(sc, signature, output)
-			return toolOutcome{Call: call, Output: output, Failed: true}
-		}
-	}
-	// Feature 012 R-D2: a review-after-implement continuation carries the
-	// implementer's full tool array on the wire (cache identity) but is
-	// review-only in effect — mutations are refused harness-side. Only bites
-	// read-only scopes whose definitions include mutating tools (continuation
-	// runs); fresh read-only kinds never offer these tools, so H1 catches them
-	// first.
-	if sc.readOnly && isMutation(name) && name != "run_shell" {
-		output := instructions.GateContinuationReviewMutationBody
-		e.recordHarnessEvent(ctx, contract.HarnessGate, "continuation-review-mutation-block", name)
-		end(output)
-		e.recordFailedCall(sc, signature, output)
-		return toolOutcome{Call: call, Output: output, Failed: true}
-	}
-	// Feature 012 role gate (contracts/role-gate.md RG-1..RG-4): during
-	// full-depth implementation phases the MAIN model's implementation reads
-	// are denied with dispatch guidance — bounded at two per task, then waived
-	// with a recorded degradation; post-failure diagnosis and degraded phases
-	// are exempt.
-	if outcome, blocked := e.phaseReadGate(ctx, sc, call, name); blocked {
-		return outcome
-	}
-	// 009 PL-6 / 010 UL-3: the ONE mutation gate. The 009 audit proved the two
-	// former gates guarded the SAME state set — the read-only window
-	// (research/planning/awaiting-approval) — so they collapse onto one predicate,
-	// BlocksMutation(). An orchestrated read-only phase emits the pipeline block
-	// (main loop only, where the implementation gate is enforced); a manual
-	// plan-mode read-only state emits the plan-mode block. Both preserve their
-	// escalation counter and every pinned byte. A read-only shell probe passes in
-	// a manual plan-mode state (as before) but not in an orchestrated phase, where
-	// every mutation — run_shell included — is blocked until implementation.
-	if isMutation(name) {
-		l := e.Lifecycle()
-		if l.State.BlocksMutation() {
-			if sc.trackStats && l.Orchestrated() {
-				return e.recordPipelineViolationAndBlock(ctx, sc, call, l.State)
-			}
-			if name == "run_shell" {
-				var args struct {
-					Command string `json:"command"`
-				}
-				if json.Unmarshal([]byte(call.ArgumentsJSON()), &args) == nil && IsReadOnlyShell(args.Command) {
-					// Allow read-only shell probes through.
-				} else {
-					return e.recordPlanViolationAndBlock(ctx, sc, call, "shell", instructions.GatePlanModeShellBlocked)
-				}
-			} else if strings.HasPrefix(name, "mcp__") {
-				// 004 US3 (T033): name the allowed alternative instead of a bare block.
-				return e.recordPlanViolationAndBlock(ctx, sc, call, "mcp", instructions.GatePlanModeMCPBlocked)
-			} else {
-				return e.recordPlanViolationAndBlock(ctx, sc, call, "mutation", instructions.GatePlanModeMutationBody)
-			}
-		}
+		return toolOutcome{Call: call, Output: output, Failed: true, GateRejected: true}
 	}
 	// Repeat limiter.
 	sc.counters.mu.Lock()
@@ -157,20 +47,18 @@ func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, defin
 		output := instructions.GateRepeatLimiterBody
 		e.recordHarnessEvent(ctx, contract.HarnessGate, "repeat-limiter:"+name, callSignature(call))
 		end(output)
-		return toolOutcome{Call: call, Output: output, Failed: true}
+		return toolOutcome{Call: call, Output: output, Failed: true, GateRejected: true}
 	}
-	// Duplicate-read guard (main scope only; the inspection ledger is main-task state).
-	if sc.dedupe {
-		if entry, duplicate := e.inspection.Duplicate(call, e.history.IsToolResultIntact); duplicate {
-			if sc.trackStats {
-				e.taskMu.Lock()
-				e.taskDuplicates++
-				e.taskMu.Unlock()
-			}
-			output := fmt.Sprintf(instructions.GateDuplicateReadTmpl, entry.CallID)
-			end(output)
-			return toolOutcome{Call: call, Output: output, Failed: false}
-		}
+	// Duplicate-read guard: the task-scoped inspection ledger holds every read
+	// this session has made, with mtime-gated freshness for files and
+	// mutation-invalidated signatures for searches.
+	if entry, duplicate := e.inspection.Duplicate(call, e.history.IsToolResultIntact); duplicate {
+		e.taskMu.Lock()
+		e.taskDuplicates++
+		e.taskMu.Unlock()
+		output := fmt.Sprintf(instructions.GateDuplicateReadTmpl, entry.CallID)
+		end(output)
+		return toolOutcome{Call: call, Output: output, Failed: false}
 	}
 	// H4: cancel-safe pairing before dispatch.
 	if ctx.Err() != nil {
@@ -179,28 +67,39 @@ func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, defin
 		return toolOutcome{Call: call, Output: output, Failed: true}
 	}
 	output, dispatchErr := sc.dispatch(ctx, call)
-	if dispatchErr != nil && !errors.Is(dispatchErr, contract.ErrPlanModeExited) {
+	if dispatchErr != nil {
 		output = fmt.Sprintf("Tool %s failed: %v", name, dispatchErr)
 	}
 	// Re-check after dispatch in case cancellation landed during execution.
-	if ctx.Err() != nil && !errors.Is(dispatchErr, contract.ErrPlanModeExited) {
+	if ctx.Err() != nil {
 		output = "[cancelled by user before execution]"
 		end(output)
 		return toolOutcome{Call: call, Output: output, Failed: true}
 	}
 	output = CapToolOutput(output, effort.ToolOutputCap)
-	failed := errors.Is(dispatchErr, contract.ErrPlanModeExited) || IsToolFailure(output, dispatchErr)
+	failed := IsToolFailure(output, dispatchErr)
 	if sc.postDispatch != nil {
 		sc.postDispatch(call, output, failed, dispatchErr)
 	}
 	end(output)
-	if failed && !errors.Is(dispatchErr, contract.ErrPlanModeExited) {
+	if failed {
 		e.recordHarnessEvent(ctx, contract.HarnessTool, "tool-failure:"+name, output)
 		e.recordFailedCall(sc, signature, output)
-	} else if !failed {
+	} else {
 		sc.counters.mu.Lock()
 		delete(sc.counters.failedCalls, signature)
 		sc.counters.mu.Unlock()
+		// The workspace checklist feed lives here, at the one point every tool call
+		// passes through, so ticking an item refreshes the panel immediately.
+		// TA01: the write that just landed also NAMES the active checklist, so a
+		// tasks.md created beside the work (games/snake/tasks.md) drives the panel
+		// instead of being written, accepted, and then never read.
+		if e.touchesChecklist(call) {
+			e.adoptChecklistPath(call)
+			e.refreshChecklist()
+		}
+		// Tally every successful mutation for the review gate and end-of-task stats.
+		e.noteChangedFiles(call)
 	}
 	return toolOutcome{Call: call, Output: output, Failed: failed, Err: dispatchErr}
 }

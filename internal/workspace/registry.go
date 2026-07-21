@@ -280,7 +280,7 @@ func (w *Workspace) execShell(ctx context.Context, raw json.RawMessage) (string,
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("exit code: %d\n%s", result.ExitCode, result.Output), nil
+	return formatShellResult(result), nil
 }
 
 func (w *Workspace) execGitStatus(ctx context.Context, _ json.RawMessage) (string, error) {
@@ -288,7 +288,7 @@ func (w *Workspace) execGitStatus(ctx context.Context, _ json.RawMessage) (strin
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("exit code: %d\n%s", result.ExitCode, result.Output), nil
+	return formatShellResult(result), nil
 }
 
 func (w *Workspace) execGitDiff(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -300,7 +300,26 @@ func (w *Workspace) execGitDiff(ctx context.Context, raw json.RawMessage) (strin
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("exit code: %d\n%s", result.ExitCode, result.Output), nil
+	return formatShellResult(result), nil
+}
+
+// formatShellResult renders a shell result for the model. A timed-out command is
+// given a recognized "tool failed:" prefix — so IsToolFailure and the loop guard
+// engage instead of the model blindly re-running a hang — and both timeout and
+// cancellation name the elapsed time and that the process tree was killed, which
+// a bare "exit code: N" hid (C-4).
+func formatShellResult(result ShellResult) string {
+	body := fmt.Sprintf("exit code: %d\n%s", result.ExitCode, result.Output)
+	switch {
+	case result.TimedOut:
+		return fmt.Sprintf("tool failed: command timed out after %s and the process tree was killed — re-run with a larger timeoutMs or narrow the command so it finishes sooner.\n%s", result.Duration.Round(time.Millisecond), body)
+	case result.Cancelled:
+		return fmt.Sprintf("[cancelled after %s — the process tree was killed]\n%s", result.Duration.Round(time.Millisecond), body)
+	case result.BackgroundLeft:
+		return fmt.Sprintf("note: the command returned but left a background process running; MuhiyaCode stopped capturing its output after %s. A server or long-lived process started here keeps running — this call will not capture its later output, so do not wait on it. To run something that must finish, run it in the foreground instead.\n%s", result.Duration.Round(time.Millisecond), body)
+	default:
+		return body
+	}
 }
 
 func decode(raw json.RawMessage, output any) error {

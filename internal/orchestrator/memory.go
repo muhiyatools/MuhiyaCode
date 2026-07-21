@@ -81,7 +81,7 @@ func (e *Engine) memoryStoreDir() string {
 // human verb in the decline message derives from it. A nil error means the
 // mutation may proceed.
 func (e *Engine) confirmMemoryMutation(ctx context.Context, tool, prompt string) error {
-	if e.settings.PermissionMode == contract.PermissionAutoAccept {
+	if e.permissionMode() == contract.PermissionAutoAccept {
 		return nil
 	}
 	if e.callbacks.Confirm == nil {

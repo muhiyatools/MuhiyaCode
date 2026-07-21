@@ -25,6 +25,10 @@ func FriendlyRequestError(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "the request timed out — the gateway or provider was slow; try again."
 	}
+	var stall *StalledError
+	if errors.As(err, &stall) {
+		return "the provider went quiet mid-response (retried automatically) — try again if it persists."
+	}
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
 		switch {
@@ -33,7 +37,11 @@ func FriendlyRequestError(err error) string {
 		case httpErr.Status == 402:
 			return "out of credits — top up your MuhiyaCode balance to continue."
 		case httpErr.Status == 429:
-			if strings.Contains(strings.ToLower(httpErr.Body), "budget limit") {
+			// insufficient_quota is the gateway's explicit "this is not
+			// throttling" signal; the budget-limit substring is the older shape,
+			// kept so an un-upgraded gateway still reads correctly.
+			body := strings.ToLower(httpErr.Body)
+			if strings.Contains(body, "insufficient_quota") || strings.Contains(body, "budget limit") || strings.Contains(body, "budget exhausted") {
 				return "your plan's budget window is used up — it resets automatically when the window rolls over; to continue sooner, raise the window budget in the gateway admin panel."
 			}
 			return "rate limited — the request was retried automatically; try again in a moment."
@@ -52,6 +60,52 @@ func FriendlyRequestError(err error) string {
 		return "can't reach the gateway — check your connection, then run `muhiyacode doctor`."
 	}
 	return err.Error()
+}
+
+// Recoverable reports whether repeating the identical request could plausibly
+// succeed. It is the gate on the harness's one-shot turn retry, so it must be
+// conservative in BOTH directions: retrying a bad API key or an exhausted
+// budget just wastes the user's time on a failure that will repeat, while
+// refusing to retry a dropped connection throws away a whole task's completed
+// work over a blip.
+//
+// Cancellation is never recoverable — the user asked to stop.
+func Recoverable(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "context canceled") {
+		return false
+	}
+	// A stall we induced (idle/first-byte timer) is worth one more try: the answer
+	// never arrived, and the request bytes are still cache-warm upstream.
+	var stall *StalledError
+	if errors.As(err, &stall) {
+		return true
+	}
+	var httpErr *HTTPError
+	if errors.As(err, &httpErr) {
+		// 5xx and 408 are transient by definition. 401/402/403/429 are states,
+		// not blips: they need a key, a top-up, or a wait, and the friendly text
+		// already tells the user which.
+		return httpErr.Status >= 500 || httpErr.Status == 408
+	}
+	// Timeouts and transport failures: the request never landed, or the answer
+	// never arrived. Both are worth exactly one more try.
+	return errors.Is(err, context.DeadlineExceeded) || looksLikeConnectionError(err) || isNetErr(err)
+}
+
+func isNetErr(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr)
+}
+
+// IsRateLimited reports a 429 from the gateway. The caller still has to work out
+// WHICH limit (throughput or budget) — the gateway uses one status and one error
+// type for both, which is why explainRateLimit has to consult /v1/usage.
+func IsRateLimited(err error) bool {
+	var httpErr *HTTPError
+	return errors.As(err, &httpErr) && httpErr.Status == 429
 }
 
 // looksLikeConnectionError catches connection failures that aren't typed as

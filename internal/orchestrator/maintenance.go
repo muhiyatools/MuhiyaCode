@@ -41,7 +41,7 @@ func describeFreed(before, after, limit int) string {
 		return "no additional context could be freed."
 	}
 	percent := float64(freed) / float64(max(1, limit)) * 100
-	return fmt.Sprintf("freed %s tokens (%.0f%% of the context window).", contract.HumanTokens(freed), percent)
+	return fmt.Sprintf("freed %s tokens (%.0f%% of the context window).", contract.FullTokens(freed), percent)
 }
 
 func (e *Engine) compact(ctx context.Context, reason string) error {
@@ -73,7 +73,7 @@ func (e *Engine) compact(ctx context.Context, reason string) error {
 	var err error
 	summaryStart := time.Now()
 	for attempt := 0; attempt < 2; attempt++ {
-		response, err = e.provider.Chat(summaryCtx, contract.ChatRequest{SessionID: e.session.ID + ":main", Messages: request, ModelID: e.settings.Provider.ActiveModelID, MaxTokens: 1600, Temperature: &temperature, Reasoning: contract.ReasoningLow})
+		response, err = e.provider.Chat(summaryCtx, contract.ChatRequest{SessionID: e.session.ID + ":main", Messages: request, ModelID: e.settings.Provider.ActiveModelID, MaxTokens: 1600, Temperature: &temperature, Reasoning: contract.ReasoningLow, PinUpstream: e.upstreamPin()})
 		if err == nil || summaryCtx.Err() != nil {
 			break
 		}
@@ -213,7 +213,8 @@ func (e *Engine) resetMaintenanceLatch() {
 	e.taskMu.Lock()
 	e.maintenancePasses = 0
 	e.maintenanceLatched = false
-	e.softNoticeShown = false // T039: allow the soft advisory to fire again next cycle
+	e.softNoticeShown = false   // T039: allow the soft advisory to fire again next cycle
+	e.routedWindowNoted = false // a compaction is exactly what resolves the routed-window risk
 	e.taskMu.Unlock()
 }
 
@@ -235,7 +236,7 @@ func (e *Engine) recordDegradedPrefixGuard(_ context.Context, reason string) {
 		// Keep this lossy, single-line, and unambiguous; it must never carry
 		// request bytes (which would mutate cached content) and is operator
 		// facing in cache logs only.
-		fmt.Fprintf(testWriterOrStdout(), "prefix-guard degraded: %s (session=%s)\n", reason, e.session.ID)
+		fmt.Fprintf(degradedGuardSink(), "prefix-guard degraded: %s (session=%s)\n", reason, e.session.ID)
 	}
 	e.taskMu.Lock()
 	e.lastShape = nil // force the next-guard loop into the relaxed branch
@@ -246,7 +247,11 @@ func (e *Engine) recordDegradedPrefixGuard(_ context.Context, reason string) {
 // on the test output rather than disappearing into process stderr.
 var degradedGuardWriter func() io.Writer
 
-func testWriterOrStdout() io.Writer {
+// degradedGuardSink is where the prefix-guard degradation marker goes: stderr in
+// production, a test writer when one is installed. (Named testWriterOrStdout
+// until v1.1.0, which was wrong twice over — it is not test-only, and it returns
+// stderr.)
+func degradedGuardSink() io.Writer {
 	if degradedGuardWriter != nil {
 		return degradedGuardWriter()
 	}

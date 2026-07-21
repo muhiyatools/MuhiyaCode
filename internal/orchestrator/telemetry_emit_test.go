@@ -25,15 +25,17 @@ func hasHarnessEvent(events []contract.HarnessEvent, class contract.HarnessEvent
 // real path. (The ui class is emitted by T052's panic-recovery, per the plan's
 // "reserved for Phase 2" note.)
 func TestHarnessEmissionsCoverClasses(t *testing.T) {
-	// recovery: a recorded pipeline degradation.
+	// recovery: the H5 distinct-failure breaker force-finalizing a task.
 	settings := engineSettings()
-	rec, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "rec", WorkspacePath: t.TempDir()}, Provider: &scriptedProvider{}, Registry: NewRegistry()})
+	rec, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "rec", WorkspacePath: t.TempDir()}, Provider: &scriptedProvider{responses: repeatedFailingCalls(20)}, Registry: NewRegistry(&failingTool{name: "write_file"})})
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = rec.RecordPipelineDegradation(context.Background(), contract.LifecycleResearch, "greenfield skip")
-	if !hasHarnessEvent(rec.HarnessEvents(), contract.HarnessRecovery, "degradation") {
-		t.Fatalf("degradation did not emit a recovery event: %+v", rec.HarnessEvents())
+	if _, _, err := rec.Run(context.Background(), "fix the bug in main.go"); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if !hasHarnessEvent(rec.HarnessEvents(), contract.HarnessRecovery, "breaker:") {
+		t.Fatalf("the H5 breaker did not emit a recovery event: %+v", rec.HarnessEvents())
 	}
 
 	// tool + gate: a failing tool called twice identically. The first call fails

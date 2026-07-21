@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	tea "charm.land/bubbletea/v2"
@@ -39,22 +40,37 @@ func TestEffortAliasMatchesCanonicalCommand(t *testing.T) {
 	}
 }
 
-// TestModeAliasMatchesCanonicalCommand pins /mode as a byte-identical alias of
-// /permissions (slash.go: `case "/permissions", "/mode":`).
-func TestModeAliasMatchesCanonicalCommand(t *testing.T) {
-	canonical := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
-	canonical = mustUpdate(t, canonical, testSize())
-	canonical.runSlash("/permissions auto-accept")
-
-	alias := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
-	alias = mustUpdate(t, alias, testSize())
-	alias.runSlash("/mode auto-accept")
-
-	if canonical.runtime.Settings.PermissionMode != contract.PermissionAutoAccept {
-		t.Fatalf("/permissions auto-accept did not apply, got %q", canonical.runtime.Settings.PermissionMode)
+// TestRemovedCommandsAreUnknown (013 FR-014/FR-018): /permissions, its /mode
+// alias, and /errors are gone. Typing one must produce the ordinary
+// unknown-command notice — not a silent no-op, and not a half-working leftover.
+func TestRemovedCommandsAreUnknown(t *testing.T) {
+	for _, command := range []string{"/permissions", "/mode auto-accept", "/errors"} {
+		m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+		m = mustUpdate(t, m, testSize())
+		before := m.runtime.Settings.PermissionMode
+		if cmd := m.runSlash(command); cmd != nil {
+			t.Fatalf("%s returned a command; it should be unknown", command)
+		}
+		if !strings.HasPrefix(m.flash.text, "Unknown command:") {
+			t.Fatalf("%s notice = %q, want the unknown-command notice", command, m.flash.text)
+		}
+		if m.runtime.Settings.PermissionMode != before {
+			t.Fatalf("%s still changed the permission mode: %q", command, m.runtime.Settings.PermissionMode)
+		}
+		if m.modal != nil {
+			t.Fatalf("%s still opened a modal", command)
+		}
 	}
-	if alias.runtime.Settings.PermissionMode != canonical.runtime.Settings.PermissionMode {
-		t.Fatalf("/mode auto-accept (%q) diverged from /permissions auto-accept (%q)", alias.runtime.Settings.PermissionMode, canonical.runtime.Settings.PermissionMode)
+}
+
+// Shift+Tab remains the one way to change the mode, so it must keep working
+// with the command gone.
+func TestShiftTabRemainsTheModeSwitch(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	m = mustUpdate(t, m, testSize())
+	m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if m.runtime.Settings.PermissionMode != contract.PermissionAutoAccept {
+		t.Fatalf("shift+tab did not cycle to auto-accept, got %q", m.runtime.Settings.PermissionMode)
 	}
 }
 

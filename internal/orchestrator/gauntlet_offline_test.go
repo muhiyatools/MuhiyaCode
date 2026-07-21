@@ -21,6 +21,12 @@ var forbiddenStrings = []string{
 	"Plan updated:",                  // old plan-vs-todo wording (Experience Overhaul A4)
 	"Plan mode on —",                 // removed /plan toggle notice (Ultimate Polish P1)
 	"Run /plan again",                // removed /plan toggle notice (P1)
+	"Proceed with Plan",              // removed plan-approval affordance (Phase 1 planning-pipeline removal)
+	"Plan mode",                      // removed plan mode entirely (Phase 1 planning-pipeline removal)
+	"agents=0",                       // removed subagent budgets (FS-1) — this exact brief starved the "Go" turn
+	"budget exhausted",               // removed subagent budgets (FS-1)
+	"run(s) remaining",               // removed subagent budgets (FS-1)
+	"no subagent budget",             // removed subagent budgets (FS-1)
 }
 
 // alwaysToolCallProvider never produces final text — every turn is another tool
@@ -46,43 +52,9 @@ func scanForbidden(t *testing.T, texts ...string) {
 // each scenario drives a full Engine.Run against a real temp workspace and
 // asserts BOTH the recovery outcome and that no forbidden string surfaced. It
 // complements the fault catalog (faultinjection_test.go), adding the overhaul's
-// new invariants (greenfield research skip, first-try plan acceptance, clean
-// provider-error surfacing) under the same forbidden-strings meta-check.
+// new invariants (clean provider-error surfacing, bounded subagent budgets,
+// memory round-trip) under the same forbidden-strings meta-check.
 func TestGauntletOffline(t *testing.T) {
-	// Scenario 1 — Greenfield pipeline: an empty workspace skips research entirely
-	// (0 agents), the plan is accepted on the FIRST exit_plan_mode, and the run
-	// halts at the approval pause (user decision).
-	t.Run("greenfield-pipeline-first-try", func(t *testing.T) {
-		var notices []string
-		agentStarts := 0
-		settings := engineSettings()
-		engine, err := NewEngine(EngineConfig{
-			Settings: &settings, Session: contract.Session{ID: "g-green", WorkspacePath: t.TempDir()},
-			Provider: &scriptedProvider{responses: []contract.ChatResponse{
-				{ToolCalls: []contract.ToolCall{contract.NewToolCall("p", "update_plan", `{"steps":[{"title":"cmd/taskflow/main.go: create the CLI entry with add/list/done — Verify: go build ./... succeeds","status":"pending"}],"note":"Verification:\n- go build ./...\nRisks:\n- none"}`)}},
-				{ToolCalls: []contract.ToolCall{contract.NewToolCall("x", "exit_plan_mode", `{"summary":"greenfield plan ready"}`)}},
-			}},
-			Registry: NewRegistry(),
-			Callbacks: contract.Callbacks{
-				Agent: func(e contract.AgentEvent) {
-					if e.Kind == "start" {
-						agentStarts++
-					}
-				},
-				Notice: func(s string) { notices = append(notices, s) },
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		answer, stats, runErr := engine.Run(context.Background(), "Build a brand-new CLI called taskflow from scratch with add, list, and done subcommands. Research first, write a detailed plan, then implement.")
-		assertRecoveryInvariant(t, engine, stats, runErr, answer, outcomeUserDecision)
-		if agentStarts != 0 {
-			t.Errorf("greenfield workspace spawned %d research agents, want 0", agentStarts)
-		}
-		scanForbidden(t, append(notices, answer)...)
-	})
-
 	// Scenario 2 — Tool failure recovers: a failing tool ends in recorded
 	// degradation, never a crash, never a forbidden string.
 	t.Run("tool-failure-recovers", func(t *testing.T) {
@@ -108,23 +80,26 @@ func TestGauntletOffline(t *testing.T) {
 		scanForbidden(t, answer)
 	})
 
-	// Scenario 3 — Subagent turn-budget: a subagent that can only loop returns a
-	// guided partial, never the forbidden turn-limit string (INV-3), end to end.
-	t.Run("subagent-turn-budget-guided-partial", func(t *testing.T) {
+	// Scenario 3 — Turn-budget liveness: a session that can only loop still ends
+	// with a usable answer and never emits a forbidden turn-limit string (INV-3).
+	// It exercised a subagent's own ladder while subagents existed; the surviving
+	// bound is the main loop's hard turn ceiling.
+	t.Run("turn-budget-guided-answer", func(t *testing.T) {
 		settings := engineSettings()
 		engine, err := NewEngine(EngineConfig{
-			Settings: &settings, Session: contract.Session{ID: "g-sub", WorkspacePath: seededWorkspace(t)},
+			Settings: &settings, Session: contract.Session{ID: "g-loop", WorkspacePath: seededWorkspace(t)},
 			Provider: alwaysToolCallProvider{}, Registry: NewRegistry(&recordingTool{name: "read_file"}),
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		spec := engine.subagentSpecs()["explore"]
-		spec.MaxTurns = 2
-		result := engine.executeSubagent(context.Background(), "g-sub", subagentInput{Agent: "explore", Title: "loop", Task: "explore forever"}, spec)
-		scanForbidden(t, result.Report)
-		if !strings.Contains(result.Report, "partial progress") {
-			t.Fatalf("expected a guided partial, got: %q", result.Report)
+		answer, stats, err := engine.Run(context.Background(), "read the seeded file over and over")
+		if err != nil {
+			t.Fatalf("a looping session must still return: %v", err)
+		}
+		scanForbidden(t, answer)
+		if stats.Turns == 0 {
+			t.Fatal("expected the loop to burn turns before the ceiling stopped it")
 		}
 	})
 

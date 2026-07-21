@@ -6,7 +6,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"github.com/muhiya/muhiyacode/internal/gateway"
 	"github.com/muhiya/muhiyacode/internal/orchestrator"
 )
 
@@ -57,7 +56,7 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	args := strings.Fields(value)
 	command := strings.ToLower(args[0])
 	if m.busy {
-		allowed := command == "/reasoning" || command == "/effort" || command == "/goal" || command == "/context" || command == "/errors"
+		allowed := command == "/reasoning" || command == "/effort" || command == "/context"
 		if !allowed {
 			m.notify(command + " is unavailable while a task is running. Press Esc to stop it, or send plain text to steer it.")
 			return nil
@@ -65,15 +64,7 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	}
 	switch command {
 	case "/context":
-		report := formatContextReport(m.runtime.Engine.ContextReport())
-		if m.runtime.Settings != nil {
-			report += "\n\n" + formatCapabilityProfile(gateway.ResolveModelProfile(m.runtime.Settings.Provider.ActiveModelID))
-		}
-		m.openInfo("Context usage", report)
-	case "/errors":
-		// HarnessEvents() is a read-only, lock-guarded ring copy — safe on the
-		// Update goroutine (see uithread_guard allowlist, T022).
-		m.openInfo("Harness events", formatHarnessEvents(m.runtime.Engine.HarnessEvents()))
+		m.openInfo("Context usage", formatContextReport(m.runtime.Engine.ContextReport(), m.sessionModelName()))
 	case "/compact":
 		if m.busy {
 			m.notify("Stop the running task before compacting.")
@@ -89,6 +80,9 @@ func (m *Model) runSlash(value string) tea.Cmd {
 		}
 		return actionCommand("rewind", func() (any, error) { return m.actions.Rewind(m.ctx) })
 	case "/reasoning", "/effort":
+		if m.runtime.Settings == nil { // H-2: guard the Effort deref below
+			return nil
+		}
 		if len(args) > 1 {
 			return m.setEffort(args[1])
 		}
@@ -96,17 +90,10 @@ func (m *Model) runSlash(value string) tea.Cmd {
 		for _, level := range []contract.EffortLevel{contract.EffortLow, contract.EffortMedium, contract.EffortHigh, contract.EffortMax} {
 			choices = append(choices, contract.QuestionChoice{Label: string(level), Description: reasoningSummary(level), Recommended: level == m.runtime.Settings.Effort})
 		}
-		m.openChoice("Reasoning effort", "How hard the model thinks. The gateway maps this to each model's thinking level (DeepSeek: low/medium→high, high/max→max).", choices, func(index int) tea.Cmd { return m.setEffort(choices[index].Label) })
-	case "/goal":
-		return m.handleGoalCommand(strings.TrimSpace(strings.TrimPrefix(value, args[0])))
-	case "/permissions", "/mode":
-		if len(args) > 1 {
-			return m.setPermission(contract.PermissionMode(args[1]))
-		}
-		choices := []contract.QuestionChoice{{Label: "normal", Description: "Confirm mutations and shell commands", Recommended: m.runtime.Settings.PermissionMode == contract.PermissionNormal}, {Label: "auto-accept", Description: "Automatically allow safe workspace actions", Recommended: m.runtime.Settings.PermissionMode == contract.PermissionAutoAccept}}
-		m.openChoice("Permission mode", "Destructive commands and credential paths remain blocked in every mode.", choices, func(index int) tea.Cmd { return m.setPermission(contract.PermissionMode(choices[index].Label)) })
-	case "/model":
-		return m.handleModelCommand(args[1:])
+		m.openChoice("Reasoning effort", "How hard the model thinks.", choices, func(index int) tea.Cmd { return m.setEffort(choices[index].Label) })
+	// /permissions and /mode are gone (013 FR-014): Shift+Tab cycles the mode and
+	// the footer names the current one with the shortcut beneath it, so a command
+	// for the same two-state toggle was pure surface area.
 	case "/login":
 		// `/login <key>` pastes a key directly; bare `/login` opens the browser
 		// sign-in (loopback + PKCE) through the Muhiya platform.
@@ -186,75 +173,47 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	return nil
 }
 
+// reasoningSummary describes each level in terms of the user's choice — how
+// hard the model thinks — with no provider-mapping trivia (013 FR-016). Which
+// internal thinking tier a given model receives is the gateway's business, and
+// naming one vendor in a multi-provider tool only invited the question of what
+// the other providers do.
 func reasoningSummary(level contract.EffortLevel) string {
 	switch level {
 	case contract.EffortLow:
-		return "Lightest thinking, fastest — the default. DeepSeek maps this to high."
+		return "Lightest thinking, fastest — the default."
 	case contract.EffortMedium:
-		return "Balanced thinking. DeepSeek maps this to high."
+		return "Balanced thinking."
 	case contract.EffortHigh:
-		return "Deep thinking for tricky work. DeepSeek maps this to max."
+		return "Deep thinking for tricky work."
 	case contract.EffortMax:
-		return "Maximum thinking for the hardest problems. DeepSeek maps this to max."
+		return "Maximum thinking for the hardest problems."
 	default:
 		return ""
 	}
 }
 
-func (m *Model) handleGoalCommand(rest string) tea.Cmd {
-	switch strings.ToLower(rest) {
-	case "", "status":
-		if goal, ok := m.runtime.Engine.GoalSnapshot(); ok {
-			m.openInfo("Active goal", fmt.Sprintf("%s\n\nStatus: %s", goal.Text, goal.Status))
-		} else if last, ok := m.runtime.Engine.LastGoalResult(); ok {
-			m.openInfo("Last goal result", fmt.Sprintf("%s\n\nStatus: %s%s", last.Text, last.Status, suffix(last.Blocked)))
-		} else {
-			m.notify("No active goal. Use /goal <objective> to set one.")
-		}
-	case "clear", "off", "stop", "none", "done":
-		engine := m.runtime.Engine
-		return engineOp(func() { engine.ClearGoal() }, "Goal cleared.")
-	default:
-		// B5/T023: busy-guard setting a goal mid-task. SetGoal flips plan mode
-		// off (G3), so allowing it while a task runs reintroduces the exact
-		// mid-turn mode change P5 guards /plan against. Status and clear stay
-		// allowed while busy (a query is read-only; clearing only removes tail
-		// content next task).
-		if m.busy {
-			m.notify("Cannot set a goal while a task is running.")
-			return nil
-		}
-		// G3 + G6: SetGoal returns a notice when it has to disable plan mode or when
-		// it replaces an active goal. Run off the UI thread (SetGoal does sidecar
-		// disk I/O); the default success notice fills in when it returns none.
-		engine, objective := m.runtime.Engine, rest
-		return func() tea.Msg {
-			notice := engine.SetGoal(objective)
-			if notice == "" {
-				notice = "Goal set — the agent will keep working toward it until it is met."
-			}
-			return engineNoticeMsg{notice: notice}
-		}
-	}
-	return nil
-}
-
-// engineOp runs a void engine mutation in a tea.Cmd goroutine (off the Update
-// loop) and surfaces a fixed notice when it completes (T021).
-func engineOp(op func(), notice string) tea.Cmd {
-	return func() tea.Msg {
-		op()
-		return engineNoticeMsg{notice: notice}
-	}
-}
-
-func suffix(value string) string {
-	value = strings.TrimSpace(value)
-	if value == "" {
+// sessionModelName resolves the display name of the session's model for the
+// context card (013 FR-023). The name comes from the configured model list; an
+// unlisted ID falls back to the ID itself so the card is never blank.
+func (m *Model) sessionModelName() string {
+	if m.runtime.Settings == nil {
 		return ""
 	}
-	return "\n\nReason: " + value
+	provider := m.runtime.Settings.Provider
+	if provider.ActiveModelID == "" {
+		return ""
+	}
+	for _, model := range provider.Models {
+		if model.ID == provider.ActiveModelID {
+			return model.Name
+		}
+	}
+	return provider.ActiveModelID
 }
+
+// engineOp and suffix went with the interactive engine mutations (/model and
+// friends) that used them; nothing drives a void engine op from the TUI now.
 
 // Ultimate Polish P1: the /plan command is removed. Planning is now an internal
 // agent flow — the classifier routes "create a plan …" into the pipeline (proposes
@@ -282,7 +241,14 @@ func (m *Model) setPermission(mode contract.PermissionMode) tea.Cmd {
 		m.notify("Permission mode must be normal or auto-accept.")
 		return nil
 	}
-	m.runtime.Settings.PermissionMode = mode
+	if m.runtime.Engine != nil {
+		// Route through the engine's synchronized setter so a mid-task change does
+		// not race the task goroutine reading permission mode (F-1). This writes
+		// the same shared settings field, under liveSettingsMu.
+		m.runtime.Engine.SetPermissionMode(mode)
+	} else if m.runtime.Settings != nil {
+		m.runtime.Settings.PermissionMode = mode
+	}
 	if m.actions.SetPermission != nil {
 		return actionCommand("permission", func() (any, error) { return mode, m.actions.SetPermission(m.ctx, mode) })
 	}
@@ -293,144 +259,14 @@ func (m *Model) setPermission(mode contract.PermissionMode) tea.Cmd {
 }
 
 func (m *Model) cyclePermission() tea.Cmd {
+	if m.runtime.Settings == nil { // H-2: no settings → nothing to toggle, never panic
+		return nil
+	}
 	mode := contract.PermissionAutoAccept
 	if m.runtime.Settings.PermissionMode == contract.PermissionAutoAccept {
 		mode = contract.PermissionNormal
 	}
 	return m.setPermission(mode)
-}
-
-func (m *Model) handleModelCommand(args []string) tea.Cmd {
-	if len(args) >= 2 {
-		role, id := strings.ToLower(args[0]), args[1]
-		return m.chooseModel(role, id)
-	}
-	if len(args) == 1 {
-		return m.chooseModel("main", args[0])
-	}
-	main, sub := m.runtime.Settings.Provider.ActiveModelID, m.runtime.Settings.Provider.SubagentModelID
-	choices := []contract.QuestionChoice{
-		{Label: "Main model · " + main, Description: "Planning, edits, and final answers"},
-		{Label: "Subagent model · " + sub, Description: "Delegated exploration and isolated work"},
-	}
-	if m.actions.DiscoverModels != nil {
-		choices = append(choices, contract.QuestionChoice{Label: "Refresh from gateway", Description: "Fetch the latest model catalog and metadata"})
-	}
-	m.openChoice("Models", "Choose which role to configure.", choices, func(index int) tea.Cmd {
-		switch index {
-		case 0:
-			m.openModelList("main")
-		case 1:
-			m.openModelList("subagent")
-		default:
-			return actionCommand("models-refresh", func() (any, error) { return m.actions.DiscoverModels(m.ctx) })
-		}
-		return nil
-	})
-	return nil
-}
-
-func (m *Model) openModelList(role string) {
-	models := m.runtime.Settings.Provider.Models
-	if len(models) == 0 {
-		m.notify("No models configured. Use `muhiyacode config set model <id>`.")
-		return
-	}
-	choices := make([]contract.QuestionChoice, len(models))
-	current := m.runtime.Settings.Provider.ActiveModelID
-	if role == "subagent" {
-		current = m.runtime.Settings.Provider.SubagentModelID
-	}
-	for i, model := range models {
-		detail := fmt.Sprintf("%s · %s context", model.ID, contract.HumanTokens(model.ContextLimit))
-		if model.MaxOutput > 0 {
-			detail += " · " + contract.HumanTokens(model.MaxOutput) + " out"
-		}
-		if model.Provider != "" {
-			detail += " · " + model.Provider
-		}
-		choices[i] = contract.QuestionChoice{Label: model.Name, Description: detail, Recommended: model.ID == current}
-	}
-	m.openChoice(contract.TitleWords(role)+" model", "Select a configured virtual model id.", choices, func(index int) tea.Cmd { return m.chooseModel(role, models[index].ID) })
-}
-
-func (m *Model) chooseModel(role, id string) tea.Cmd {
-	found := false
-	for _, model := range m.runtime.Settings.Provider.Models {
-		if model.ID == id || model.Name == id {
-			id, found = model.ID, true
-			break
-		}
-	}
-	if !found {
-		m.notify("Unknown model: " + id)
-		return nil
-	}
-	if role != "subagent" {
-		role = "main"
-	}
-	current := m.runtime.Settings.Provider.ActiveModelID
-	if role == "subagent" {
-		current = m.runtime.Settings.Provider.SubagentModelID
-	}
-	// 008 T017 trigger matrix: re-selecting the model already active for the
-	// role is a silent no-op — no warning, no dispatch, no settings write.
-	if id == current {
-		m.notify("Already using " + id + " as the " + role + " model.")
-		return nil
-	}
-	// dispatch is the single apply path (MS-5): the immediate (fresh-session)
-	// branch and the warning modal's proceed choice run this exact closure, so
-	// the warning gate adds no behavior beyond the gate itself and the existing
-	// model-switch invalidation event stays the sole record of the switch.
-	dispatch := func() tea.Cmd {
-		if m.actions.SetModel != nil {
-			return actionCommand("settings", func() (any, error) { return nil, m.actions.SetModel(m.ctx, role, id) })
-		}
-		if role == "subagent" {
-			m.runtime.Settings.Provider.SubagentModelID = id
-		} else {
-			m.runtime.Settings.Provider.ActiveModelID = id
-		}
-		if m.actions.SaveSettings == nil {
-			return nil
-		}
-		return actionCommand("settings", func() (any, error) { return nil, m.actions.SaveSettings(m.ctx, m.runtime.Settings) })
-	}
-	// MS-1: with ≥1 completed provider request in the session, warn BEFORE any
-	// dispatch. Cancel carries Recommended so openChoice preselects it (MS-3);
-	// Esc closes with zero side effects because openChoice runs no callback on
-	// Esc (MS-4). A fresh session (or a nil engine) applies immediately.
-	if m.runtime.Engine != nil && m.runtime.Engine.UsageAggregate().Requests >= 1 {
-		title, message := buildModelSwitchWarning(role, current, id)
-		choices := []contract.QuestionChoice{
-			{Label: "Switch model"},
-			{Label: "Cancel", Recommended: true},
-		}
-		m.openChoice(title, message, choices, func(index int) tea.Cmd {
-			if index == 0 {
-				return dispatch()
-			}
-			return nil
-		})
-		return nil
-	}
-	return dispatch()
-}
-
-// buildModelSwitchWarning composes the mid-session model-switch warning content
-// (MS-2): it names the role, the current → selected model IDs, the cold cache
-// restart, and that pricing may differ. The copy is static text plus the
-// interpolated role/IDs — no cost figures are fabricated (MS-7).
-func buildModelSwitchWarning(role, currentID, selectedID string) (title, message string) {
-	title = "Switch model mid-session?"
-	message = fmt.Sprintf(
-		"This switches the %s model from %s to %s.\n\n"+
-			"The provider cache restarts cold on the new model: the whole "+
-			"context is re-read at the uncached rate on the next request. "+
-			"Pricing may also differ between models.",
-		role, currentID, selectedID)
-	return title, message
 }
 
 func (m *Model) resumeCommand(id string) tea.Cmd {

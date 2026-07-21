@@ -1,7 +1,6 @@
 package command
 
 import (
-	"path/filepath"
 	"strings"
 
 	"github.com/muhiya/muhiyacode/internal/orchestrator"
@@ -9,23 +8,23 @@ import (
 	"github.com/muhiya/muhiyacode/internal/workspace"
 )
 
-// workspaceSkillListings discovers workspace-resident skills once and renders
-// them as deterministic prompt listings (003 T034/T035): workspace-relative
-// forward-slash paths, single-line descriptions truncated to 200 chars. Same
-// config + files ⇒ identical slice ⇒ byte-identical prompt section.
-func workspaceSkillListings(root string) []orchestrator.SkillListing {
-	discovered, err := workspace.DiscoverWorkspaceSkills(root, 40)
+// sessionSkillListings discovers every installed skill once at session start and
+// renders the deterministic prompt listing (013 T005, contract skills-autouse
+// §1): all roots — workspace, user-configured, and home — so a skill the user
+// installed globally can be selected automatically, not only through /skills.
+//
+// The listing carries the skill's ABSOLUTE path for the engine to load from;
+// the rendered prompt section shows only name and description, because
+// read_skill resolves by name and a path the model cannot use is prefix weight.
+// Same config + files ⇒ identical slice ⇒ byte-identical prompt section.
+func sessionSkillListings(root string) []orchestrator.SkillListing {
+	discovered, err := workspace.DiscoverSkills(root, nil, 40)
 	if err != nil {
 		return nil
 	}
 	listings := make([]orchestrator.SkillListing, 0, len(discovered))
 	for _, skill := range discovered {
-		rel := skill.Path
-		if r, relErr := filepath.Rel(root, skill.Path); relErr == nil {
-			rel = r
-		}
-		rel = filepath.ToSlash(rel)
-		listings = append(listings, orchestrator.SkillListing{Name: skill.Name, Path: rel, Description: singleLineDescription(skill.Description)})
+		listings = append(listings, orchestrator.SkillListing{Name: skill.Name, Path: skill.Path, Description: singleLineDescription(skill.Description)})
 	}
 	return listings
 }
@@ -58,8 +57,14 @@ func (a *Application) listSkills() ([]tui.Skill, error) {
 	return result, nil
 }
 
-// loadSkillBody loads one skill's instructions on demand (32 KiB cap), used at
-// submit for user-selected skills only.
+// SkillBodyLimit bounds one skill's instructions. A skill is guidance, not a
+// corpus; without the bound an oversized file could swallow the context window
+// the actual task needs. Both paths that load a body — the manual /skills flow
+// and the engine's read_skill — go through it.
+const SkillBodyLimit = 32 * 1024
+
+// loadSkillBody loads one skill's instructions on demand, used at submit for
+// user-selected skills and injected into the engine for read_skill.
 func (a *Application) loadSkillBody(path string) (string, error) {
-	return workspace.LoadSkillInstructions(workspace.Skill{Path: path}, 32*1024)
+	return workspace.LoadSkillInstructions(workspace.Skill{Path: path}, SkillBodyLimit)
 }

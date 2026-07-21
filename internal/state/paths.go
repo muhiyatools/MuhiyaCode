@@ -3,6 +3,7 @@ package state
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -82,7 +83,7 @@ func selectPaths(paths []Paths) (Paths, error) {
 	}
 	if len(paths) == 1 {
 		if paths[0].Home == "" {
-			return Paths{}, fmt.Errorf("Muhiya home is empty")
+			return Paths{}, errors.New("home path is empty")
 		}
 		return paths[0], nil
 	}

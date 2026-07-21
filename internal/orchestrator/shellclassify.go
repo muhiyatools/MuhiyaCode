@@ -1,6 +1,10 @@
 package orchestrator
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/muhiya/muhiyacode/internal/shellsafe"
+)
 
 // IsReadOnlyShell reports whether a shell command is safe for a read-only agent
 // (a research/plan/review subagent, or the main loop in manual plan mode) to run
@@ -40,28 +44,82 @@ func IsReadOnlyShell(command string) bool {
 	// main.go`, `rg kill internal/`, `git log --grep "rm -rf"` are all reads. The
 	// prior flat scan blocked them. Destructive FLAGS (--fix, -delete, …) mutate
 	// wherever they appear, so they are checked at every position.
-	for _, segment := range shellCommandSegments(trimmed) {
+	for _, segment := range shellsafe.Segments(trimmed) {
+		shellsafe.MarkThroughWrappers(segment)
 		for i, token := range segment {
-			word := token.word
+			word := token.Word
 			if shellDestructiveFlags[word] {
 				return false
 			}
 			if flag, _, cut := strings.Cut(word, "="); cut && shellDestructiveFlags[flag] {
 				return false
 			}
-			if !token.commandPos {
+			if !token.CommandPos {
 				continue
 			}
-			if shellDestructiveWords[word] {
+			// Normalize before the lookup: `\rm`, `/bin/rm`, and `RM.EXE` are all
+			// the same program, and each of them used to miss the map.
+			program := shellsafe.NormalizeCommandWord(word)
+			if shellDestructiveWords[program] {
 				return false
 			}
-			// A mutating git subcommand is destructive only in `git <sub>` position.
-			if word == "git" && i+1 < len(segment) && gitMutatingSubcommands[segment[i+1].word] {
+			// An interpreter handed inline code is an arbitrary command this
+			// classifier cannot see into — the quoted payload is one opaque token
+			// by design, so `bash -c "rm -rf /"` looked like a single harmless
+			// argument. A read-only agent never needs it: it can run the program
+			// directly.
+			if shellInterpreters[program] && hasInlineCodeFlag(segment[i+1:]) {
+				return false
+			}
+			// A mutating git subcommand is destructive only in `git <sub>`
+			// position — but global flags come first, so `git -C . commit` hid
+			// the subcommand from a check that only looked at the next token.
+			if program == "git" && gitMutatingSubcommands[gitSubcommand(segment[i+1:])] {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// hasInlineCodeFlag reports whether an interpreter's arguments carry code to
+// execute rather than a file to read.
+func hasInlineCodeFlag(rest []shellsafe.Token) bool {
+	for _, token := range rest {
+		switch token.Word {
+		case "-c", "-e", "--command", "-command", "/c", "/k", "-encodedcommand", "-enc", "-ec", "-file":
+			return true
+		}
+	}
+	return false
+}
+
+// gitSubcommand finds the real subcommand past git's global flags. `-c` and `-C`
+// take a separate argument; the tokenizer lowercases, so one skip rule covers
+// both spellings.
+func gitSubcommand(rest []shellsafe.Token) string {
+	for i := 0; i < len(rest); i++ {
+		word := rest[i].Word
+		if !strings.HasPrefix(word, "-") {
+			return word
+		}
+		if word == "-c" {
+			i++
+		}
+	}
+	return ""
+}
+
+// shellInterpreters execute code passed inline. Combined with an inline-code
+// flag they are refused for read-only scopes outright: classifying the payload
+// would mean re-implementing a shell parser, and a read-only agent can always
+// invoke the program directly instead.
+var shellInterpreters = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "ash": true, "fish": true,
+	"pwsh": true, "powershell": true, "cmd": true,
+	"node": true, "deno": true, "bun": true,
+	"python": true, "python2": true, "python3": true, "py": true,
+	"perl": true, "ruby": true, "php": true, "lua": true, "tclsh": true,
 }
 
 // shellDestructiveWords are bare command words (or PowerShell cmdlets) that write,
@@ -161,73 +219,6 @@ func harmlessRedirectTarget(rest string) bool {
 		}
 	}
 	return false
-}
-
-// shellToken is one bare word plus whether it sits at COMMAND position — the
-// first word of a pipeline/chain segment, or the first word inside a command
-// substitution ($(…) / backticks / a subshell). Only command-position words can
-// be a destructive command; the same word as an argument is data.
-type shellToken struct {
-	word       string
-	commandPos bool
-}
-
-// shellCommandSegments tokenizes a command into segments split on the unquoted
-// separators `|`, `;`, `&`, `&&`, `||`, and marks each token's command position.
-// Quoted spans are opaque data appended to the current word (so `"rm -rf"` is one
-// harmless argument token). A substitution boundary (`$`, backtick, `(`) starts a
-// fresh command position, so a destructive word hidden in `$(rm -rf x)` is still
-// caught. Redirect characters (`<`, `>`) are treated as ordinary word bytes here;
-// real file writes are rejected earlier by hasFileWriteRedirect.
-func shellCommandSegments(command string) [][]shellToken {
-	var segments [][]shellToken
-	var current []shellToken
-	var word strings.Builder
-	inDouble, inSingle := false, false
-	commandPending := true // the next word begins a command
-
-	flushWord := func() {
-		if word.Len() > 0 {
-			current = append(current, shellToken{word: strings.ToLower(word.String()), commandPos: commandPending})
-			word.Reset()
-			commandPending = false
-		}
-	}
-	flushSegment := func() {
-		flushWord()
-		if len(current) > 0 {
-			segments = append(segments, current)
-			current = nil
-		}
-		commandPending = true // first word of the next segment is a command
-	}
-
-	for i := 0; i < len(command); i++ {
-		c := command[i]
-		switch {
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-		case inDouble || inSingle:
-			word.WriteByte(c) // quoted data belongs to the current word
-		case c == '|' || c == ';' || c == '&':
-			flushSegment()
-			if i+1 < len(command) && command[i+1] == c { // consume the second char of && or ||
-				i++
-			}
-		case c == '$' || c == '`' || c == '(':
-			// substitution / subshell boundary: the next word is a nested command
-			flushWord()
-			commandPending = true
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ')' || c == '{' || c == '}':
-			flushWord()
-		default:
-			word.WriteByte(c)
-		}
-	}
-	flushSegment()
-	return segments
 }
 
 func uniqueStrings(values []string) []string {

@@ -68,7 +68,10 @@ func TestValidateCallArgs(t *testing.T) {
 	}{
 		{"valid minimal", `{"path":"x"}`, false, ""},
 		{"valid full incl numeric+string enum", `{"path":"x","level":2,"mode":"a","flag":true}`, false, ""},
-		{"unparseable json", `{"path":`, true, "cut off mid-generation"},
+		// TB04: the recovery names the output limit and (for writes) the chunked
+		// protocol. The retired text advised sending "a shorter version", which for
+		// a file write meant dropping the user's features.
+		{"unparseable json", `{"path":`, true, "cut off at the output limit"},
 		{"missing required", `{"mode":"a"}`, true, "missing required field"},
 		{"wrong primitive type", `{"path":123}`, true, "must be a string"},
 		{"numeric enum violation", `{"path":"x","level":9}`, true, "must be one of"},
@@ -130,9 +133,12 @@ func TestPlainFollowUpTailStaysWithinBudget(t *testing.T) {
 
 // TestToolsArrayStableAcrossModeToggles (T014 / contracts/request-assembly.md §1, FR-015)
 // asserts the prime invariant: the tools array is byte-identical across a whole
-// multi-task session even as plan mode and goal mode are toggled between tasks.
-// Mode restrictions are enforced at dispatch time, never by changing the schema
-// the model sees — so a toggle never busts the cached prefix.
+// multi-task session even as the session's mode is toggled between tasks. Mode
+// restrictions are enforced at dispatch time and carried in the per-turn task
+// brief, never by changing the schema the model sees — so a toggle never busts
+// the cached prefix. Effort is the surviving between-task mode toggle: it moves
+// the budget, the reasoning level and the brief, and must still leave the wire
+// tools array untouched.
 func TestToolsArrayStableAcrossModeToggles(t *testing.T) {
 	responses := make([]contract.ChatResponse, 8)
 	for i := range responses {
@@ -147,15 +153,15 @@ func TestToolsArrayStableAcrossModeToggles(t *testing.T) {
 	if _, _, err := engine.Run(context.Background(), "first task"); err != nil {
 		t.Fatal(err)
 	}
-	engine.SetLifecycleState(contract.LifecyclePlanning)
-	if _, _, err := engine.Run(context.Background(), "second task in plan mode"); err != nil {
+	engine.SetEffort(contract.EffortMax)
+	if _, _, err := engine.Run(context.Background(), "second task at max effort"); err != nil {
 		t.Fatal(err)
 	}
-	engine.SetGoal("achieve the objective") // G3: also clears plan mode
-	if _, _, err := engine.Run(context.Background(), "third task under a goal"); err != nil {
+	engine.SetEffort(contract.EffortLow)
+	if _, _, err := engine.Run(context.Background(), "third task at low effort"); err != nil {
 		t.Fatal(err)
 	}
-	engine.ClearGoal()
+	engine.SetEffort(contract.EffortMedium)
 	if _, _, err := engine.Run(context.Background(), "fourth task"); err != nil {
 		t.Fatal(err)
 	}
@@ -163,10 +169,22 @@ func TestToolsArrayStableAcrossModeToggles(t *testing.T) {
 		t.Fatalf("expected at least 4 requests, got %d", len(provider.requests))
 	}
 	first, _ := json.Marshal(provider.requests[0].Tools)
+	firstChoice := provider.requests[0].ToolChoice
 	for i, req := range provider.requests {
 		cur, _ := json.Marshal(req.Tools)
 		if string(cur) != string(first) {
 			t.Fatalf("request %d tools array changed under mode toggles (cache bust):\nfirst=%s\ncur=%s", i+1, first, cur)
+		}
+		if req.ToolChoice != firstChoice {
+			t.Fatalf("request %d changed tool_choice under mode toggles (cache bust): %q -> %q", i+1, firstChoice, req.ToolChoice)
+		}
+	}
+	// The cached prefix (system prompt) must be identical too — mode lives in the
+	// per-turn tail, never in the prefix.
+	firstSystem := provider.requests[0].Messages[0]
+	for i, req := range provider.requests {
+		if req.Messages[0].Role != firstSystem.Role || req.Messages[0].Content != firstSystem.Content {
+			t.Fatalf("request %d rewrote the system prefix under a mode toggle (cache bust)", i+1)
 		}
 	}
 }

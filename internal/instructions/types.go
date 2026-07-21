@@ -1,8 +1,8 @@
 // Package instructions is the single, audited home for every model-facing
 // text in MuhiyaCode: system-prompt sections, tool + property descriptions,
-// subagent system/handoff/capability texts, phase preludes, mode blocks, gate
-// and denial and loop-guard texts, model-facing tool errors, and the gateway
-// per-family prompt addenda (feature 010 US3, contracts/instruction-system.md).
+// mode blocks, gate and denial and loop-guard texts, model-facing tool errors,
+// and the gateway per-family prompt addenda (feature 010 US3,
+// contracts/instruction-system.md).
 //
 // It is a foundation-layer package: it imports only internal/contract, so
 // orchestrator, workspace, and gateway can each depend on it without creating
@@ -24,21 +24,21 @@ import (
 	"sync"
 )
 
-// Audience is who reads a Text: the main-loop model reading the session-
-// stable prompt, the main-loop model reading per-turn dynamic tail content,
-// a delegated subagent, or a gate/denial surfaced as a tool result.
+// Audience is who reads a Text: the session model reading the session-stable
+// prompt, the same model reading per-turn dynamic tail content, or a
+// gate/denial surfaced to it as a tool result.
+//
+// A fourth audience, Subagent, retired with the subagent system — there is one
+// session and one reader now, so every text is composed for the same model.
 type Audience string
 
 const (
-	// MainStatic is main-loop content that is byte-identical every turn
-	// (system-prompt sections, tool + property descriptions).
+	// MainStatic is content that is byte-identical every turn (system-prompt
+	// sections, tool + property descriptions).
 	MainStatic Audience = "main-static"
-	// MainDynamic is main-loop content that varies per turn (task-brief
-	// markers, the plan block, the goal block, pipeline phase preludes).
+	// MainDynamic is content that varies per turn (task-brief markers, the
+	// plan block).
 	MainDynamic Audience = "main-dynamic"
-	// Subagent is content composed into a delegated subagent's own system
-	// message or handoff contract for one run.
-	Subagent Audience = "subagent"
 	// Gate is a denial/block/loop-guard text returned as a tool result.
 	Gate Audience = "gate"
 )
@@ -55,9 +55,8 @@ const (
 	// Tail is the per-turn dynamic region riding on the user message (the
 	// task brief, plan block, goal block, pipeline phase preludes).
 	Tail Cache = "tail"
-	// Sidecar is per-call or per-run dynamic content that is neither the
-	// stable prefix nor the turn tail: subagent system/handoff text (fresh
-	// per subagent run) and gate/denial tool-result text (appended per call).
+	// Sidecar is per-call dynamic content that is neither the stable prefix nor
+	// the turn tail: gate/denial tool-result text, appended per call.
 	Sidecar Cache = "sidecar"
 )
 
@@ -93,8 +92,8 @@ type Text struct {
 	// (IS-6, the capability-reference check).
 	MentionsTools []string
 	// AllowlistCtx is the key into the real-allowlist map this text's reader
-	// operates under (e.g. "subagent.general", "subagent.explore",
-	// "main-loop"). Empty when MentionsTools is empty.
+	// operates under ("main-loop", or "plan-mode" for the reduced set). Empty
+	// when MentionsTools is empty.
 	AllowlistCtx string
 }
 

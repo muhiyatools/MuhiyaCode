@@ -1,8 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
-
 	tea "charm.land/bubbletea/v2"
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
@@ -33,8 +31,15 @@ func transcriptEventToItem(e contract.TranscriptEvent) (item, bool) {
 	return item{}, false
 }
 
-// pageItems converts a page's entries to render items (dropping non-transcript rows).
-func pageItems(page contract.TranscriptPage) []item {
+// pageItems converts a page's entries to render items.
+//
+// LEGACY: sessions created before the unified-session change still hold
+// role="agent" rows (run_start / run_summary) in their transcript. They simply
+// do not convert — transcriptEventToItem has no "agent" case — so they are
+// skipped silently. That is the intended behavior: the runs they described were
+// real, but there is no agent card left to render them into, and an old session
+// must still reopen without error.
+func (m *Model) pageItems(page contract.TranscriptPage) []item {
 	items := make([]item, 0, len(page.Entries))
 	for _, e := range page.Entries {
 		if it, ok := transcriptEventToItem(e); ok {
@@ -109,7 +114,7 @@ func (m *Model) applyInitialPage(page contract.TranscriptPage) {
 	if m.busy || len(m.items) > len(page.Entries) {
 		return // a turn already advanced the window; keep it, just record the cursor
 	}
-	if items := pageItems(page); len(items) > 0 {
+	if items := m.pageItems(page); len(items) > 0 {
 		m.items = items
 		m.refreshViewport(true)
 	}
@@ -120,7 +125,7 @@ func (m *Model) applyInitialPage(page contract.TranscriptPage) {
 func (m *Model) applyOlderPage(page contract.TranscriptPage) {
 	m.loadingOlder = false
 	m.hasOlderEvents = page.HasOlder
-	older := pageItems(page)
+	older := m.pageItems(page)
 	if len(older) == 0 {
 		return
 	}
@@ -185,14 +190,6 @@ func (m *Model) trimTranscript() {
 	marker := item{kind: "system", content: "⋯ earlier messages trimmed to keep the interface responsive — the full transcript is saved in this session's log ⋯"}
 	trimmed := make([]item, 0, len(m.items)-drop+1)
 	trimmed = append(trimmed, marker)
-	// U3: never evict a subagent chip — it is ~0 bytes and bounded by the session's
-	// agent count, and dropping it removes the only click affordance for that agent
-	// (Tab/Alt+N still reach it via m.agents, but the transcript chip would vanish).
-	for i := 0; i < drop; i++ {
-		if m.items[i].kind == "agent" {
-			trimmed = append(trimmed, m.items[i])
-		}
-	}
 	trimmed = append(trimmed, m.items[drop:]...)
 	m.items = trimmed
 	// US4 T058: front-eviction shifts content rows, so any selection is now stale.
@@ -200,8 +197,13 @@ func (m *Model) trimTranscript() {
 }
 
 func (m *Model) loadEvents(events []contract.Event) {
-	// Only user, assistant, tool, and finished-subagent turns belong in the
-	// transcript. Other system/setup events surface through the transient notice line.
+	// Only user, assistant, and tool turns belong in the transcript. Other
+	// system/setup events surface through the transient notice line.
+	//
+	// LEGACY: an old session's events include role="agent" rows from the removed
+	// subagent system. The switch has no case for them and no default, so they
+	// are skipped silently — an old transcript reopens cleanly, just without the
+	// agent cards there is no longer any machinery to render.
 	for _, event := range events {
 		switch event.Role {
 		case "user":
@@ -210,47 +212,10 @@ func (m *Model) loadEvents(events []contract.Event) {
 			m.items = append(m.items, item{kind: "assistant", content: event.Content})
 		case "tool":
 			m.items = append(m.items, item{kind: "tool", tool: &toolView{name: event.Type, target: event.Target, state: map[bool]string{true: "fail", false: "ok"}[isFailure(event.Content)], output: event.Content, summary: summarizeTool(event.Content), started: event.CreatedAt}})
-		case "agent":
-			// U2: rebuild a finished subagent's chip + view from its persisted
-			// run_summary so Tab / Alt+N / clicking it work after a resume.
-			if event.Type == "run_summary" {
-				m.rehydrateAgent(event.Content)
-			}
 		}
 	}
 }
 
-// rehydrateAgent rebuilds a finished subagent's chip and view from the persisted
-// run_summary payload on resume (Ultimate Polish U2, fixing the gap where finished
-// subagents vanished after a restart). The full tool-by-tool log is not persisted —
-// the view shows the agent's report — which the "report" item title states honestly.
-func (m *Model) rehydrateAgent(payload string) {
-	var s struct {
-		RunID  string         `json:"runId"`
-		Agent  string         `json:"agent"`
-		Phase  string         `json:"phase"`
-		Role   string         `json:"role"`
-		Model  string         `json:"model"`
-		Title  string         `json:"title"`
-		Status string         `json:"status"`
-		Task   string         `json:"task"`
-		Report string         `json:"report"`
-		Usage  contract.Usage `json:"usage"`
-	}
-	if err := json.Unmarshal([]byte(payload), &s); err != nil || s.RunID == "" {
-		return
-	}
-	if _, exists := m.agentByID[s.RunID]; exists {
-		return // a live run this session already registered it
-	}
-	if s.Status == "" {
-		s.Status = "done"
-	}
-	view := &agentView{id: s.RunID, agent: s.Agent, phase: s.Phase, role: s.Role, title: s.Title, task: s.Task, model: s.Model, status: s.Status, usage: s.Usage, index: len(m.agents) + 1}
-	if s.Report != "" {
-		view.items = append(view.items, item{kind: "assistant", content: s.Report, title: "report"})
-	}
-	m.agents = append(m.agents, view)
-	m.agentByID[s.RunID] = view
-	m.items = append(m.items, item{kind: "agent", agentID: s.RunID})
-}
+// ensureAgentView and rehydrateAgent rebuilt a finished subagent's card from its
+// persisted run_start / run_summary events on resume. Both are gone with the
+// cards they built; the events they read are now skipped (see loadEvents).

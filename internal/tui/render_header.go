@@ -7,7 +7,7 @@ import (
 
 	"charm.land/lipgloss/v2"
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"github.com/muhiya/muhiyacode/internal/orchestrator"
+	"github.com/muhiya/muhiyacode/internal/updatecheck"
 )
 
 func (m *Model) renderHeader() string {
@@ -16,54 +16,43 @@ func (m *Model) renderHeader() string {
 	if hasLimit {
 		contextLabel = fmt.Sprintf("context %.1f%%", m.context.Percent)
 	}
-	main := modelDisplay(m.runtime.Settings, m.runtime.Settings.Provider.ActiveModelID)
-	sub := modelDisplay(m.runtime.Settings, m.runtime.Settings.Provider.SubagentModelID)
 	dot := m.palette.border.Render(m.glyphs.bullet)
-	// Header segments as a slice so a narrow width can drop the subagent segment
-	// (visual-system.md §4) before the path is truncated. The reasoning level moved
-	// to the mode-line effort chip (Experience Overhaul A1) and is no longer here.
-	seg := []string{
-		" " + m.palette.brand.Render(m.glyphs.brand+" MuhiyaCode") + " " + m.palette.faint.Render("v"+m.version),
-		dot + " " + m.palette.faint.Render("model") + " " + m.palette.text.Render(main),
+	// Line 1 carries identity, location, and pressure: brand+version, the
+	// workspace path, an update notice when there is one, and the context meter.
+	// Model names are deliberately absent — models are chosen for the session,
+	// not managed by the user, so naming them here would be noise (/context
+	// discloses them).
+	brand := " " + m.palette.brand.Render("MuhiyaCode") + " " + m.palette.faint.Render("v"+m.version)
+	update := ""
+	if updatecheck.Newer(m.latestVersion, m.version) {
+		update = dot + " " + m.palette.brandSoft.Render("Update available "+m.latestVersion) + " " + m.palette.faint.Render("(you have "+m.version+")")
 	}
-	subSeg := m.palette.faint.Render("sub") + " " + m.palette.muted.Render(sub)
-	if m.width >= m.theme.WideWidth {
-		seg = append(seg, subSeg)
-	}
-	seg = append(seg, dot+" "+contextMeterStyle(m.palette, m.context.Percent, hasLimit).Render(contextLabel))
-	line1 := strings.Join(seg, "  ")
-	// Full workspace path, left-truncated (leading ellipsis) only when it cannot
-	// fit — the rightmost, most-specific segments stay visible (FR-021).
+	meter := dot + " " + contextMeterStyle(m.palette, m.context.Percent, hasLimit).Render(contextLabel)
+	// The path is the FLEXIBLE segment: the fixed segments are measured first and
+	// the path takes whatever is left, left-truncated (leading ellipsis) so the
+	// most-specific directories survive (FR-021). The context meter is never
+	// pushed off by a long path.
 	workspace := m.runtime.Session.WorkspacePath
 	if workspace == "" {
 		workspace = "."
 	}
-	workspace = truncateLeft(workspace, max(10, m.width-2), m.glyphs.ellipsis)
-	parts := []string{m.palette.muted.Render(workspace)}
-	if m.viewAgent != "" {
-		if agent := m.agentByID[m.viewAgent]; agent != nil {
-			parts = append(parts, m.palette.faint.Render("· view"), m.palette.brandSoft.Render(fmt.Sprintf("%s [%d]", agent.agent, agent.index)), m.palette.muted.Render(agent.title), m.palette.faint.Render(agent.status))
-			if agent.usage.TotalTokens > 0 {
-				parts = append(parts, m.palette.faint.Render(contract.HumanTokens(agent.usage.TotalTokens)+" tokens"))
-			}
-		}
-	} else {
-		running := 0
-		for _, agent := range m.agents {
-			if agent.status == "running" {
-				running++
-			}
-		}
-		if running > 0 {
-			parts = append(parts, m.palette.brandSoft.Render(fmt.Sprintf("· %d agent(s) running", running)))
-		}
+	fixed := lipgloss.Width(brand) + lipgloss.Width(meter) + lipgloss.Width(update) + 8 // separators
+	workspace = truncateLeft(workspace, max(12, m.width-fixed), m.glyphs.ellipsis)
+	seg := []string{brand, dot + " " + m.palette.muted.Render(workspace)}
+	if update != "" {
+		seg = append(seg, update)
 	}
-	line2 := " " + strings.Join(parts, "  ")
+	seg = append(seg, meter)
+	line1 := strings.Join(seg, "  ")
 	rule := m.palette.border.Render(strings.Repeat(m.glyphs.ruleH, max(0, m.width)))
 	// One blank spacer row above the brand line keeps the top bar off the
 	// terminal's upper edge. layout() counts rendered lines, so the spacer is
 	// automatically part of the height budget.
-	return "\n" + fitLine(line1, m.width) + "\n" + fitLine(line2, m.width) + "\n" + rule
+	//
+	// The header is now a fixed three rows. The running-agent count and the
+	// focused-agent line it could expand into are gone with the subagents they
+	// described: one session has one identity row.
+	return strings.Join([]string{"", fitLine(line1, m.width), rule}, "\n")
 }
 
 // contentWidth (T3) is the single shared width formula for thinking, input,
@@ -107,12 +96,15 @@ func (m *Model) renderActivity() string {
 	if !m.started.IsZero() {
 		segs = append(segs, m.palette.faint.Render(formatDuration(time.Since(m.started))))
 	}
-	if m.usage.TotalTokens > 0 {
+	// B-4: also render when only cache fields are reported (TotalTokens derived to
+	// 0 but the provider still told us about cache), so the token+cache segment
+	// does not vanish for a cache-only payload.
+	if m.usage.TotalTokens > 0 || m.usage.CacheReadTokens != nil {
 		// 008 T019 (UD-1..3): the live headline shows the honest per-task figure
 		// (miss+completion when cache metrics exist, TotalTokens otherwise) and a
 		// percentage-only cache tag — the read/new split lives in /context (UD-2).
 		tokens, tag := headlineTokens(m.usage)
-		segs = append(segs, m.palette.faint.Render(contract.HumanTokens(tokens)+" tokens"))
+		segs = append(segs, m.palette.faint.Render(contract.FullTokens(tokens)+" tokens"))
 		segs = append(segs, m.palette.brandSoft.Render(tag))
 	}
 	lines := []string{fitLine(" "+mark+" "+strings.Join(segs, sep), m.width)}
@@ -146,38 +138,34 @@ func (m *Model) renderInput() string {
 	return style.Render(input)
 }
 
+// permissionCycleHint is the literal hint rendered beneath the permission chip
+// (013 FR-015). With /permissions removed, this line is the ONLY thing telling a
+// user the mode can be changed at all, so it renders in every mode.
+const permissionCycleHint = "Shift + Tab to cycle"
+
 // renderModeLine sits directly below the input box: contextual key hints on the
-// left, and a state cluster (plan / goal / queued skills / permission) plus the
+// left, and a state cluster (queued skills / permission mode) plus the
 // always-present reasoning-effort chip flush against the right edge (Experience
-// Overhaul A1). The default "normal" permission mode shows no badge, so the footer
-// stays quiet until something is actually active. The right cluster has layout
-// priority: when the line is narrow, left hints drop first.
+// Overhaul A1). The right cluster has layout priority: when the line is narrow,
+// left hints drop first.
+//
+// 013 changed two things here. The permission chip now renders in EVERY mode,
+// not just auto-accept — it is the anchor for the cycle hint below, and a mode
+// you cannot see is a mode you cannot reason about. And the hints name only
+// bindings that exist: the arrow-key agent switcher went with the subagents,
+// and the to-do panel has no toggle to advertise.
 func (m *Model) renderModeLine() string {
 	hints := []string{
 		m.palette.faint.Render("Esc stop"),
-		m.palette.faint.Render("Tab agents"),
-		m.palette.faint.Render("Ctrl+T to-dos"),
 		m.palette.faint.Render("/ commands"),
 	}
 	// Right cluster, least-specific first; the effort chip is appended last so it
 	// sits at the far right ("top-right beneath the input").
 	var right []string
-	if m.runtime.Engine != nil && m.runtime.Engine.PlanMode() {
-		// P1: plan mode is now only the pipeline's read-only planning phase (there is
-		// no /plan toggle), so the badge reads "planning".
-		right = append(right, m.palette.warning.Render("planning"))
-	}
-	if m.runtime.Engine != nil {
-		if goal, ok := m.runtime.Engine.GoalSnapshot(); ok && goal.Status == orchestrator.GoalActive {
-			right = append(right, m.palette.brandSoft.Render("goal"))
-		}
-	}
 	if n := len(m.selectedSkills); n > 0 {
 		right = append(right, m.palette.brandSoft.Render(fmt.Sprintf("%d skills", n)))
 	}
-	if m.runtime.Settings != nil && m.runtime.Settings.PermissionMode == contract.PermissionAutoAccept {
-		right = append(right, m.palette.warning.Render("auto-accept"))
-	}
+	right = append(right, m.permissionChip())
 	effort := contract.EffortLow
 	if m.runtime.Settings != nil {
 		effort = m.runtime.Settings.Effort
@@ -189,7 +177,45 @@ func (m *Model) renderModeLine() string {
 	// split fills m.width-3 columns, so with the leading space the effort chip ends
 	// at column W-2 — aligned with the composer's content right edge (the input box
 	// is border+pad+content over columns 1..W), not jammed against the terminal edge.
-	return " " + splitLineParts(hints, strings.Join(right, clusterSep), hintSep, max(1, m.width-3))
+	line := " " + splitLineParts(hints, strings.Join(right, clusterSep), hintSep, max(1, m.width-3))
+	if hint := m.renderCycleHint(); hint != "" {
+		line += "\n" + hint
+	}
+	return line
+}
+
+// permissionChip names the current mode: muted for the default, warning-colored
+// for auto-accept so the looser mode stays visually distinct at a glance.
+func (m *Model) permissionChip() string {
+	mode := contract.PermissionNormal
+	if m.runtime.Settings != nil {
+		mode = m.runtime.Settings.PermissionMode
+	}
+	if mode == contract.PermissionAutoAccept {
+		return m.palette.warning.Render(string(contract.PermissionAutoAccept))
+	}
+	return m.palette.muted.Render(string(contract.PermissionNormal))
+}
+
+// renderCycleHint puts the shortcut directly beneath the permission chip,
+// right-aligned to the same edge. It is the first thing to go on a narrow
+// terminal: losing a hint is survivable, losing the mode itself is not.
+func (m *Model) renderCycleHint() string {
+	hint := m.palette.faint.Render(permissionCycleHint)
+	// Right-align the hint under the PERMISSION chip, not the effort chip (FR-015 /
+	// H-4): the effort chip and its separator sit to the permission chip's right, so
+	// subtract their width from the full right edge.
+	effort := contract.EffortLow
+	if m.runtime.Settings != nil {
+		effort = m.runtime.Settings.Effort
+	}
+	effortWidth := lipgloss.Width(effortStyle(m.palette, effort).Render(effortLabel(effort)))
+	clusterSepWidth := lipgloss.Width(" " + m.palette.border.Render(m.glyphs.bullet) + " ")
+	width := max(1, m.width-3-effortWidth-clusterSepWidth)
+	if lipgloss.Width(hint) > width {
+		return ""
+	}
+	return " " + splitLineParts(nil, hint, "", width)
 }
 
 // renderNotice shows the transient system message (settings saved, MCP status,

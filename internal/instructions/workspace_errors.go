@@ -19,11 +19,11 @@ const (
 )
 
 var (
-	workspaceEditIdenticalText      = Register(Text{ID: "workspace.edit.identical", Audience: Gate, Cache: Sidecar, Body: WorkspaceEditIdenticalBody, MentionsTools: []string{"edit_file", "multi_edit"}, AllowlistCtx: "main-loop"})
-	workspaceEditAlreadyPresentText = Register(Text{ID: "workspace.edit.already-present", Audience: Gate, Cache: Sidecar, Body: WorkspaceEditAlreadyPresentBody, MentionsTools: []string{"edit_file", "multi_edit"}, AllowlistCtx: "main-loop"})
-	workspaceEditNotFoundText       = Register(Text{ID: "workspace.edit.not-found", Audience: Gate, Cache: Sidecar, Body: WorkspaceEditNotFoundPrefix, MentionsTools: []string{"edit_file", "multi_edit"}, AllowlistCtx: "main-loop"})
-	workspaceEditAmbiguousText      = Register(Text{ID: "workspace.edit.ambiguous", Audience: Gate, Cache: Sidecar, Body: WorkspaceEditAmbiguousTmpl, MentionsTools: []string{"edit_file", "multi_edit"}, AllowlistCtx: "main-loop"})
-	workspaceEditEmptyOldStringText = Register(Text{ID: "workspace.edit.empty-old-string", Audience: Gate, Cache: Sidecar, Body: WorkspaceEditEmptyOldStringTmpl, MentionsTools: []string{"multi_edit"}, AllowlistCtx: "main-loop"})
+	_ = Register(Text{ID: "workspace.edit.identical", Audience: Gate, Cache: Sidecar, Body: WorkspaceEditIdenticalBody, MentionsTools: []string{"edit_file", "multi_edit"}, AllowlistCtx: "main-loop"})
+	_ = Register(Text{ID: "workspace.edit.already-present", Audience: Gate, Cache: Sidecar, Body: WorkspaceEditAlreadyPresentBody, MentionsTools: []string{"edit_file", "multi_edit"}, AllowlistCtx: "main-loop"})
+	_ = Register(Text{ID: "workspace.edit.not-found", Audience: Gate, Cache: Sidecar, Body: WorkspaceEditNotFoundPrefix, MentionsTools: []string{"edit_file", "multi_edit"}, AllowlistCtx: "main-loop"})
+	_ = Register(Text{ID: "workspace.edit.ambiguous", Audience: Gate, Cache: Sidecar, Body: WorkspaceEditAmbiguousTmpl, MentionsTools: []string{"edit_file", "multi_edit"}, AllowlistCtx: "main-loop"})
+	_ = Register(Text{ID: "workspace.edit.empty-old-string", Audience: Gate, Cache: Sidecar, Body: WorkspaceEditEmptyOldStringTmpl, MentionsTools: []string{"multi_edit"}, AllowlistCtx: "main-loop"})
 )
 
 // WorkspaceUnreadOverwriteBody is ErrUnreadOverwrite's message (write_file,
@@ -32,7 +32,7 @@ var (
 // the moment of violation, so the two are deliberately worded to agree.
 const WorkspaceUnreadOverwriteBody = "workspace: refusing to overwrite an unread file"
 
-var workspaceUnreadOverwriteText = Register(Text{
+var _ = Register(Text{
 	ID: "workspace.unread-overwrite", Audience: Gate, Cache: Sidecar, Body: WorkspaceUnreadOverwriteBody,
 	EnforcesRule: RuleWriteFilePermission, MentionsTools: []string{"write_file", "edit_file", "multi_edit", "apply_patch"}, AllowlistCtx: "main-loop",
 })
@@ -41,7 +41,7 @@ var workspaceUnreadOverwriteText = Register(Text{
 // literal emoji in a character class is a live recurring model mistake.
 const WorkspaceGrepInvalidPatternTmpl = "invalid search pattern: %w — patterns use Go RE2 syntax; for unicode ranges write \\x{1F600}-style escapes (e.g. [\\x{1F300}-\\x{1FAFF}]) — literal emoji range endpoints are invalid; or set literal=true to match exact text"
 
-var workspaceGrepInvalidPatternText = Register(Text{ID: "workspace.grep.invalid-pattern", Audience: Gate, Cache: Sidecar, Body: WorkspaceGrepInvalidPatternTmpl, MentionsTools: []string{"grep"}, AllowlistCtx: "main-loop"})
+var _ = Register(Text{ID: "workspace.grep.invalid-pattern", Audience: Gate, Cache: Sidecar, Body: WorkspaceGrepInvalidPatternTmpl, MentionsTools: []string{"grep"}, AllowlistCtx: "main-loop"})
 
 const (
 	WorkspaceFileExceedsLimitTmpl  = "file exceeds %d-byte limit"
@@ -50,7 +50,7 @@ const (
 )
 
 var (
-	workspaceFileExceedsLimitText  = Register(Text{ID: "workspace.read.file-exceeds-limit", Audience: Gate, Cache: Sidecar, Body: WorkspaceFileExceedsLimitTmpl, MentionsTools: []string{"read_file"}, AllowlistCtx: "main-loop"})
-	workspaceBinaryUnsupportedText = Register(Text{ID: "workspace.read.binary-unsupported", Audience: Gate, Cache: Sidecar, Body: WorkspaceBinaryUnsupportedBody, MentionsTools: []string{"read_file"}, AllowlistCtx: "main-loop"})
-	workspaceListNotDirectoryText  = Register(Text{ID: "workspace.list.not-directory", Audience: Gate, Cache: Sidecar, Body: WorkspaceListNotDirectoryTmpl, MentionsTools: []string{"list_files"}, AllowlistCtx: "main-loop"})
+	_ = Register(Text{ID: "workspace.read.file-exceeds-limit", Audience: Gate, Cache: Sidecar, Body: WorkspaceFileExceedsLimitTmpl, MentionsTools: []string{"read_file"}, AllowlistCtx: "main-loop"})
+	_ = Register(Text{ID: "workspace.read.binary-unsupported", Audience: Gate, Cache: Sidecar, Body: WorkspaceBinaryUnsupportedBody, MentionsTools: []string{"read_file"}, AllowlistCtx: "main-loop"})
+	_ = Register(Text{ID: "workspace.list.not-directory", Audience: Gate, Cache: Sidecar, Body: WorkspaceListNotDirectoryTmpl, MentionsTools: []string{"list_files"}, AllowlistCtx: "main-loop"})
 )

@@ -107,18 +107,25 @@ func openApplicationCore(options ApplicationOptions) (*Application, error) {
 	app.provider = gateway.NewOpenAICompatible(gateway.Config{Settings: settings, APIKey: secrets.ProviderAPIKey, RawUsageObserver: options.RawUsageObserver})
 	if secrets.ProviderAPIKey != "" {
 		active, ok := state.ActiveModel(settings)
-		if !ok || active.ContextLimit <= 0 {
+		// Discover when there is nothing usable yet, OR when the catalog has gone
+		// stale. The staleness path matters now that the interactive refresh is
+		// gone: without it the catalog would freeze at its first-run snapshot and
+		// a model added to the gateway later would never be selectable.
+		if !ok || active.ContextLimit <= 0 || catalogStale(settings.Provider.ModelsRefreshedAt) {
 			discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			models, discoveryErr := app.provider.ListModels(discoveryCtx)
 			cancel()
 			if discoveryErr == nil && len(models) > 0 {
 				addDiscoveredModels(app.settings, models)
+				app.settings.Provider.ModelsRefreshedAt = time.Now().UTC().Format(time.RFC3339)
 				if saveErr := state.SaveSettings(*app.settings, paths); saveErr != nil {
 					_ = db.Close()
 					return nil, saveErr
 				}
 				app.provider.UpdateConfig(*app.settings, secrets.ProviderAPIKey)
 			}
+			// A failed refresh is silent: a stale catalog still works, and an
+			// offline start must never block the session.
 		}
 	}
 
@@ -226,38 +233,10 @@ func (a *Application) currentSessionID() string {
 	return a.runtime.Session.ID
 }
 
-func (a *Application) setModel(ctx context.Context, role, id string) error {
-	var selected contract.Model
-	found := false
-	for _, model := range a.settings.Provider.Models {
-		if model.ID == id {
-			selected, found = model, true
-			break
-		}
-	}
-	if !found {
-		return fmt.Errorf("unknown model %q", id)
-	}
-	a.mu.Lock()
-	engine := a.runtime.Engine
-	a.mu.Unlock()
-	if engine == nil {
-		return errors.New("runtime engine is unavailable")
-	}
-	addendum := ""
-	if role != "subagent" {
-		role = "main"
-		addendum = gateway.ResolveModelProfile(selected.ID + " " + selected.Name).PromptAddendum
-	}
-	if err := engine.SwitchModel(ctx, role, selected.ID, selected.Name, addendum); err != nil {
-		return err
-	}
-	if err := state.SaveSettings(*a.settings, a.paths); err != nil {
-		return err
-	}
-	a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
-	return nil
-}
+// The interactive model switcher lived here until v1.1.0 removed /model: users
+// no longer manage models mid-session, and freezing the pairing for the whole
+// session is what keeps both prefix caches warm. Engine.SwitchModel remains the
+// entry point for the CLI config path and the session advisor.
 
 func (a *Application) switchSession(ctx context.Context, session contract.Session) (tui.Runtime, []contract.Event, error) {
 	bundle, err := a.buildRuntime(ctx, session)
@@ -370,6 +349,11 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		}
 		return a.callbacks.Confirm(ctx, approvalMessage(request))
 	})
+	// engineRef is bound after NewEngine below; the shell-output closure captures
+	// it (a var, so the later assignment is visible) to route run_shell streaming
+	// through the engine's scope — a subagent's shell to its own card, the main
+	// loop's to the transcript (D2).
+	var engineRef *orchestrator.Engine
 	service, err := workspace.New(session.WorkspacePath, workspace.Options{
 		PermissionMode: a.settings.PermissionMode,
 		Trust:          a.db,
@@ -381,6 +365,10 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		Checkpoints:    checkpoint,
 		Status:         a.callbacks.Status,
 		ShellOutput: func(chunk string) {
+			if engineRef != nil {
+				engineRef.RouteShellOutput(chunk)
+				return
+			}
 			if a.callbacks.ToolOutput != nil {
 				a.callbacks.ToolOutput("run_shell", chunk)
 			}
@@ -443,32 +431,8 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	}
 
 	active, _ := state.ActiveModel(*a.settings)
-	subagent, _ := state.SubagentModel(*a.settings)
 	profile := gateway.ResolveModelProfile(active.ID + " " + active.Name)
 	shell, _ := workspace.ChooseShell(a.settings.Shell.Preferred)
-	planText, _ := a.sessions.ReadPlan(session.ID)
-	initialPlan := parsePlan(planText)
-	// G4: restore an active goal from the per-session goal.json sidecar.
-	// Only an active goal resurrects; completed/blocked goals are dropped so a
-	// finished objective never re-activates. The engine surfaces a one-shot
-	// notice (RestoredGoalNotice) for the TUI to display.
-	var initialGoal *contract.GoalSnapshot
-	if snapshot, ok, _ := a.sessions.ReadGoal(session.ID); ok && snapshot.Status == string(orchestrator.GoalActive) && strings.TrimSpace(snapshot.Text) != "" {
-		copySnapshot := snapshot
-		initialGoal = &copySnapshot
-	}
-	// 010 UL-7: restore the plan lifecycle from the plan_state.json sidecar. Any
-	// legacy shape is migrated through the SINGLE loader (state.MigrateLifecycle,
-	// the only reader of the legacy fields); only the canonical state+depth is
-	// threaded into the engine. A fully idle (direct) result needs no restore.
-	// Plan content was already loaded above (planText → InitialPlan); the engine
-	// surfaces a one-shot notice (RestoredPlanNotice) for the TUI to display.
-	var initialPlanState *contract.PlanStateSnapshot
-	if snapshot, ok, _ := a.sessions.ReadPlanState(session.ID); ok {
-		if lifecycleState, depth := state.MigrateLifecycle(snapshot, initialPlan); lifecycleState != contract.LifecycleDirect {
-			initialPlanState = &contract.PlanStateSnapshot{State: lifecycleState, PipelineDepth: depth}
-		}
-	}
 	// 005 US3: compose (new session) or restore (resume) the project-context boot
 	// snapshot BEFORE NewEngine, which sends no provider request — so the boot
 	// block rides the first user submit in one send. On resume the persisted
@@ -487,7 +451,7 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	_ = workspace.EnsureMemoryIndexTemplate(memoryDir)
 	userInstructionsPath := filepath.Join(a.paths.Home, workspace.ProjectInstructionsFile)
 	secretValues := append([]string{a.secrets.ProviderAPIKey}, mcpSecretValues(a.paths)...)
-	skills := workspaceSkillListings(session.WorkspacePath)
+	skills := sessionSkillListings(session.WorkspacePath)
 	// 006: create the MUHIYA.md template when the workspace has none, so the user
 	// has a clear file to edit. Non-fatal on a read-only workspace.
 	_ = workspace.EnsureProjectInstructionsTemplate(session.WorkspacePath)
@@ -554,34 +518,24 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			AppendInvalidation: func(_ context.Context, event contract.InvalidationEvent) error {
 				return a.sessions.AppendInvalidation(session.ID, event)
 			},
-			WritePlan: func(_ context.Context, content string) error { return a.sessions.WritePlan(session.ID, content) },
-			WriteGoal: func(_ context.Context, snapshot contract.GoalSnapshot) error {
-				return a.sessions.WriteGoal(session.ID, snapshot)
-			},
-			ClearGoal: func(_ context.Context) error { return a.sessions.ClearGoal(session.ID) },
-			WritePlanState: func(_ context.Context, snapshot contract.PlanStateSnapshot) error {
-				return a.sessions.WritePlanState(session.ID, snapshot)
-			},
-			ClearPlanState: func(_ context.Context) error { return a.sessions.ClearPlanState(session.ID) },
 			WriteProjectContext: func(_ context.Context, snapshot contract.ProjectContextSnapshot) error {
 				return a.sessions.WriteProjectContext(session.ID, snapshot)
 			},
 			WritePrefixShape: func(_ context.Context, snapshot contract.PrefixShapeSnapshot) error {
 				return a.sessions.WritePrefixShape(session.ID, snapshot)
 			},
-			// Feature 012 R-D3: one verbatim context record per completed
-			// subagent run, under the session's agents/ sidecar family.
-			WriteAgentRecord: func(_ context.Context, runID string, record any) error {
-				return a.sessions.WriteAgentRecord(session.ID, runID, record)
-			},
 		},
 		Prompt: orchestrator.PromptContext{
 			Workspace: session.WorkspacePath, Shell: shell,
-			Model: active.Name, ModelAddendum: profile.PromptAddendum, SubagentModel: subagent.Name,
+			Model: active.Name, ModelAddendum: profile.PromptAddendum,
 			Skills:              skills,
 			ProjectMemory:       true,
 			ProjectContextBlock: projectContext.RenderedBootContext,
 		},
+		// 013 US1: the same listing the prompt advertises backs read_skill's
+		// name resolution, so the catalog can never disagree with the prompt.
+		SkillCatalog:          skills,
+		LoadSkill:             a.loadSkillBody,
 		InitialProjectContext: &initialProjectContext,
 		InitialPrefixShape:    priorPrefixShape,
 		ProjectContextProbe: func(pctx context.Context) (contract.ProjectContextProbe, error) {
@@ -598,9 +552,6 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 				MemoryContent:       memory.CanonicalContent,
 			}, nil
 		},
-		InitialPlan:          initialPlan,
-		InitialGoal:          initialGoal,
-		InitialPlanState:     initialPlanState,
 		InitialUsageRecords:  usageRecords,
 		InitialInvalidations: invalidationEvents,
 		BoundaryTools: func() (orchestrator.BoundaryToolChange, bool, error) {
@@ -619,12 +570,12 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		}
 		return runtimeBundle{}, err
 	}
-	// Feature 012 R-D3: restore persisted subagent context records so linking
-	// survives a restart (linkability still re-verifies staleness and provider
-	// warmth at dispatch — a dead cache surfaces as "linked but cold").
-	if agentRecords, recordsErr := a.sessions.ReadAgentRecords(session.ID); recordsErr == nil && len(agentRecords) > 0 {
-		engine.RestoreAgentRecords(agentRecords)
-	}
+	// Bind the shell-output router now that the engine exists; until this line the
+	// closure above falls back to the direct sink (no task can run before it anyway).
+	engineRef = engine
+	// Legacy note: sessions created before the unified-session change may still
+	// hold agents/<runID>.json sidecars. Nothing reads them now; they are inert
+	// and are removed with the session directory.
 	recent, err := a.db.Events(ctx, session.ID, 300)
 	if err != nil {
 		if manager != nil {
@@ -683,7 +634,7 @@ func (a *Application) setAPIKey(ctx context.Context, key string) error {
 	models, err := a.provider.ListModels(ctx)
 	if err != nil {
 		if a.callbacks.Status != nil {
-			a.callbacks.Status("API key saved; add a model with /model or `muhiyacode config set model <id>`.")
+			a.callbacks.Status("API key saved; run `muhiyacode config discover` to load the model catalog.")
 		}
 		return nil
 	}
@@ -693,4 +644,23 @@ func (a *Application) setAPIKey(ctx context.Context, key string) error {
 	}
 	a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
 	return nil
+}
+
+// catalogRefreshTTL bounds how long a discovered model catalog is trusted.
+// One day keeps a newly added gateway model reachable by the next session
+// without paying a network round trip at every start.
+const catalogRefreshTTL = 24 * time.Hour
+
+// catalogStale reports whether the recorded discovery time is missing or older
+// than the TTL. An unparseable timestamp is treated as stale so a corrupted
+// value self-heals on the next start.
+func catalogStale(refreshedAt string) bool {
+	if strings.TrimSpace(refreshedAt) == "" {
+		return true
+	}
+	at, err := time.Parse(time.RFC3339, refreshedAt)
+	if err != nil {
+		return true
+	}
+	return time.Since(at) > catalogRefreshTTL
 }
