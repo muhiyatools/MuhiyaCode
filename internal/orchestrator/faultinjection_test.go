@@ -180,12 +180,12 @@ func (t *schemaTool) Execute(_ context.Context, _ json.RawMessage) (string, erro
 	return "configured.", nil
 }
 
-// TestSubagentMalformedArgsGuidedRetry preserves the FI-5 subagent-scope
-// coverage after feature 013 (the catalog rows that reached it through the
-// old auto-dispatch are gone): H1 argument validation inside a subagent's own
-// dispatch gate guides wrong-type, missing-required, and bad-enum calls, and
-// the run still ends with a usable report — never a loop or hard failure.
-func TestSubagentMalformedArgsGuidedRetry(t *testing.T) {
+// TestMalformedArgsGuidedRetry is the FI-5 invariant: H1 argument validation
+// guides a wrong-type, missing-required, or bad-enum call, and the task still
+// ends with a usable answer — never a loop or a hard failure. It ran against a
+// subagent's dispatch gate while subagents existed; the gate is shared and the
+// invariant is unchanged, so it now runs where every tool call runs.
+func TestMalformedArgsGuidedRetry(t *testing.T) {
 	for _, tc := range []struct{ name, badArgs string }{
 		{"wrong-type", `{"path":123}`},
 		{"missing-required", `{"mode":"a"}`},
@@ -195,16 +195,19 @@ func TestSubagentMalformedArgsGuidedRetry(t *testing.T) {
 			provider := &scriptedProvider{responses: []contract.ChatResponse{
 				{ToolCalls: []contract.ToolCall{contract.NewToolCall("a", "configure_widget", tc.badArgs)}},
 				{ToolCalls: []contract.ToolCall{contract.NewToolCall("b", "configure_widget", `{"path":"x","mode":"a"}`)}},
-				{Content: "Changes made: widget configured after correcting the arguments. Validation performed: tool succeeded. Problems: none. Remaining concerns: none."},
+				{Content: "Widget configured after correcting the arguments; the tool call succeeded."},
 			}}
 			settings := engineSettings()
-			engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "sub-h1-" + tc.name, WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&schemaTool{name: "configure_widget"})})
+			engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "h1-" + tc.name, WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&schemaTool{name: "configure_widget"})})
 			if err != nil {
 				t.Fatal(err)
 			}
-			result := engine.executeSubagent(context.Background(), "run-"+tc.name, subagentInput{Agent: "general", Task: "configure the widget"}, engine.subagentSpecs()["general"])
-			if result.Status != "done" || !strings.Contains(result.Report, "widget configured") {
-				t.Fatalf("guided retry failed: %+v", result)
+			answer, _, err := engine.Run(context.Background(), "configure the widget at x in mode a")
+			if err != nil {
+				t.Fatalf("guided retry failed: %v", err)
+			}
+			if !strings.Contains(answer, "configured") {
+				t.Fatalf("task did not recover from the malformed call: %q", answer)
 			}
 			// The guidance reached the model as the malformed call's tool result.
 			guided := false
@@ -216,7 +219,7 @@ func TestSubagentMalformedArgsGuidedRetry(t *testing.T) {
 				}
 			}
 			if !guided {
-				t.Fatal("H1 guidance never reached the subagent transcript")
+				t.Fatal("H1 guidance never reached the transcript")
 			}
 		})
 	}

@@ -41,7 +41,7 @@ func describeFreed(before, after, limit int) string {
 		return "no additional context could be freed."
 	}
 	percent := float64(freed) / float64(max(1, limit)) * 100
-	return fmt.Sprintf("freed %s tokens (%.0f%% of the context window).", contract.HumanTokens(freed), percent)
+	return fmt.Sprintf("freed %s tokens (%.0f%% of the context window).", contract.FullTokens(freed), percent)
 }
 
 func (e *Engine) compact(ctx context.Context, reason string) error {
@@ -73,7 +73,7 @@ func (e *Engine) compact(ctx context.Context, reason string) error {
 	var err error
 	summaryStart := time.Now()
 	for attempt := 0; attempt < 2; attempt++ {
-		response, err = e.provider.Chat(summaryCtx, contract.ChatRequest{SessionID: e.session.ID + ":main", Messages: request, ModelID: e.settings.Provider.ActiveModelID, MaxTokens: 1600, Temperature: &temperature, Reasoning: contract.ReasoningLow})
+		response, err = e.provider.Chat(summaryCtx, contract.ChatRequest{SessionID: e.session.ID + ":main", Messages: request, ModelID: e.settings.Provider.ActiveModelID, MaxTokens: 1600, Temperature: &temperature, Reasoning: contract.ReasoningLow, PinUpstream: e.upstreamPin()})
 		if err == nil || summaryCtx.Err() != nil {
 			break
 		}
@@ -213,7 +213,8 @@ func (e *Engine) resetMaintenanceLatch() {
 	e.taskMu.Lock()
 	e.maintenancePasses = 0
 	e.maintenanceLatched = false
-	e.softNoticeShown = false // T039: allow the soft advisory to fire again next cycle
+	e.softNoticeShown = false   // T039: allow the soft advisory to fire again next cycle
+	e.routedWindowNoted = false // a compaction is exactly what resolves the routed-window risk
 	e.taskMu.Unlock()
 }
 

@@ -27,7 +27,6 @@ func testRuntime(t testing.TB) Runtime {
 	settings := &contract.Settings{Version: 1, PermissionMode: contract.PermissionNormal, Effort: contract.EffortMedium}
 	settings.Provider.Type = "openai-compatible"
 	settings.Provider.ActiveModelID = "main"
-	settings.Provider.SubagentModelID = "fast"
 	settings.Provider.Models = []contract.Model{{ID: "main", Name: "Main", ContextLimit: 64000}, {ID: "fast", Name: "Fast", ContextLimit: 32000}}
 	settings.RTL.Mode = "auto"
 	engine, err := orchestrator.NewEngine(orchestrator.EngineConfig{Settings: settings, Provider: inertProvider{}, Registry: orchestrator.NewRegistry()})

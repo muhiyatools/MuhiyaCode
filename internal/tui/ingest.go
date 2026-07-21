@@ -4,8 +4,6 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
-
-	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
 func (m *Model) expireNotice() {
@@ -50,27 +48,17 @@ func (m *Model) finishAssistant(answer string) {
 	}
 }
 
-// sweepRunningWork (004 US1, T013) is the task-end safety net: any tool or
-// subagent still marked "running" when the task's stats arrive was cut short
-// (user stop, error, or a crash mid-tool) and is reconciled to the terminal
-// "cancelled" state so nothing keeps spinning in the transcript. Idempotent —
-// items already ok/fail are left untouched.
+// sweepRunningWork (004 US1, T013) is the task-end safety net: any tool still
+// marked "running" when the task's stats arrive was cut short (user stop,
+// error, or a crash mid-tool) and is reconciled to the terminal "cancelled"
+// state so nothing keeps spinning in the transcript. Idempotent — items already
+// ok/fail are left untouched.
 func (m *Model) sweepRunningWork() {
 	// US1 T019: the task ended, so no tool is active anymore.
 	clear(m.activeTools)
 	for _, entry := range m.items {
 		if entry.tool != nil && entry.tool.state == "running" {
 			entry.tool.state = "cancelled"
-		}
-	}
-	for _, agent := range m.agents {
-		if agent.status == "running" {
-			agent.status = "cancelled"
-		}
-		for i := range agent.items {
-			if agent.items[i].tool != nil && agent.items[i].tool.state == "running" {
-				agent.items[i].tool.state = "cancelled"
-			}
 		}
 	}
 }
@@ -133,45 +121,6 @@ func (m *Model) appendToolOutput(name, chunk string) {
 		tool.output = "… live output truncated …\n" + tail
 	}
 	tool.summary = summarizeTool(tool.output)
-}
-
-func (m *Model) applyAgent(event contract.AgentEvent) {
-	if event.Kind == "start" {
-		agent := &agentView{id: event.RunID, agent: event.Agent, role: event.Role, title: event.Title, task: event.Task, model: event.Model, status: "running", index: len(m.agents) + 1}
-		m.agents = append(m.agents, agent)
-		m.agentByID[event.RunID] = agent
-		m.items = append(m.items, item{kind: "agent", agentID: event.RunID})
-		return
-	}
-	agent := m.agentByID[event.RunID]
-	if agent == nil {
-		return
-	}
-	switch event.Kind {
-	case "tool_start":
-		agent.active = toolLabel(event.Tool)
-		agent.items = append(agent.items, item{kind: "tool", tool: &toolView{name: event.Tool, target: contract.ToolTarget(event.Tool, jsonRaw(event.Arguments)), state: "running", started: time.Now()}})
-	case "tool_end":
-		agent.active = ""
-		for i := len(agent.items) - 1; i >= 0; i-- {
-			if agent.items[i].tool != nil && agent.items[i].tool.state == "running" {
-				agent.items[i].tool.output, agent.items[i].tool.summary, agent.items[i].tool.state = event.Output, summarizeTool(event.Output), "ok"
-				if isFailure(event.Output) {
-					agent.items[i].tool.state = "fail"
-				}
-				break
-			}
-		}
-	case "text":
-		agent.items = append(agent.items, item{kind: "assistant", content: event.Content})
-	case "usage":
-		agent.usage = event.Usage
-	case "done":
-		agent.status, agent.usage = event.Status, event.Usage
-		if event.Report != "" {
-			agent.items = append(agent.items, item{kind: "assistant", content: event.Report, title: "report"})
-		}
-	}
 }
 
 // notify shows a transient informational message in the status zone; warn is

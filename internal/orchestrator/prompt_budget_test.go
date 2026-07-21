@@ -49,12 +49,50 @@ import (
 // cached chars and buys the missing edge in the main/executor protocol: the
 // executor names the decision, the planner asks with ask_user, and re-dispatches
 // with the answer. Still 463 chars below the 5789 this release replaced.
-const promptBaselineChars = 5340
+//
+// Token-efficiency epoch (+53 net, actual 5379): PLANNING step 3 now says WHERE
+// tasks.md goes — the directory the work targets, the workspace root only for
+// workspace-wide work. Without it the model wrote the checklist to the root of
+// whatever workspace happened to be open, beside code it had nothing to do with,
+// and the reader was pinned there too (TA01). +107 for the rule, −54 by
+// condensing CACHE DISCIPLINE without dropping any of its rules.
+//
+// Note for the next reader: this budget guards the SYSTEM PROMPT only. The
+// tool-definitions JSON is larger still and rides every request identically —
+// that saving is measured by the wire golden's section header, not here, so do
+// not expect this number to fall when tool prose is cut.
+//
+// Unified-session epoch (+708, actual 6101). The subagent system was removed
+// and the session does its own work again, so the prompt regained what the
+// executor used to be told: the edit_file/multi_edit contract, the write_file
+// permission rule, the chunked-write rule, the scope discipline, and the
+// preserve-user-work clauses. It also gained a short MODEL section, because the
+// session's model can now change between tasks and the model must not narrate
+// or request that.
+//
+// The FIXED PREFIX — what actually rides every request — FELL in the same
+// change: 24,393 bytes to 21,908 (-10.2%), because deleting run_subagent's
+// schema (its description plus the task/role/skills property texts) cut the
+// tool JSON by 3,214 bytes, more than paying for this section's growth. Judge
+// prefix cost by the wire golden, not by this constant alone.
+//
+// Verification-discipline epoch (+166, actual 6267). Rule 5 used to say only
+// "run the check that proves it works", which is silent on WHAT check is
+// appropriate. A live session took that literally on a plain single-file HTML
+// page: it wrote a scratch .mjs harness and ran a Node version check against a
+// project that has no Node in it, then billed the user for both. The rule now
+// bounds verification to the tooling the project already has and names the
+// fallback for a project with none, so the model has somewhere to land instead
+// of inventing a test rig.
+//
+// 166 cached chars against a failure mode that costs several turns and a
+// scratch file every time it fires is the right side of this trade.
+const promptBaselineChars = 6280
 
 func TestSystemPromptSizeWithinBudget(t *testing.T) {
 	ctx := PromptContext{
 		Workspace: "/w", OS: "linux", Shell: "bash", Model: "deepseek-v4-flash",
-		HasWeb: true, HasSubagents: true, SubagentModel: "deepseek-v4-flash",
+		HasWeb:        true,
 		ModelAddendum: gateway.ResolveModelProfile("deepseek-v4-flash").PromptAddendum,
 	}
 	if got := len(SystemPrompt(ctx)); got > promptBaselineChars {

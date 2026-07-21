@@ -74,13 +74,53 @@ func ParseChecklist(content string) contract.Plan {
 	return plan
 }
 
-// checklistPath is the absolute path of the workspace checklist, or "" when
-// the session has no workspace.
+// checklistPath is the absolute path of the ACTIVE checklist: the tasks.md most
+// recently written in this session, or the workspace-root one when none has been
+// written yet. It is "" when the session has no workspace.
+//
+// TA01: this used to be hard-wired to the workspace root while the WRITE side
+// (touchesChecklist) already accepted a tasks.md in any directory. A checklist
+// created beside the work — the natural place, and now what the prompt asks for —
+// therefore passed the role gate, landed on disk, and was never read again: the
+// to-do panel stayed empty and the completion-honesty guard went blind.
 func (e *Engine) checklistPath() string {
 	if strings.TrimSpace(e.session.WorkspacePath) == "" {
 		return ""
 	}
+	e.mu.Lock()
+	active := e.activeChecklistPath
+	e.mu.Unlock()
+	if active != "" {
+		return active
+	}
 	return filepath.Join(e.session.WorkspacePath, ChecklistFileName)
+}
+
+// adoptChecklistPath remembers the tasks.md a successful write just targeted, so
+// later refreshes read THAT file. Relative paths resolve against the workspace
+// root exactly as the file tools resolve them.
+//
+// Not persisted across a restart on purpose: a resumed session falls back to the
+// workspace root until the next checklist write re-establishes the location,
+// which costs one write and keeps zero new session state to migrate.
+func (e *Engine) adoptChecklistPath(call contract.ToolCall) {
+	root := strings.TrimSpace(e.session.WorkspacePath)
+	if root == "" {
+		return
+	}
+	for _, path := range contract.ToolTargetPaths(call.ToolName(), []byte(call.ArgumentsJSON())) {
+		if !strings.EqualFold(filepath.Base(filepath.Clean(path)), ChecklistFileName) {
+			continue
+		}
+		resolved := path
+		if !filepath.IsAbs(resolved) {
+			resolved = filepath.Join(root, resolved)
+		}
+		e.mu.Lock()
+		e.activeChecklistPath = filepath.Clean(resolved)
+		e.mu.Unlock()
+		return
+	}
 }
 
 // touchesChecklist reports whether a successful tool call wrote the workspace
@@ -153,41 +193,4 @@ func (e *Engine) openChecklistItems() []string {
 		}
 	}
 	return open
-}
-
-// ReportStatus is the executor's self-declared verification state, parsed from
-// the STATUS line its report format requires. It exists so the caller's trust
-// is checkable rather than assumed — and so the run_summary event records what
-// the executor actually claimed.
-type ReportStatus string
-
-const (
-	ReportStatusComplete    ReportStatus = "complete"
-	ReportStatusNeedsVerify ReportStatus = "needs-verify"
-	ReportStatusBlocked     ReportStatus = "blocked"
-	ReportStatusUnknown     ReportStatus = "unknown"
-)
-
-// reportStatusRE matches the trailing STATUS line. Lenient about spacing and
-// case because the executor is a cheaper model; strict about the three words.
-var reportStatusRE = regexp.MustCompile(`(?im)^\s*STATUS:\s*(COMPLETE|NEEDS-VERIFY|BLOCKED)\b`)
-
-// parseReportStatus reads the LAST STATUS line in a report. Unknown means the
-// executor showed no status at all, which the caller treats as "verify it
-// yourself" — the same as NEEDS-VERIFY, but distinguishable in telemetry so a
-// model that keeps omitting it is visible.
-func parseReportStatus(report string) ReportStatus {
-	matches := reportStatusRE.FindAllStringSubmatch(report, -1)
-	if len(matches) == 0 {
-		return ReportStatusUnknown
-	}
-	switch strings.ToUpper(matches[len(matches)-1][1]) {
-	case "COMPLETE":
-		return ReportStatusComplete
-	case "NEEDS-VERIFY":
-		return ReportStatusNeedsVerify
-	case "BLOCKED":
-		return ReportStatusBlocked
-	}
-	return ReportStatusUnknown
 }

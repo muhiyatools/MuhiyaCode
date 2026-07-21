@@ -94,71 +94,44 @@ func TestStatedInAdvance_EveryEnforcedRuleHasAStatedRule(t *testing.T) {
 
 // --- IS-5: contradiction / canonical-copy ----------------------------------
 
-// TestCanonicalCopy_ReportFormatFieldListsAreSingleSource guards against the
-// pre-010 drift where run_subagent's tool description paraphrased the
-// report-format field lists with "/" separators and silently dropped
-// "/unknowns" from the research format, stating a different shape than the
-// one the subagent's own handoff contract actually produced.
-func TestCanonicalCopy_ReportFormatFieldListsAreSingleSource(t *testing.T) {
-	cases := []struct {
-		signature string // a substring unique to this format that should only ever appear as part of the exact canonical string
-		canonical string
-	}{
-		{"Findings", ReportFormatResearch},
-		{"Changes made", ReportFormatImplementation},
-		{"Verified findings by severity", ReportFormatReview},
-	}
-	for _, tx := range All() {
-		for _, c := range cases {
-			if strings.Contains(tx.Body, c.signature) && !strings.Contains(tx.Body, c.canonical) {
-				t.Errorf("text %q mentions %q but does not contain the canonical field list %q verbatim (IS-5 canonical-copy)", tx.ID, c.signature, c.canonical)
-			}
-		}
-	}
-}
+// The report-format canonical-copy test retired with the subagent system: the
+// three ReportFormat* field lists existed so a delegated run's handoff and the
+// run_subagent tool description could not describe different report shapes.
+// With one session there are no reports to format and no second copy to drift.
 
 // TestCanonicalCopy_WriteFilePermissionSentenceIsTokenIdentical pins fix (d):
-// the write_file tool description IS the canonical sentence, and the edit
-// discipline delivered to the EXECUTOR contains it verbatim. v1.1.0 moved that
-// discipline out of the main model's cached prefix — under the plan/execute
-// split it was teaching edit mechanics to the one model forbidden from
-// editing, while the executor never received them at all.
+// the write_file tool description IS the canonical sentence, and the prompt's
+// edit discipline contains it verbatim. The split-era version asserted the
+// sentence reached a separate executor; with one session the model that reads
+// the prompt is the model that edits, so the edit discipline lives in the main
+// prefix again and that is where the sentence must appear.
 func TestCanonicalCopy_WriteFilePermissionSentenceIsTokenIdentical(t *testing.T) {
 	if ToolWriteFileDescription != WriteFilePermissionRuleBody {
 		t.Errorf("tool.write_file.desc (%q) is not token-identical to the canonical write_file rule sentence (%q)", ToolWriteFileDescription, WriteFilePermissionRuleBody)
 	}
-	if !strings.Contains(EditDisciplineBody, WriteFilePermissionRuleBody) {
-		t.Error("the executor's edit discipline no longer contains the canonical write_file rule sentence verbatim")
+	if !strings.Contains(PromptContextEditDisciplineBody, WriteFilePermissionRuleBody) {
+		t.Error("the prompt's edit discipline no longer contains the canonical write_file rule sentence verbatim")
 	}
-	// It must reach the executor, not merely exist as a constant.
-	if !strings.Contains(SubagentGeneralSystem, WriteFilePermissionRuleBody) {
-		t.Error("the general executor's system message does not carry the write_file rule")
+	if !strings.Contains(PromptContextEditDisciplineBody, "oldString must be exact") {
+		t.Error("the prompt's edit discipline does not carry the edit_file contract")
 	}
-	if !strings.Contains(SubagentGeneralSystem, "oldString must be exact") {
-		t.Error("the general executor's system message does not carry the edit_file contract")
+	// The chunked-write rule must be stated in advance to the model that hits the
+	// output cap, which the truncation gates enforce against (IS-4).
+	if !strings.Contains(PromptContextEditDisciplineBody, ChunkedWriteRuleBody) {
+		t.Error("the prompt's edit discipline does not state the chunked-write rule")
 	}
 }
 
 // --- IS-6: capability-reference ---------------------------------------------
 
-// realAllowlists mirrors the production tool surface per reader context.
-// "main-loop" is the full main-loop tool set (workspace registry + the eight
-// synthetic tools + web_search); "subagent.general" is the workspace
-// registry ONLY — orchestrator/subagent.go's subagentSpecs() builds it from
-// e.registry.Names(), and none of run_subagent/exit_plan_mode/ask_user/
-// propose_changes/save_memory/edit_memory are ever added to that registry
-// (they dispatch only through the main loop's synthetic-tool switch in
-// engine.go executeOne). internal/orchestrator/instructions_wiring_test.go
-// cross-checks this mirror against the real, live subagentSpecs() output.
+// realAllowlists mirrors the production tool surface per reader context. With
+// one unified session there is a single context: the workspace registry plus
+// the synthetic session tools plus web_search. The per-subagent contexts are
+// gone with the subagents that read them.
 var realAllowlists = map[string]map[string]bool{
 	"main-loop": setOf("list_files", "read_file", "grep", "search_text", "glob", "edit_file", "multi_edit", "write_file",
 		"apply_patch", "run_shell", "git_status", "git_diff", "ask_user", "propose_changes",
-		"save_memory", "recall_memory", "edit_memory", "run_subagent", "web_search"),
-	"subagent.general": setOf("list_files", "read_file", "grep", "search_text", "glob", "edit_file", "multi_edit",
-		"write_file", "apply_patch", "run_shell", "git_status", "git_diff", "web_search"),
-	"subagent.explore":   setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"),
-	"subagent.review":    setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"),
-	"subagent.read-only": setOf("list_files", "read_file", "grep", "search_text", "glob", "git_status", "git_diff", "run_shell"),
+		"save_memory", "recall_memory", "edit_memory", "read_skill", "web_search"),
 }
 
 func setOf(names ...string) map[string]bool {
@@ -191,22 +164,18 @@ func TestCapabilityReference_MentionedToolsAreInRealAllowlist(t *testing.T) {
 	}
 }
 
-// TestCapabilityReference_GeneralSubagentNeverAdvertisesSyntheticTools pins
-// incoherence fix (a) directly: the general subagent's Description and
-// System texts must never name run_subagent, exit_plan_mode, ask_user, or
-// propose_changes — none of which its executor can honor (subagent.go
-// dispatches only through registry.Execute, restricted to spec.Allowed,
-// never the main loop's synthetic-tool switch).
-func TestCapabilityReference_GeneralSubagentNeverAdvertisesSyntheticTools(t *testing.T) {
-	forbidden := []string{"run_subagent", "ask_user", "propose_changes"}
-	for _, id := range []string{"subagent.general.description", "subagent.general.system"} {
-		tx, ok := ByID(id)
-		if !ok {
-			t.Fatalf("expected registered text %q", id)
+// TestCapabilityReference_NoTextAdvertisesTheRemovedDelegationTool: run_subagent
+// no longer exists as a tool, so no registered text may name it. A leftover
+// mention would advertise a capability the model cannot call — the exact class
+// of incoherence fix (a) closed for the subagent texts (IS-6).
+func TestCapabilityReference_NoTextAdvertisesTheRemovedDelegationTool(t *testing.T) {
+	for _, tx := range All() {
+		if strings.Contains(tx.Body, "run_subagent") {
+			t.Errorf("text %q names run_subagent, a tool that no longer exists (IS-6)", tx.ID)
 		}
-		for _, tool := range forbidden {
-			if strings.Contains(tx.Body, tool) {
-				t.Errorf("text %q advertises %q, which the general subagent's real executor rejects as an unknown tool (fix a, IS-6)", id, tool)
+		for _, tool := range tx.MentionsTools {
+			if tool == "run_subagent" {
+				t.Errorf("text %q lists run_subagent in MentionsTools, but the tool was removed (IS-6)", tx.ID)
 			}
 		}
 	}

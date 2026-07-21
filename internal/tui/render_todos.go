@@ -39,10 +39,9 @@ func (m *Model) renderTodos() string {
 		line := fmt.Sprintf("   %s %d to-dos remaining in tasks.md", m.glyphs.todoPending, remaining)
 		return "\n" + fitLine(m.palette.faint.Render(line), m.width)
 	}
-	// Busy: the live checklist, unless the user hid it with Ctrl+T.
-	if !m.todoVisible {
-		return ""
-	}
+	// Busy: the live checklist, always (013 FR-025/FR-026). The Ctrl+T hide is
+	// gone — while the agent is working, what it is working through is exactly
+	// what the user wants on screen, so hiding it was a setting nobody needed.
 	rows := m.todoRows(steps)
 	if len(rows) == 0 {
 		return ""

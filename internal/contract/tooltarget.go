@@ -67,6 +67,13 @@ func PatchTargetFiles(patch string) []string {
 		if !strings.HasPrefix(lines[i], "--- ") || !strings.HasPrefix(lines[i+1], "+++ ") {
 			continue
 		}
+		// A real file header is immediately followed by its first "@@" hunk
+		// header. A body deletion/addition pair — deleting "-- old" (rendered
+		// "--- old") and adding "++ new" (rendered "+++ new") on adjacent lines —
+		// is not, so this stops such a pair from injecting a phantom file (E-3).
+		if i+2 >= len(lines) || !strings.HasPrefix(lines[i+2], "@@") {
+			continue
+		}
 		target := name(strings.TrimPrefix(lines[i+1], "+++ "))
 		if target == "/dev/null" || target == "" {
 			target = name(strings.TrimPrefix(lines[i], "--- "))

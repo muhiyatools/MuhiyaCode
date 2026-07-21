@@ -38,9 +38,10 @@ func TestNoBlockingEngineCallsOnUIThread(t *testing.T) {
 		"UsageAggregate":   "read-only aggregate copy",
 		"HarnessEvents":    "read-only ring copy (T012)",
 		// Fast in-memory mutations (no persistence I/O, no callback/Send).
-		"QueueUserMessage": "mu-guarded steering append",
-		"SetEffort":        "effortMu-guarded field set",
-		"Cancel":           "cancels the task context",
+		"QueueUserMessage":  "mu-guarded steering append",
+		"SetEffort":         "liveSettingsMu-guarded field set",
+		"SetPermissionMode": "liveSettingsMu-guarded field set",
+		"Cancel":            "cancels the task context",
 	}
 
 	files, err := filepath.Glob("*.go")

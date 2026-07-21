@@ -34,7 +34,7 @@ func TestClassificationAndBudgets(t *testing.T) {
 }
 
 func TestSystemPromptBudgetAndStability(t *testing.T) {
-	ctx := PromptContext{Workspace: `F:\work`, OS: "Windows", Shell: "pwsh", Model: "deepseek-v4-pro", ModelAddendum: "", HasSubagents: true, SubagentModel: "deepseek-v4-flash"}
+	ctx := PromptContext{Workspace: `F:\work`, OS: "Windows", Shell: "pwsh", Model: "deepseek-v4-pro", ModelAddendum: ""}
 	first, second := SystemPrompt(ctx), SystemPrompt(ctx)
 	if first != second {
 		t.Fatal("system prompt is not byte-stable")
@@ -73,7 +73,7 @@ func TestHistoryFoldAndIntactness(t *testing.T) {
 // DeepSeek's implicit prefix cache keeps hitting. This is what raises the hit
 // rate from ~73% toward Reasonix's ~99%.
 func TestPrefixStableAcrossTurnsAndClasses(t *testing.T) {
-	system := SystemPrompt(PromptContext{Workspace: `F:\work`, OS: "windows", Shell: "pwsh", Model: "deepseek-v4-pro", HasSubagents: true, SubagentModel: "deepseek-v4-flash"})
+	system := SystemPrompt(PromptContext{Workspace: `F:\work`, OS: "windows", Shell: "pwsh", Model: "deepseek-v4-pro"})
 	h := NewHistory(HistorySnapshot{Version: 1}, nil)
 
 	// Turn 1: a chat greeting.

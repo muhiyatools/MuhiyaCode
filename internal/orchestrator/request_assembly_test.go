@@ -68,7 +68,10 @@ func TestValidateCallArgs(t *testing.T) {
 	}{
 		{"valid minimal", `{"path":"x"}`, false, ""},
 		{"valid full incl numeric+string enum", `{"path":"x","level":2,"mode":"a","flag":true}`, false, ""},
-		{"unparseable json", `{"path":`, true, "cut off mid-generation"},
+		// TB04: the recovery names the output limit and (for writes) the chunked
+		// protocol. The retired text advised sending "a shorter version", which for
+		// a file write meant dropping the user's features.
+		{"unparseable json", `{"path":`, true, "cut off at the output limit"},
 		{"missing required", `{"mode":"a"}`, true, "missing required field"},
 		{"wrong primitive type", `{"path":123}`, true, "must be a string"},
 		{"numeric enum violation", `{"path":"x","level":9}`, true, "must be one of"},

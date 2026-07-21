@@ -71,7 +71,6 @@ type transcriptPageMsg struct {
 type item struct {
 	kind, content, title string
 	tool                 *toolView
-	agentID              string
 	stats                *contract.TaskStats
 	// eventID is the stable SQLite id for a durable transcript item (US1 T020
 	// paging); 0 for live/synthetic items. The oldest loaded item's eventID is the
@@ -101,21 +100,15 @@ type toolView struct {
 
 // chipSpan records where a clickable transcript chip's header sits in the full
 // (pre-scroll) transcript content, so View() can project it to a screen rectangle
-// using the live viewport offset (US4 tool/subagent chips).
+// using the live viewport offset (US4 tool chips).
 type chipSpan struct {
-	row     int
-	tool    *toolView
-	agentID string
+	row  int
+	tool *toolView
 }
 
-type agentView struct {
-	id, agent, phase, role, title, task, model, status string
-	index                                              int
-	usage                                              contract.Usage
-	items                                              []item
-	active                                             string
-	hovered                                            bool // mouse is over this chip (clickable affordance)
-}
+// agentView was one subagent's card: its identity, status, tokens, and its own
+// tool/text rows, rendered as a transcript chip that could be opened into a
+// full-screen view. It is gone with the subagent system.
 
 type modalState struct {
 	title, message string
@@ -206,18 +199,16 @@ type Model struct {
 	// closeModal reopens it once the queue drains, so onboarding is deferred rather
 	// than silently dropped by openChoice's reply-modal guard.
 	onboardingPending bool
-	agents            []*agentView
-	agentByID         map[string]*agentView
-	viewAgent         string
 	selectedSkills    map[string]Skill
 	commandIndex      int
 	history           []string
 	historyIndex      int
 	initialPrompt     string
 	flash             noticeState
-	// T1: persistent usage footer. Set when statsMsg arrives, cleared on
-	// next submit() or session switch. NEVER cleared by a timer — the
-	// "footer must remain visible" requirement.
+	// lastStats carries the just-finished task's stats so update() can seed ONE
+	// end-of-task summary transcript item. It is not a live footer — no render
+	// path reads it (H-5); it is set when statsMsg arrives and cleared on the next
+	// submit() or session switch.
 	lastStats *contract.TaskStats
 	// M2: track that the live MCP modal is open so the tick handler keeps
 	// refreshing it until every server reports a terminal state.
@@ -233,9 +224,6 @@ type Model struct {
 	// live MCP modal) and self-terminates when idle, so an idle session schedules
 	// no recurring application work.
 	ticking bool
-	// todoVisible toggles the live to-do checklist panel (Experience Overhaul A3,
-	// Ctrl+T). Session-local UI state; defaults on and is never persisted.
-	todoVisible bool
 	// US4 mouse: hits is the InteractionMap for the last rendered frame, rebuilt
 	// by View() so click/hover coordinates resolve against exactly what is on
 	// screen. Its generation comes from FrameState (advanced every frame) so a
@@ -250,14 +238,13 @@ type Model struct {
 	// to screen rectangles with the live viewport offset.
 	transcriptChips []chipSpan
 	// needsTranscriptRefresh is set by a mouse action that changed transcript
-	// content (a tool expand/collapse or opening an agent view) so the Update loop
-	// re-renders the transcript this cycle.
+	// content (a tool expand/collapse) so the Update loop re-renders the
+	// transcript this cycle.
 	needsTranscriptRefresh bool
-	// hoveredTool/hoveredAgent track the transcript chip currently under the mouse
-	// so View() can render a clickable affordance (a hover underline). Only one row
-	// is hovered at a time; setHover swaps them and asks for a transcript refresh.
-	hoveredTool  *toolView
-	hoveredAgent string
+	// hoveredTool tracks the transcript chip currently under the mouse so View()
+	// can render a clickable affordance (a hover underline). setHover swaps it
+	// and asks for a transcript refresh.
+	hoveredTool *toolView
 	// followOutput (US2 T033) is the auto-scroll intent: true means new content
 	// pins to the bottom. Scrolling up (even mid-stream) clears it so the view
 	// STAYS where the user put it; scrolling back to the bottom or submitting sets
@@ -345,13 +332,17 @@ func (m *Model) ensureTick() tea.Cmd {
 	return tick()
 }
 
+// commands is the palette. /errors and /permissions were removed in 013: the
+// first exposed harness self-diagnostics that are telemetry, not user business;
+// the second duplicated a two-state toggle that Shift+Tab already does, with the
+// current mode and its shortcut now named in the footer.
 var commands = []commandEntry{
 	{"/reasoning", "Set reasoning effort (low–max)"},
 	{"/resume", "Resume a workspace session"}, {"/new", "Start a new session"},
-	{"/context", "Inspect context usage"}, {"/errors", "Show harness friction this session"}, {"/compact", "Compact conversation"},
-	{"/login", "Store API key"}, {"/logout", "Clear API key"},
+	{"/context", "Inspect context usage"}, {"/compact", "Compact conversation"},
+	{"/login", "Store API key"}, {"/logout", "Log Out of Account"},
 	{"/usage", "View account usage"},
-	{"/permissions", "Change permission mode"}, {"/skills", "Assign skills to next prompt"}, {"/mcp", "Manage MCP servers"},
+	{"/skills", "Assign skills to next prompt"}, {"/mcp", "Manage MCP servers"},
 	{"/paste", "Inspect or remove pasted blocks"},
 	{"/diff", "Summarize git diff"}, {"/rewind", "Restore latest checkpoint"},
 }
@@ -391,7 +382,7 @@ func NewModel(options Options) *Model {
 	view := viewport.New(viewport.WithWidth(80), viewport.WithHeight(20))
 	view.SoftWrap = false
 	view.FillHeight = true
-	m := &Model{ctx: ctx, runtime: options.Runtime, bridge: options.Bridge, actions: options.Actions, version: options.Version, latestVersion: options.LatestVersion, theme: theme, palette: colors, glyphs: marks, viewport: view, input: input, width: 100, height: 34, status: "Ready", agentByID: make(map[string]*agentView), activeTools: make(map[string]*toolView), selectedSkills: make(map[string]Skill), historyIndex: -1, initialPrompt: options.InitialPrompt, followOutput: true, todoVisible: true}
+	m := &Model{ctx: ctx, runtime: options.Runtime, bridge: options.Bridge, actions: options.Actions, version: options.Version, latestVersion: options.LatestVersion, theme: theme, palette: colors, glyphs: marks, viewport: view, input: input, width: 100, height: 34, status: "Ready", activeTools: make(map[string]*toolView), selectedSkills: make(map[string]Skill), historyIndex: -1, initialPrompt: options.InitialPrompt, followOutput: true}
 	// US1 T021: when the runtime is not yet built and a Hydrate func is provided,
 	// start in the loading shell; the engine-dependent state is populated once
 	// hydration completes. Otherwise this is the unchanged single-stage path.
@@ -438,5 +429,3 @@ func (m *Model) Init() tea.Cmd {
 	}
 	return tea.Batch(commands...)
 }
-
-func jsonRaw(value string) []byte { return []byte(value) }

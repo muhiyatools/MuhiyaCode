@@ -45,21 +45,6 @@ type benchPairing struct {
 	CompletionTokens   int      `json:"completion_tokens,omitempty"`
 }
 
-type benchLink struct {
-	RunID          string   `json:"run_id"`
-	Kind           string   `json:"kind"`
-	Decision       string   `json:"decision"`
-	Form           string   `json:"form,omitempty"`
-	Reason         string   `json:"reason"`
-	Predecessor    string   `json:"predecessor,omitempty"`
-	CacheShare     *float64 `json:"cache_share,omitempty"`
-	CacheReported  bool     `json:"cache_reported"`
-	InheritedFiles int      `json:"inherited_files,omitempty"`
-	RereadFiles    int      `json:"reread_files,omitempty"`
-	OutboundChars  int      `json:"outbound_chars,omitempty"`
-	ReturnChars    int      `json:"return_chars,omitempty"`
-}
-
 type benchSummary struct {
 	TaskClass     string          `json:"task_class"`
 	Completed     bool            `json:"completed"`
@@ -70,9 +55,7 @@ type benchSummary struct {
 	Review        benchReview     `json:"review"`
 	Violations    benchViolations `json:"violations"`
 	PerPairing    []benchPairing  `json:"per_pairing,omitempty"`
-	// Links (feature 012 R-D13) is the per-dispatch context-link ledger; the
-	// read_gate counters record the role gate's outcomes.
-	Links    []benchLink `json:"links,omitempty"`
+	// ReadGate counts the dispatch gate's outcomes for this task.
 	ReadGate struct {
 		Denied int `json:"denied,omitempty"`
 		Waived int `json:"waived,omitempty"`
@@ -137,15 +120,6 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 			Model: pairing.Model, Pin: pairing.Pin,
 			SteadyStateHitRate: pairing.SteadyStateHitRate, Reported: pairing.Reported,
 			PromptTokens: pairing.PromptTokens, CompletionTokens: pairing.CompletionTokens,
-		})
-	}
-	for _, link := range stats.Links {
-		summary.Links = append(summary.Links, benchLink{
-			RunID: link.RunID, Kind: link.Kind, Decision: link.Decision, Form: link.Form,
-			Reason: link.Reason, Predecessor: link.Predecessor,
-			CacheShare: link.CacheShare, CacheReported: link.CacheReported,
-			InheritedFiles: link.InheritedFiles, RereadFiles: link.RereadFiles,
-			OutboundChars: link.OutboundChars, ReturnChars: link.ReturnChars,
 		})
 	}
 	payload, err := json.Marshal(map[string]benchSummary{"muhiya_bench": summary})

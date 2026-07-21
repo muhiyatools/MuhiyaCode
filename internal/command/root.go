@@ -278,7 +278,7 @@ func newConfigCommand() *cobra.Command {
 			if err := state.SaveSettings(settings, paths); err != nil {
 				return err
 			}
-			fmt.Fprintf(cmd.OutOrStdout(), "Discovered %d model(s). Main: %s; subagent: %s.\n", len(models), settings.Provider.ActiveModelID, settings.Provider.SubagentModelID)
+			fmt.Fprintf(cmd.OutOrStdout(), "Discovered %d model(s). Using %s.\n", len(models), settings.Provider.ActiveModelID)
 			if len(stranded) > 0 {
 				fmt.Fprintf(cmd.OutOrStdout(), "No longer offered (still selected): %s. Pick a new one with `muhiyacode config set model <id>`.\n", strings.Join(stranded, ", "))
 			}
@@ -536,11 +536,7 @@ func mcpSecretValues(paths state.Paths) []string {
 	}
 	var values []string
 	for _, server := range secrets.OAuth {
-		for _, value := range server {
-			if text, ok := value.(string); ok && text != "" {
-				values = append(values, text)
-			}
-		}
+		collectSecretStrings(server, &values)
 	}
 	for _, server := range secrets.Env {
 		for _, value := range server {
@@ -550,6 +546,28 @@ func mcpSecretValues(paths state.Paths) []string {
 		}
 	}
 	return values
+}
+
+// collectSecretStrings walks an OAuth entry (nested maps/slices) and appends every
+// string leaf long enough to be a credential. The real secrets — access/refresh
+// tokens under "tokens", client_secret under "clientInformation" — are NESTED, so
+// a top-level-only scan collected only harmless URLs and left a bare opaque token
+// (e.g. ya29.a0Af…) to be written verbatim to memory/transcripts/events (I-4).
+func collectSecretStrings(value any, out *[]string) {
+	switch v := value.(type) {
+	case string:
+		if len(v) >= 8 {
+			*out = append(*out, v)
+		}
+	case map[string]any:
+		for _, item := range v {
+			collectSecretStrings(item, out)
+		}
+	case []any:
+		for _, item := range v {
+			collectSecretStrings(item, out)
+		}
+	}
 }
 
 func configurationNotice(settings contract.Settings, secrets contract.Secrets) string {

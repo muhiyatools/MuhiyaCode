@@ -87,24 +87,6 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-// takeSteering drains the queue for a RUNNING SUBAGENT. Without it a message
-// typed while the executor is working sat untouched until the main loop
-// resumed — on a long build, minutes of the user watching an agent do something
-// they had already asked it to stop. The subagent folds the text into its
-// current run; the parent gets a notice so it knows on resume that the run it
-// dispatched was redirected.
-//
-// Deliberately NOT a call to drainSteering: that one appends to MAIN history,
-// which would put a message addressed to the executor into the planner's
-// transcript and desynchronize the two.
-func (e *Engine) takeSteering() []string {
-	e.mu.Lock()
-	queued := append([]string(nil), e.steering...)
-	e.steering = nil
-	e.mu.Unlock()
-	return queued
-}
-
 // persistMessage records one durable event (and its transcript twin). target is
 // the tool's display target for tool events (empty for user/assistant), persisted
 // so a resumed row names WHAT the call acted on exactly as it did live.

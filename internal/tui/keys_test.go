@@ -131,31 +131,41 @@ func TestTabCompletesCommandWhenPaletteOpen(t *testing.T) {
 	}
 }
 
-// TestTabCyclesAgentWhenPaletteClosed pins plain tab's second branch: cycling the
-// viewed subagent when the composer is not a slash command (mirrors alt+N's target).
-func TestTabCyclesAgentWhenPaletteClosed(t *testing.T) {
+// The agent-navigation tests (→/← ring cycling, alt+1..9 direct select, and
+// Tab-no-longer-cycles) retired with the agent views they navigated. What
+// survives is the property those tests protected in passing: arrows belong to
+// the caret.
+
+// TestArrowsBelongToTheCaret: with or without composer text, ←/→ are the
+// caret's alone — no navigation mode may take them again.
+func TestArrowsBelongToTheCaret(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.input.SetValue("plain text, no slash")
-	m.agents = append(m.agents,
-		&agentView{id: "a1", index: 1, status: "running"},
-		&agentView{id: "a2", index: 2, status: "running"},
-	)
-
-	m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
-	if m.viewAgent != "a1" {
-		t.Fatalf("first tab did not select the first agent: viewAgent=%q", m.viewAgent)
-	}
-	m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
-	if m.viewAgent != "a2" {
-		t.Fatalf("second tab did not advance to the second agent: viewAgent=%q", m.viewAgent)
-	}
-	m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
-	if m.viewAgent != "" {
-		t.Fatalf("third tab did not wrap back to the main session: viewAgent=%q", m.viewAgent)
+	for _, code := range []rune{tea.KeyLeft, tea.KeyRight} {
+		m.handleKey(tea.KeyPressMsg{Code: code})
 	}
 	if m.input.Value() != "plain text, no slash" {
-		t.Fatalf("agent-cycling tab touched the composer: %q", m.input.Value())
+		t.Fatalf("arrow handling mutated composer text: %q", m.input.Value())
+	}
+	// Empty composer: still a caret no-op, not a mode switch.
+	m.input.SetValue("")
+	m.handleKey(tea.KeyPressMsg{Code: tea.KeyRight})
+	m.handleKey(tea.KeyPressMsg{Code: tea.KeyLeft})
+	if m.input.Value() != "" {
+		t.Fatalf("arrows on an empty composer produced text: %q", m.input.Value())
+	}
+}
+
+// TestTabIsAutocompleteOnly (013 FR-027): Tab completes slash commands and does
+// nothing else.
+func TestTabIsAutocompleteOnly(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.input.SetValue("plain text, no slash")
+	m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab})
+	if m.input.Value() != "plain text, no slash" {
+		t.Fatalf("tab mutated the composer: %q", m.input.Value())
 	}
 }
 
@@ -185,28 +195,15 @@ func TestPageDownScrollsViewportDown(t *testing.T) {
 	}
 }
 
-// TestAltDigitSelectsAgentByIndex pins the alt+1..9 direct-select shortcuts
-// (keys.go's alt+<digit> branch), including that an out-of-range digit is a no-op
-// rather than a panic.
-func TestAltDigitSelectsAgentByIndex(t *testing.T) {
+// TestAltDigitIsInert: the alt+1..9 agent-select shortcuts are gone, and the
+// keys must now pass through harmlessly rather than panicking or typing digits.
+func TestAltDigitIsInert(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
-	m.agents = append(m.agents,
-		&agentView{id: "first", index: 1, status: "running"},
-		&agentView{id: "second", index: 2, status: "running"},
-	)
-
-	m.handleKey(tea.KeyPressMsg{Code: '2', Mod: tea.ModAlt})
-	if m.viewAgent != "second" {
-		t.Fatalf("alt+2 did not select the second agent: viewAgent=%q", m.viewAgent)
+	for _, digit := range []rune{'1', '2', '9'} {
+		m.handleKey(tea.KeyPressMsg{Code: digit, Mod: tea.ModAlt})
 	}
-	m.handleKey(tea.KeyPressMsg{Code: '1', Mod: tea.ModAlt})
-	if m.viewAgent != "first" {
-		t.Fatalf("alt+1 did not select the first agent: viewAgent=%q", m.viewAgent)
-	}
-	// alt+9: no agent at that index — must not panic and must leave viewAgent alone.
-	m.handleKey(tea.KeyPressMsg{Code: '9', Mod: tea.ModAlt})
-	if m.viewAgent != "first" {
-		t.Fatalf("alt+9 (no such agent) changed viewAgent to %q", m.viewAgent)
+	if m.input.Value() != "" {
+		t.Fatalf("alt+digit typed into the composer: %q", m.input.Value())
 	}
 }

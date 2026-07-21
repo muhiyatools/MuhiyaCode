@@ -208,7 +208,6 @@ func engineSettings() contract.Settings {
 	settings.Version = 1
 	settings.Provider.Type = "openai-compatible"
 	settings.Provider.ActiveModelID = "main"
-	settings.Provider.SubagentModelID = "main"
 	settings.Provider.Models = []contract.Model{{ID: "main", Name: "Test", ContextLimit: 128000}}
 	settings.Effort = contract.EffortMedium
 	settings.PermissionMode = contract.PermissionAutoAccept
@@ -218,24 +217,4 @@ func engineSettings() contract.Settings {
 	// turns it back on explicitly.
 	settings.Provider.Advisor = "off"
 	return settings
-}
-
-// scriptedEngine builds an engine over a scripted provider with a read_file
-// tool — the common fixture shape for behavior tests. (Formerly lifecycleEngine
-// in the deleted plan-lifecycle suite; nothing about it was lifecycle-specific.)
-func scriptedEngine(t *testing.T, id string, resp ...contract.ChatResponse) (*Engine, *scriptedProvider) {
-	t.Helper()
-	if len(resp) == 0 {
-		resp = []contract.ChatResponse{{Content: "ok"}}
-	}
-	provider := &scriptedProvider{responses: resp}
-	settings := engineSettings()
-	engine, err := NewEngine(EngineConfig{
-		Settings: &settings, Session: contract.Session{ID: id, WorkspacePath: t.TempDir()},
-		Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return engine, provider
 }

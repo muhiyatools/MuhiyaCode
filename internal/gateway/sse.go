@@ -18,6 +18,18 @@ type StreamResult struct {
 	ToolCalls        []contract.ToolCall
 	Usage            contract.Usage
 	FinishReason     string
+	// TruncatedCalls names the tool calls whose arguments were cut off when the
+	// model hit its output cap: the stream closed normally with
+	// finish_reason="length" while the accumulated JSON is still incomplete.
+	// Without this the broken call was dispatched as if it were whole, and the
+	// caller had to guess from a JSON parse error (TB01).
+	TruncatedCalls []string
+	// Upstream is the provider OpenRouter actually routed this request to, as
+	// reported in its chunks. Empty on a direct provider connection. It exists
+	// to make one specific failure visible: prefix caches are per-upstream, so
+	// a flip between turns is a full cold start that no client-side stability
+	// can prevent and nothing else in the response would reveal.
+	Upstream string
 }
 
 type partialCall struct {
@@ -50,6 +62,7 @@ type StreamAccumulator struct {
 	deepSeekCacheMiss          usageNumber
 	openAICacheRead            usageNumber
 	usageDiagnostics           []string
+	upstream                   string
 	malformed                  int
 	received                   bool
 	profile                    ModelProfile
@@ -91,6 +104,17 @@ func (a *StreamAccumulator) ConsumeLine(raw string) error {
 		return nil
 	}
 	a.received = true
+	// OpenRouter names the upstream it actually routed to, per chunk. Nothing
+	// else on the OpenAI wire carries it, and it is the only field that can
+	// prove a mid-session upstream flip — the event that silently cold-starts a
+	// per-model prefix cache while every byte we send stays identical.
+	//
+	// Its ABSENCE is equally informative: a direct provider connection never
+	// sends it, so an empty value across a whole session says OpenRouter is not
+	// in the path and a routing pin would fix nothing.
+	if upstream := stringValue(chunk["provider"]); upstream != "" {
+		a.upstream = upstream
+	}
 	if usage, ok := chunk["usage"]; ok {
 		a.mergeUsage(usage)
 	}
@@ -151,12 +175,20 @@ func (a *StreamAccumulator) Result() StreamResult {
 	}
 	sort.Ints(indexes)
 	calls := make([]contract.ToolCall, 0, len(indexes))
+	var truncated []string
 	for _, index := range indexes {
 		call := a.calls[index]
 		if call.name != "" {
 			id := call.id
 			if id == "" {
 				id = fmt.Sprintf("tool_%d", index)
+			}
+			// TB01: a cap-hit closes the stream cleanly, so incomplete arguments
+			// arrive looking like any other call. finish=="length" plus invalid
+			// JSON is a certain diagnosis; empty arguments are legitimate for a
+			// no-parameter tool, so they never count as truncated.
+			if a.finish == "length" && strings.TrimSpace(call.arguments) != "" && !json.Valid([]byte(call.arguments)) {
+				truncated = append(truncated, id)
 			}
 			calls = append(calls, contract.NewToolCall(id, call.name, call.arguments))
 		}
@@ -165,7 +197,7 @@ func (a *StreamAccumulator) Result() StreamResult {
 	if len(a.reasoningDetails) > 0 {
 		reasoningDetails, _ = json.Marshal(a.reasoningDetails)
 	}
-	return StreamResult{Content: a.content, Reasoning: a.reasoning, ReasoningDetails: reasoningDetails, ToolCalls: calls, Usage: a.usage, FinishReason: a.finish}
+	return StreamResult{Content: a.content, Reasoning: a.reasoning, ReasoningDetails: reasoningDetails, ToolCalls: calls, Usage: a.usage, FinishReason: a.finish, TruncatedCalls: truncated, Upstream: a.upstream}
 }
 
 func parseReasoningDetails(value any) (string, []json.RawMessage) {

@@ -13,37 +13,40 @@ import (
 	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
-// The session advisor (NATIVE_AGENT_PLAN §6 E2). Caching is the priority, so
-// the session's models are FROZEN once work begins: a mid-session switch
-// cold-starts the main prefix AND breaks the execution chain's continuation,
-// which is the opposite of what this architecture exists to protect.
+// The task advisor. When a prompt arrives, a cheap utility call decides which
+// model should run THIS task; that model is then fixed until the task ends.
+// Every request inside a task therefore goes to one model, which is what makes
+// the provider's implicit prefix cache work at all.
 //
-// The advisor therefore runs at most ONCE, on the first prompt of a session,
-// before the first main request — the only moment when a switch is free
-// because nothing is cached yet. Its expected answer is "keep": the configured
-// pairing (MiniMax M3 planning, DeepSeek V4 Pro executing) covers almost
-// everything. It exists for the case where a session's first task obviously
-// outgrows the configured main model's context or capability.
-//
-// A different workload arriving MID-session does not switch anything: it gets
-// the fresh-session advisory instead (see freshSessionAdvice).
+// Its expected answer is "keep". A switch is a real cost — the new model has
+// never seen this conversation, so the whole prefix is re-billed as uncached
+// input on its first request — and the advisor is told that cost in tokens
+// before it answers (see switchcost.go). Two hard gates back that up: the
+// conversation must FIT the candidate's window, and the cold start must be
+// affordable. Keeping a merely-adequate warm model beats a marginally better
+// cold one on nearly every task.
 
 // advisorMaxTokens keeps the aux call trivially cheap; the answer is one small
 // JSON object.
 const advisorMaxTokens = 200
 
-// advisorDecision is the utility model's answer.
+// advisorDecision is the utility model's answer: keep the current model, or
+// name the one this task should run on.
 type advisorDecision struct {
-	Keep bool   `json:"keep"`
-	Main string `json:"main"`
-	Sub  string `json:"sub"`
-	Why  string `json:"why"`
+	Keep  bool   `json:"keep"`
+	Model string `json:"model"`
+	Why   string `json:"why"`
 }
 
-// utilityModelID resolves the cheap "instructing" model used for aux calls
-// (the advisor, onboarding). It prefers a Flash-class model in the catalog and
-// falls back to the configured subagent model, so a catalog without one still
-// works rather than failing.
+// utilityModelID resolves the cheap model used for auxiliary calls (the task
+// advisor, onboarding questions). These are one-shot, low-token, and off the
+// session's cached stream, so the cheapest capable model is the right one.
+//
+// Preference order: a Flash-class model, then the smallest-window catalog entry
+// (a proxy for cheapest), then the active model. The last fallback matters: it
+// guarantees a usable id even for a single-model catalog, where the old
+// fallback (the configured subagent model, a field the unified session no
+// longer maintains) could be empty and silently break the aux call.
 func (e *Engine) utilityModelID() string {
 	for _, model := range e.settings.Provider.Models {
 		name := strings.ToLower(model.ID + " " + model.Name)
@@ -51,21 +54,34 @@ func (e *Engine) utilityModelID() string {
 			return model.ID
 		}
 	}
-	return e.settings.Provider.SubagentModelID
+	cheapest, window := "", 0
+	for _, model := range e.settings.Provider.Models {
+		if model.ContextLimit > 0 && (window == 0 || model.ContextLimit < window) {
+			cheapest, window = model.ID, model.ContextLimit
+		}
+	}
+	if cheapest != "" {
+		return cheapest
+	}
+	return e.settings.Provider.ActiveModelID
 }
 
-// shouldRunAdvisor reports whether this task is the session's first, with the
-// advisor enabled and the roles not user-pinned. Everything else — every later
-// task in the session — is a hard no: that is what makes "models never change
-// mid-session" a mechanical invariant rather than a convention.
+// shouldRunAdvisor reports whether the advisor may choose a model for the task
+// about to start. It runs at EVERY task boundary — the only moment a switch is
+// safe, because no request has been made yet — and the model it picks is then
+// fixed for that whole task.
+//
+// It used to run only on a session's first task, freezing the pairing forever,
+// because a mid-session switch cold-started the prefix AND broke the execution
+// chain's continuation. The execution chain is gone with the subagents, and the
+// remaining cost (a one-time cold start on the new model) is a price the
+// advisor is explicitly told to weigh rather than a reason to forbid the choice.
 func (e *Engine) shouldRunAdvisor() bool {
 	if strings.EqualFold(strings.TrimSpace(e.settings.Provider.Advisor), "off") {
 		return false
 	}
+	// A user-pinned model is never overridden.
 	if e.settings.Provider.RolesPinned {
-		return false
-	}
-	if e.UsageAggregate().Requests > 0 {
 		return false
 	}
 	// Nothing to choose between.
@@ -73,8 +89,9 @@ func (e *Engine) shouldRunAdvisor() bool {
 }
 
 // advisorCatalog renders the model universe for the prompt: id, window, family,
-// and whether the family supports continuation (which is what makes a model a
-// good executor). Sorted for determinism.
+// and whether the family supports continuation — which tells the advisor how
+// well a long conversation will keep hitting cache there. Sorted for
+// determinism, so the advisor prompt is byte-stable across turns.
 func advisorCatalog(models []contract.Model) string {
 	lines := make([]string, 0, len(models))
 	for _, model := range models {
@@ -87,7 +104,7 @@ func advisorCatalog(models []contract.Model) string {
 		if window <= 0 {
 			window = profile.DefaultContextWindow
 		}
-		lines = append(lines, fmt.Sprintf("- %s — window %s, family %s, continuation %s", model.ID, contract.HumanTokens(window), profile.Family, continuation))
+		lines = append(lines, fmt.Sprintf("- %s — window %s, family %s, continuation %s", model.ID, contract.FullTokens(window), profile.Family, continuation))
 	}
 	sort.Strings(lines)
 	return strings.Join(lines, "\n")
@@ -113,57 +130,33 @@ func (e *Engine) reconcileCatalog() {
 	for _, model := range e.settings.Provider.Models {
 		known[model.ID] = true
 	}
-	for _, role := range []struct {
-		name, configured string
-	}{
-		{"main", e.settings.Provider.ActiveModelID},
-		{"subagent", e.settings.Provider.SubagentModelID},
-	} {
-		if role.configured == "" || known[role.configured] {
-			continue
-		}
-		replacement := e.substituteFor(role.name)
-		if replacement.ID == "" {
-			e.callbacks.EmitNotice(fmt.Sprintf("The %s model %q is not available on this gateway and no substitute was found — requests will fail until the catalog or your config is corrected.", role.name, role.configured))
-			continue
-		}
-		addendum := ""
-		if role.name == "main" {
-			addendum = gateway.ResolveModelProfile(replacement.ID + " " + replacement.Name).PromptAddendum
-		}
-		if err := e.applyModelSwitch(context.Background(), role.name, replacement.ID, replacement.Name, addendum); err != nil {
-			continue
-		}
-		e.callbacks.EmitNotice(fmt.Sprintf("The %s model %q is not available on this gateway; using %s for this session.", role.name, role.configured, replacement.Name))
+	configured := e.settings.Provider.ActiveModelID
+	if configured == "" || known[configured] {
+		return
 	}
+	replacement := e.substituteFor()
+	if replacement.ID == "" {
+		e.callbacks.EmitNotice(fmt.Sprintf("The configured model %q is not available on this gateway and no substitute was found — requests will fail until the catalog or your config is corrected.", configured))
+		return
+	}
+	addendum := gateway.ResolveModelProfile(replacement.ID + " " + replacement.Name).PromptAddendum
+	if err := e.applyModelSwitch(context.Background(), "main", replacement.ID, replacement.Name, addendum); err != nil {
+		return
+	}
+	e.callbacks.EmitNotice(fmt.Sprintf("The configured model %q is not available on this gateway; using %s instead.", configured, replacement.Name))
 }
 
-// substituteFor picks the best available stand-in for a missing role.
+// substituteFor picks the best available stand-in when the configured model is
+// missing from the catalog: the largest window, which is the safest default for
+// a session whose conversation has to fit. Ties break on ID so a broken catalog
+// produces the same choice every run.
 //
-// For the EXECUTOR: keep it distinct from the planner first (the design is a
-// cheap executor under an expensive planner — collapsing both roles onto the
-// big model would work but would quietly multiply the session's cost), then
-// prefer a family that supports continuation, since the session-long cache
-// chain is built on it, and only then the larger window.
-//
-// For the PLANNER: the largest window, which is what planning needs.
-//
-// Ties break on ID so a broken catalog produces the same choice every run.
-func (e *Engine) substituteFor(role string) contract.Model {
+// The per-role variant (a cheap executor kept distinct from an expensive
+// planner, preferring a continuation-capable family) went with the roles.
+func (e *Engine) substituteFor() contract.Model {
 	models := append([]contract.Model(nil), e.settings.Provider.Models...)
-	main := e.settings.Provider.ActiveModelID
 	sort.Slice(models, func(i, j int) bool {
 		left, right := models[i], models[j]
-		if role == "subagent" {
-			if leftIsMain, rightIsMain := left.ID == main, right.ID == main; leftIsMain != rightIsMain {
-				return rightIsMain // the planner's own model sorts last
-			}
-			leftChain := gateway.ResolveModelProfile(left.ID+" "+left.Name).ContinuationLinking == gateway.ContinuationSupported
-			rightChain := gateway.ResolveModelProfile(right.ID+" "+right.Name).ContinuationLinking == gateway.ContinuationSupported
-			if leftChain != rightChain {
-				return leftChain
-			}
-		}
 		if left.ContextLimit != right.ContextLimit {
 			return left.ContextLimit > right.ContextLimit
 		}
@@ -175,12 +168,12 @@ func (e *Engine) substituteFor(role string) contract.Model {
 	return models[0]
 }
 
-// runSessionAdvisor consults the utility model once and applies its choice.
-// Every failure mode — disabled, no catalog, timeout, malformed answer,
-// unknown id, apply error — keeps the configured models silently. The advisor
-// must never be a point of failure; a session that starts is worth more than a
-// marginally better model.
-func (e *Engine) runSessionAdvisor(ctx context.Context, prompt string, workspaceSignal string) {
+// runTaskAdvisor consults the utility model at a task boundary and applies its
+// choice for that task. Every failure mode — disabled, pinned, no catalog,
+// timeout, malformed answer, unknown id, a window that will not fit, an apply
+// error — keeps the current model silently. The advisor must never be a point
+// of failure: a task that runs is worth more than a marginally better model.
+func (e *Engine) runTaskAdvisor(ctx context.Context, prompt string, workspaceSignal string) {
 	if !e.shouldRunAdvisor() {
 		return
 	}
@@ -188,9 +181,17 @@ func (e *Engine) runSessionAdvisor(ctx context.Context, prompt string, workspace
 	if strings.TrimSpace(modelID) == "" {
 		return
 	}
-	configuredMain, configuredSub := e.settings.Provider.ActiveModelID, e.settings.Provider.SubagentModelID
-	user := fmt.Sprintf("CONFIGURED\nmain %s\nsub %s\n\nAVAILABLE MODELS\n%s\n\nWORKSPACE\n%s\n\nTASK\n%s",
-		configuredMain, configuredSub, advisorCatalog(e.settings.Provider.Models), workspaceSignal, contract.TruncateEllipsis(prompt, 2000))
+	current := e.settings.Provider.ActiveModelID
+	// Tell the advisor what a switch would COST, not just what is available.
+	// Without this it optimizes capability in a vacuum and proposes moves that
+	// re-send an entire conversation uncached to win a marginally better model.
+	coldStart := e.inUseContextTokens()
+	warm := "none yet"
+	if models := e.warmModelsThisSession(); len(models) > 0 {
+		warm = strings.Join(models, ", ")
+	}
+	user := fmt.Sprintf("CURRENT\n%s\n\nAVAILABLE MODELS\n%s\n\nSWITCH COST\nMoving to a model this session has not used re-sends about %s tokens of conversation uncached. Already warm this session: %s.\n\nWORKSPACE\n%s\n\nTASK\n%s",
+		current, advisorCatalog(e.settings.Provider.Models), contract.FullTokens(coldStart), warm, workspaceSignal, contract.TruncateEllipsis(prompt, 2000))
 
 	callCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	started := time.Now()
@@ -209,38 +210,48 @@ func (e *Engine) runSessionAdvisor(ctx context.Context, prompt string, workspace
 		return e.recordAuxUsage(ctx, modelID, ":sub:advisor", response.Usage, elapsedMS(started))
 	})
 	if err != nil {
-		e.recordHarnessEvent(ctx, contract.HarnessRecovery, "advisor-unavailable", "keeping the configured models")
+		e.recordHarnessEvent(ctx, contract.HarnessRecovery, "advisor-unavailable", "keeping the current model")
 		return
 	}
 	decision, ok := parseAdvisorDecision(response.Content)
 	if !ok || decision.Keep {
 		return
 	}
-	mainID := e.resolveCatalogModel(decision.Main)
-	subID := e.resolveCatalogModel(decision.Sub)
-	if mainID == "" && subID == "" {
+	chosen := e.resolveCatalogModel(decision.Model)
+	if chosen == "" || chosen == current {
 		return
 	}
-	applied := false
-	if subID != "" && subID != configuredSub {
-		if e.applyModelSwitch(ctx, "subagent", subID, e.catalogModelName(subID), "") == nil {
-			applied = true
-		}
+	// Two hard gates the advisor cannot talk its way past.
+	//
+	// FIT: the conversation this task inherits must fit the new model's window.
+	// Switching into a smaller window would silently drop the oldest messages at
+	// assembly time — context destruction disguised as a model upgrade.
+	if !e.historyFitsModel(chosen) {
+		e.recordHarnessEvent(ctx, contract.HarnessRecovery, "model-switch-declined", "conversation does not fit "+chosen)
+		return
 	}
-	if mainID != "" && mainID != configuredMain {
-		profile := gateway.ResolveModelProfile(mainID + " " + e.catalogModelName(mainID))
-		if e.applyModelSwitch(ctx, "main", mainID, e.catalogModelName(mainID), profile.PromptAddendum) == nil {
-			applied = true
-		}
+	// COST: a model this session has never used holds no cache for this
+	// conversation, so it re-reads every token at full price. That is affordable
+	// while the conversation is small, and affordable at any size when returning
+	// to a model already warm here. Otherwise the switch costs more than it can
+	// plausibly win, and the current model — whose cache IS warm — keeps the task.
+	if cost := e.switchCost(chosen); !cost.Affordable {
+		e.recordHarnessEvent(ctx, contract.HarnessRecovery, "model-switch-declined",
+			fmt.Sprintf("cold start of %s on %s costs more than the switch can win", contract.FullTokens(cost.ColdStartTokens), chosen))
+		return
 	}
-	if applied {
-		reason := strings.TrimSpace(decision.Why)
-		if reason == "" {
-			reason = "better fit for this session"
-		}
-		e.callbacks.EmitNotice("Models for this session: " + e.settings.Provider.ActiveModelID + " planning, " + e.settings.Provider.SubagentModelID + " executing — " + reason)
+	profile := gateway.ResolveModelProfile(chosen + " " + e.catalogModelName(chosen))
+	if e.applyModelSwitch(ctx, "main", chosen, e.catalogModelName(chosen), profile.PromptAddendum) != nil {
+		return
 	}
+	reason := strings.TrimSpace(decision.Why)
+	if reason == "" {
+		reason = "better fit for this task"
+	}
+	e.callbacks.EmitNotice("Switched to " + e.catalogModelName(chosen) + " for this task — " + reason)
 }
+
+// historyFitsModel and the switch-cost helpers live in switchcost.go.
 
 // parseAdvisorDecision tolerates a fenced code block around the JSON, which
 // small models often add despite instructions.

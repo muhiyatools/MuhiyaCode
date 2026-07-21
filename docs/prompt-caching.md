@@ -7,7 +7,7 @@ is applied at the next deliberate boundary and recorded as an invalidation event
 
 Use a concrete model such as `deepseek-v4-flash` instead of a router that may choose a different
 backing model per request. Model changes intentionally start a new provider cache scope — which is
-why the session's models are frozen once work begins (see "Session-stable models" below).
+why the model for a task is frozen once that task begins (see "Task-stable model" below).
 
 ## Session routing pin (C1)
 
@@ -18,140 +18,178 @@ client-side byte-stability guard can see it.
 
 The header is derived once from the session ID and never changes within a session. Each stream
 gets a distinct suffix so interleaved traffic on different models does not thrash the pin.
-The live wire pins (feature 011 D4 per-kind pins; corrected here by feature 012 R-D14 — code is
-the source of truth):
+The live wire pins (code is the source of truth):
 
 - Main loop: `<sessionID>:main`
-- Subagent runs, per capability class: `<sessionID>:sub:explore`, `:sub:general`, `:sub:review`
 - Onboarding: `<sessionID>:sub:onboarding`
-- Session advisor: `<sessionID>:sub:advisor` (one utility-model call on the session's first
-  prompt; ledgers under the `:sub:advisor` label)
+- Task advisor: `<sessionID>:sub:advisor` (one utility-model call at the start of every task;
+  ledgers under the `:sub:advisor` label)
 - Compaction: `<sessionID>:main` on the wire (same `ActiveModelID` as main — shares the routing
   pin) while its usage record ledgers under the `:aux` label — wire pins and ledger pins are not
   1:1 for this stream
 - There is no `:aux` wire pin: task classification is a local heuristic and sends no request
 
-There is no `:sub:plan` pin: v1.1.0 removed the planning pipeline and its dedicated agent kind.
-Planning is now a section of the main model's cached prefix, not a delegated run. The three
-capability classes above are the complete set.
+The per-capability-class subagent pins (`:sub:explore`, `:sub:general`, `:sub:review`) are gone
+with the subagent system itself, and so is the plan-kind pin that preceded them. There is no
+dispatched work left to pin separately from the one session doing everything on `:main`; the two
+remaining `:sub:` pins are both auxiliary calls — onboarding and the task advisor — never a
+delegated run.
 
 The value is header-only; it is never serialized into the JSON request body. Two consecutive
-requests of the same stream carry an identical header, and the per-kind suffixes keep each
-kind's prefix-cache identity independent.
+requests of the same stream carry an identical header, and the per-stream suffixes keep each
+stream's prefix-cache identity independent.
 
-`run_subagent` accepts an optional `role` ("auth-flow-mapper") that names a run in the transcript,
-but the pin, the per-kind system message, and the context record's `Kind` all stay keyed on the
-fixed capability class. A free-form name is display and handoff only, so it can never fragment the
-provider cache into one namespace per invented role.
+## Upstream affinity (OpenRouter)
 
-## Session-stable models (v1.1.0)
+The session pin above governs routing *inside the gateway*. It has no authority over what
+OpenRouter does next, and that is a second, independent place the cache can die.
 
-Three roles carry a session: MAIN plans, analyzes, and instructs (default MiniMax M3); EXECUTION
-makes every workspace change from inside subagents (default DeepSeek V4 Pro); UTILITY serves cheap
-auxiliary calls such as the advisor and onboarding (DeepSeek V4 Flash, resolved from the catalog by
-name with a fallback to the configured subagent model). There is no `/model` command and no model
-name in the TUI chrome — the user does not manage models.
+A model slug on OpenRouter is served by several upstream providers, and **each one keeps its own
+prompt cache**. Nothing in the OpenAI request format expresses a preference, so OpenRouter is free
+to re-route between turns — and the next request re-reads the whole conversation as uncached input
+while every byte we sent is identical to the turn before. No client-side stability guard can see
+it, because nothing on our side changed. Observed live: a 30,592-token prompt returning a 114-token
+cache read in a session otherwise running at 83%.
 
-The roles are **frozen for the session** once work begins. A mid-session switch would pay twice: it
-cold-starts the main prefix under a new provider cache scope, and it fails the context linker's
-stream-identity check (`model-changed`), collapsing the execution chain to a digest-seeded start.
-Freezing is what lets both the main prefix and the session-long execution chain hold for a whole
-session rather than only until the next model decision.
+The session therefore learns its upstream and asks to go back to it:
 
-A session advisor enforces that mechanically. It runs at most once, on the session's first prompt,
-before the first main request — the only moment when a switch is free because nothing is cached
-yet. It runs on the utility model, is bounded to a small JSON answer, and its expected outcome is
-to keep the configured pairing. An unavailable, malformed, or unknown-id answer keeps the
-configured models and records a recovery event. Every later task in the session is a hard no.
+1. Request 1 carries no preference — nothing is known yet.
+2. OpenRouter names the upstream that served it (`provider`, in every chunk). The SSE accumulator
+   reads it into `StreamResult.Upstream`; it is recorded on the usage record.
+3. Every later request carries `provider: {order: [<upstream>], allow_fallbacks: true}`.
 
-Genuinely different large work arriving mid-session gets a one-line advisory that `/new` would give
-it a clean start; nothing switches underneath a warm session. To take manual control,
-`muhiyacode config set model <id>` and `config set subagentModel <id>` pin the roles (the advisor
-proposes, it never overrides an explicit choice), and `config set advisor off` disables it
-entirely. A 24h TTL refresh keeps the gateway model catalog current so the advisor and the
-resolvers are choosing from real entries.
+Three properties are deliberate:
 
-## The cached prefix (v1.1.0 epoch)
+- **Learned, not configured.** The set of upstreams behind a slug changes without notice, so a
+  hardcoded list would rot and a wrong name is worse than none. Whoever served us first is by
+  definition both reachable and holding our prefix.
+- **A preference, never a restriction.** `allow_fallbacks` stays true and `provider.only` is never
+  sent. A hard pin converts an upstream outage into a failed task — a total loss traded against one
+  cold prefix. When a fallback does happen the session adopts the new upstream rather than asking
+  forever for a machine that is not answering.
+- **It cannot fail a task.** A pinned request refused with a non-retryable status is immediately
+  retried without the pin, and the rejection latches off for the process. A 4xx is terminal in the
+  retry loop, so without that branch a route that did not forward the field would turn every task
+  into a hard failure.
+
+An upstream *change* is reported once, with both sides named, and retires the warm-model ledger —
+the advisor must not price a switch against a cache an upstream flip already destroyed.
+
+The pin survives a restart. It is persisted on the prefix-shape sidecar and restored in
+`NewEngine`, because resume is the single most expensive request in a session — the conversation
+is at its largest — so landing it on a machine that never saw the conversation is the worst
+placement miss available. A flip re-arms the sidecar, so a resume pins to where the session ended
+rather than where it began. Warmth is deliberately *not* restored: a pin is a preference a router
+may ignore, but warmth is an assertion about what a provider still holds, and that cannot be known
+after a restart.
+
+`provider.order` takes lowercase **slugs** (`novita`, `deepinfra`, `atlas-cloud`) while the
+response reports **display names** (`Novita`, `DeepInfra`, `AtlasCloud`), and an entry matching no
+slug is skipped *silently*. Passing the reported name verbatim would therefore pin nothing and
+report no error. `upstreamOrderCandidates` sends every plausible spelling — base slug first, then
+the camel-hyphenated form, then the value verbatim — because unmatched entries cost nothing and a
+silent no-op costs a full prefill.
+
+One consequence worth knowing: a model slug behind a router is not one window. The upstreams
+serving MiniMax M3 range from 256k to 1M context while the catalog carries the largest, so a
+conversation past `routedWindowFloorTokens` (500k) can fail outright if a fallback puts it on a
+smaller peer. That is an advisory, not a gate — one notice per compaction cycle suggesting
+`/compact`, because the request may well succeed and refusing work over a resolvable risk would be
+worse.
+
+A direct provider connection sends no `provider` field at all. The value stays empty, no preference
+is ever sent, and the whole mechanism is silently inert. Its absence across a session is itself the
+answer to "is a routing layer even in this path?".
+
+## Task-stable model
+
+There is one model, not three roles: it plans, edits, and verifies, plus a **utility model**
+resolved on the fly for cheap auxiliary calls (the task advisor's own call, onboarding) — whichever
+catalog entry's id or name contains "flash", or failing that the smallest-window entry, or failing
+that the active model itself. There is no `/model` command and no model name in the TUI chrome —
+the user does not manage models.
+
+The model is **frozen for a task**, not a session. A mid-task switch would cold-start the main
+prefix under a new provider cache scope for no reason a task boundary would not also serve, so
+nothing switches once a task's first request has gone out. Between tasks the model is free to
+move — caching is no longer a reason to hold it still for the rest of the session, because there is
+no execution chain left to break by moving it.
+
+A **task advisor** enforces that on a schedule, not a one-time gate. It runs at the start of every
+task, before that task's first main request — the only moment a switch is free because nothing for
+this task is cached yet. It runs on the utility model, is bounded to a small JSON answer (200 max
+tokens, 8-second timeout), and its expected outcome is to keep the current model. Two hard gates
+back it up and it cannot override either:
+
+- **FIT** — the inherited conversation must fit the candidate's context window with roughly 30%
+  growth headroom plus its output budget, or the assembler would silently drop the oldest messages.
+- **COST** — a model this session has never used holds no cache for this conversation and re-reads
+  all of it as uncached input on its first request. That is affordable under `coldStartCapTokens`
+  (25,000 tokens) regardless of warmth, and affordable at any size when the candidate is already
+  **warm** — this session has already sent it the conversation at its current revision. Otherwise
+  the proposal is declined and the current model, whose cache already holds the prefix, keeps the
+  task.
+
+Warmth is a per-session ledger (`Engine.warmPrefix`: model id → history revision), written only
+when a main-stream request completes, so the advisor's own call and other auxiliary traffic never
+count as warming a model. A compaction, a pressure trim, or a completed-task fold rewrites earlier
+messages in place and retires every model's recorded warmth with it, since their cached prefixes
+now describe a conversation that no longer exists. A resumed session starts with an empty warm
+ledger and treats every model as cold — the conservative choice for a resume. The advisor's prompt
+is shown the cold-start figure and the warm-model list under a `SWITCH COST` heading, and the same
+list is what the `/context` card's "Warm:" row reads from (see *Reading the metrics* below).
+
+An unavailable, malformed, or unknown-id advisor answer keeps the current model and records a
+recovery event, same as a FIT or COST decline. Genuinely different large work arriving mid-session
+that shares nothing with what the session has already done gets a separate, one-line advisory
+instead — that `/new` would give it a clean start — because a different model bolted onto a
+conversation still full of unrelated history saves nothing; the model choice and the conversation's
+cache are different problems. To take manual control, `muhiyacode config set model <id>` pins the
+model (pinning disables the advisor outright), and `config set advisor off` disables it directly. A
+24h TTL refresh keeps the gateway model catalog current so the advisor and the utility-model
+resolution are choosing from real entries.
+
+## The cached prefix (the unified-session epoch)
 
 The stable prefix is the system prompt plus the serialized tool definitions, composed once per
-session. The v1.1.0 prompt sections are: OPERATING CONTRACT, CONTEXT AND EDIT DISCIPLINE, CACHE
-DISCIPLINE, PLANNING, TOOLS AND RECOVERY, DELEGATION, COMMUNICATION, SAFETY, ENVIRONMENT.
+session. The current prompt sections are: OPERATING CONTRACT, CONTEXT AND EDIT DISCIPLINE, CACHE
+DISCIPLINE, PLANNING, TOOLS AND RECOVERY, MODEL, COMMUNICATION, SAFETY, ENVIRONMENT. `DELEGATION`
+is gone; `MODEL` takes its slot — a short, session-invariant section telling the model that its
+model may change between tasks, that it must never narrate or request a switch, and that every
+earlier turn is its own regardless of which model produced it.
 
-Relative to v1.0.6 this epoch removed the planning-pipeline prose and its tools (`update_plan`,
-`exit_plan_mode`, `read_plan`) and added a plan/execute contract, a `tasks.md` checklist
-convention, the PLANNING section, and the field-test fixes below. It still came out smaller: the
-system prompt went 5777 → 5246 chars and the tool JSON 20317 → 18578 bytes. A compile-time ratchet
-caps the prompt at 5700 chars and a wire golden pins the exact prefix bytes, so every addition has
-to be paid for by tightening something else.
+Relative to v1.1.0 this epoch removed the subagent system entirely — dispatch, the plan/execute
+role gate, and context linking between delegated runs — so the one remaining session got back
+everything the execution agent used to be told alone: the `edit_file`/`multi_edit` contract, the
+`write_file` permission rule, the chunked-write rule, and the preserve-user-work clauses, now
+folded into `CONTEXT AND EDIT DISCIPLINE` for the single model that both reads and edits. The
+system prompt grew accordingly — +708 characters, to 6,101 against a 6,120 regression ceiling —
+but the fixed prefix it rides beside did not: prompt plus tool JSON fell from 24,393 to 21,908
+bytes (-10.2%), because deleting `run_subagent`'s schema (its description plus the task/role/skills
+property texts) cut the tool JSON by 3,214 bytes, more than paying for the prompt's growth. The
+reasoning is recorded in `prompt_budget_test.go` rather than in the commit alone, because a ratchet
+that rises without a stated reason is not a ratchet.
 
-The ratchet moved once inside this release, 5440 → 5700, tracking a +257-char growth in the
-composed prompt (5428 → 5685 as measured with web + subagents available; the wire golden composes
-a few less without web). The reasoning is recorded in `prompt_budget_test.go` rather than in the
-commit alone, because a ratchet that rises without a stated reason is not a ratchet. Those chars
-buy exactly two things, both of which remove *recurring per-task* waste at a *one-time* prefix
-cost:
-
-- **Trust the report (contract rule 5).** The field test exposed a contradiction — the contract
-  said "run the checks yourself" while DELEGATION said "treat its report as ground truth" — and
-  the model resolved it by re-reading, on the main stream, every file an agent had just verified.
-  A one-time prompt cost that deletes a per-task re-verification loop is the cheapest trade
-  available at this size. `CACHE DISCIPLINE` now names agent reports as current truth alongside
-  past reads, searches, and edit diffs, so re-checking a verified report is cache waste by
-  definition.
-- **The executor-ready standard (PLANNING step 3).** A `tasks.md` item must be runnable by the
-  cheaper executor without further design decisions; an under-specified item costs far more in
-  executor turns than the sentence costs in prefix.
-
-Paid for in part by deleting the old rule 5 (it duplicated DELEGATION), the agent-allowance
-clauses, and handoff detail that was stated twice.
+The old two-way trade no longer applies the same way: a "trust the report" contract rule paid for
+by deleting the `DELEGATION` prose it replaced assumed a second party's report to trust, and there
+is none now. `OPERATING CONTRACT` rule 5 states verification directly instead: run the check that
+proves a change works, then tick its item; never report a result you did not observe. `PLANNING`
+step 3's executor-ready standard is unchanged in substance — an item should still name its files,
+its change, and its check well enough to run without further design decisions — even though the
+model writing the plan and the model carrying it out are now, always, the same one.
 
 Two things deliberately stay **out** of the prefix:
 
-- **`tasks.md`** — the model's multi-step checklist lives at the workspace root and is written with
-  ordinary file tools. It changes constantly; injecting it would invalidate the prefix every turn.
-  The harness instead observes writes to that path in the shared dispatch gate (so main-loop and
-  subagent edits both count), re-parses it, and feeds the to-do panel. The model reads it on
-  demand like any other file.
+- **`tasks.md`** — the model's multi-step checklist is written with ordinary file tools, usually at
+  the workspace root or in the directory the work targets. It changes constantly; injecting it
+  would invalidate the prefix every turn. The harness instead observes writes to that path in the
+  dispatch gate, re-parses it, and feeds the to-do panel. The model reads it on demand like any
+  other file.
 - **Per-turn dynamics** — date, task class, and its tool/turn budgets still ride the newest user
-  message. The brief carries no subagent count: delegation scale is the model's judgment, so there
-  is no allowance to render, spend down, or keep consistent with an enforced cap.
+  message.
 
-Resumed sessions pay one attributed cold start the first time they run on v1.1.0, then the new
-prefix is byte-stable.
-
-## Subagent context linking (feature 012)
-
-A continuation subagent replays its predecessor's stored transcript verbatim on the
-predecessor's exact pin and appends one user message, so the provider serves the shared prefix
-from cache (DeepSeek: token-0 identity in 64-token blocks; MiniMax: passive cache over
-tool-list → system → messages with a 512-token floor). The subagent system message is
-per-kind-per-session stable — the per-run handoff rides the first user message — so even fresh
-dispatches of a kind share the cached system+tools prefix. Continuation records live under
-`~/.muhiya/sessions/<id>/agents/` (compact JSON: re-indenting raw `reasoning_details` would
-change replayed bytes). Every dispatch's link decision, reason, and provider-verified cache
-share appear in the task summary and bench records; `contextLinking=off` restores pre-012
-dispatch behavior exactly.
-
-### The session-long execution chain
-
-CL-1 originally required a relatedness predicate before continuing a chain across task
-boundaries. v1.1.0 drops that bar for the **execution** class only: a `general` dispatch continues
-the session's most recent linkable `general` record across tasks unconditionally, and the decision
-is recorded with reason `session-chain` instead of `eligible`.
-
-The justification is the plan/execute split. The main model no longer changes files, so `general`
-makes every workspace change in the session — the workspace is its shared subject by construction,
-and the session-frozen executor model keeps stream identity intact for the whole session. That is
-what lets one warm sub-agent context survive across prompts rather than being rebuilt per task.
-
-`explore` and `review` keep the relatedness requirement. Research context is topic-specific, and
-carrying an unrelated investigation forward pollutes the reasoning instead of saving tokens.
-
-Every other CL-1 criterion is unchanged and still evaluated in order for a cross-task chain: kind
-pair, terminal shape, model identity, pin derivation, staleness against end-of-run fingerprints,
-window fit, and provider support. Any failure falls back to a digest-seeded start with the failing
-criterion as the reason, exactly as before. The distinct `session-chain` reason exists so the
-ledger and bench JSON can measure cross-task reuse rather than assume it.
+Resumed sessions pay one attributed cold start the first time they run past this upgrade, then the
+new prefix is byte-stable.
 
 ## Maintenance scheduling and the anti-thrash latch (C4)
 
@@ -173,24 +211,37 @@ the context does not fill up. The `/context` report surfaces the latch state as
 
 ## Reading the metrics
 
-`/context` reports prompt and output totals, cache-read and uncached input, session, raw
-steady-state, and prefix-stability rates, per-stream request counts, unavailable usage records,
-recent invalidations, and context pressure.
-The activity line shows a compact tag such as `cache 99% (12.3k read / 128 new)`. `unavailable`
-means the endpoint did not provide trustworthy cache figures; it is never treated as zero.
+`/context` is an essentials card (013 FR-023): context in-use/free, session prompt and output
+totals, cache-read and uncached input, the session hit rate, session cost, and a `Model` group. The
+`Model` group always shows a `Running:` row for the model handling the current task, and — only
+when more than one model is warm — a `Warm:` row listing every model this session has already sent
+the conversation to, most recently used first (see *Task-stable model* above). Every token figure
+is a complete, comma-grouped count — cached tokens included, never abbreviated. The diagnostics it
+used to carry (per-model and per-pairing rows, the estimated category split, invalidation history,
+pressure internals, API/active time, lines±, the steady-state rate) remain available to benchmark
+tooling through `ContextReport` and the usage ledger; they are simply no longer rendered.
+
+**The displayed session hit rate spans every stream** — main loop and auxiliary calls (013 FR-021,
+`SessionUsageAggregate.AllStreamHitRate`). The main-stream-only `SessionHitRate` and the
+steady-state rate keep their existing definitions as benchmark KPIs so historical comparisons stay
+meaningful, but neither is shown to the user.
+
+The activity line shows the task's complete token count plus a percentage-only tag such as
+`cache 99%`. `unavailable` means the endpoint did not provide trustworthy cache figures; it is
+never treated as zero.
 
 ### Task-lifecycle usage and rate honesty (C6/C7)
 
 The live activity line and the end-of-task summary describe the **whole current task**, not the
 last request. After every recorded request the engine emits the task-cumulative usage —
-`Σ(usage)` over every request the task made across the main, subagent, and aux (onboarding,
+`Σ(usage)` over every request the task made across the main and aux (onboarding, the task advisor,
 compaction) streams, measured from a baseline snapshot taken at task start. The live cache tag and
-the summary's `cache %` therefore always agree by construction; a task that delegates to a
-subagent shows the subagent's tokens folded into the same figure rather than a main-loop-only
-number that snaps back at the end.
+the summary's `cache %` therefore always agree by construction, whether the task ran on one model
+throughout or the advisor moved it to a different one at the task boundary.
 
-Rate arithmetic — the session and steady-state rates in `/context` **and** the per-task delta the
-summary divides — draws only on records that reported **both** cache operands (the paired sums). A
+Rate arithmetic — every rate, including the all-stream rate shown in `/context` **and** the
+per-task delta the summary divides — draws only on records that reported **both** cache operands
+(the paired sums). A
 provider payload that reports a cache read with an underivable miss (or vice versa) still
 contributes to the displayed `Cache read / uncached` totals, but never to a rate denominator, so a
 one-sided record can never fabricate part of a hit rate. Reads and misses without a partner are
@@ -255,8 +306,8 @@ user turn.
   prior digests byte-identical (no lossy re-summarization); the summarizer is bounded to 90s
   with one retry and a mechanical fallback so compaction always frees context and never loops.
 - **Session routing pin** — every request carries `X-Muhiya-Session` with a per-stream suffix
-  (`:main` for the loop + compaction, `:sub` for subagents + onboarding) so the gateway keeps a
-  session pinned to one model; DeepSeek's cache is per-model, so a route flip would wipe it.
+  (`:main` for the loop + compaction, `:sub` for onboarding and the task advisor) so the gateway
+  keeps a session pinned to one model; DeepSeek's cache is per-model, so a route flip would wipe it.
 
 ## Feature 005: project context and memory (cache-neutral)
 

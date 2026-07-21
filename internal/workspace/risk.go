@@ -3,6 +3,8 @@ package workspace
 import (
 	"regexp"
 	"strings"
+
+	"github.com/muhiya/muhiyacode/internal/shellsafe"
 )
 
 type ShellRisk struct {
@@ -16,7 +18,11 @@ type riskPattern struct {
 }
 
 var shellRiskPatterns = []riskPattern{
-	{regexp.MustCompile(`(?i)\bremove-item\b[^\r\n|;&]*\s-(?:[a-z]*r[a-z]*|recurse)\b[^\r\n|;&]*\s-(?:[a-z]*f[a-z]*|force)\b`), "recursive force delete"},
+	// PowerShell / Unix recursive-force deletes (Remove-Item and its aliases, rm,
+	// and their laundered spellings) are handled by destructiveDeleteRisk, which
+	// tokenizes command position so `/bin/rm`, `\rm`, `(rm`, and abbreviated
+	// switches like `-r -fo` cannot slip past. These regexes cover the cmd.exe
+	// slash-flag forms that the switch-oriented detector does not.
 	{regexp.MustCompile(`(?i)\b(?:del|erase)\b[^\r\n|;&]*/[sq]\b`), "recursive delete"},
 	{regexp.MustCompile(`(?i)\b(?:rmdir|rd)\b[^\r\n|;&]*/s\b`), "recursive directory delete"},
 	{regexp.MustCompile(`(?i)\bfind\b[^\r\n|;&]*\s-delete\b`), "bulk file delete"},
@@ -36,61 +42,24 @@ var shellRiskPatterns = []riskPattern{
 	{regexp.MustCompile(`(?im)(?:^|[;&|]\s*)(?:printenv|env|set)\s*(?:$|[;&|])`), "environment secret enumeration"},
 }
 
-// recursiveDeleteAlias matches command names that alias to Remove-Item -Recurse
-// -Force (ri, and the cmd.exe-style del/erase/rd/rmdir, which PowerShell also
-// accepts with PowerShell-style -Recurse/-Force switches).
-var recursiveDeleteAlias = regexp.MustCompile(`(?i)(?:^|[;&|\s])(?:ri|del|erase|rd|rmdir)\s`)
-
 // registryHiveRef and registryMutationCmdlet together catch PowerShell registry
 // provider mutations (e.g. Set-ItemProperty -Path HKLM:\...), which the
 // cmd.exe-oriented `reg.exe` pattern above does not cover.
 var registryHiveRef = regexp.MustCompile(`(?i)\b(?:hklm|hkcu|hkcr|hku|hkcc|hkey_local_machine|hkey_current_user|hkey_classes_root|hkey_users|hkey_current_config)\b`)
 var registryMutationCmdlet = regexp.MustCompile(`(?i)\b(?:set-itemproperty|new-itemproperty|remove-itemproperty|new-item|remove-item|set-item)\b`)
 
-// rmCommand finds an `rm` that is actually being RUN.
-//
-// It previously read `(?i)(?:^|[;&|]\s*)rm…`: without (?m) the `^` anchors only
-// to the start of the whole string, and the separator class omits newline — so
-// `rm` on any line but the first was invisible, and `git status\nrm -rf /`
-// sailed through the one backstop that survives auto-accept mode. The sibling
-// patterns above already had this right (:36 uses (?im), :42 puts \s in the
-// class); this line was the outlier.
-//
-// The class is \s rather than just \n so a wrapper cannot launder it either:
-// `sudo rm -rf /`, `env rm -rf .`, and `xargs rm -rf /` all put rm after a
-// space. That breadth is only safe because quoted spans are blanked first —
-// see stripQuotedSpans — so `git log --grep "rm -rf"` is still searchable text,
-// not a command.
-var rmCommand = regexp.MustCompile(`(?im)(?:^|[;&|\s])rm\s+([^\r\n;&|]+)`)
-
-// stripQuotedSpans blanks the CONTENT of quoted spans while preserving length
-// and the surrounding structure, so a destructive command quoted as DATA is not
-// mistaken for one being executed. Length is preserved so any offsets a caller
-// derives stay meaningful.
-func stripQuotedSpans(command string) string {
-	out := []byte(command)
-	inDouble, inSingle := false, false
-	for i := 0; i < len(out); i++ {
-		switch {
-		case out[i] == '"' && !inSingle:
-			inDouble = !inDouble
-		case out[i] == '\'' && !inDouble:
-			inSingle = !inSingle
-		case inDouble || inSingle:
-			out[i] = ' '
-		}
-	}
-	return string(out)
+// powershellDeleteWords name PowerShell's Remove-Item and the aliases that also
+// take -Recurse/-Force switches (ri, and the cmd.exe-style del/erase/rd/rmdir,
+// which PowerShell accepts with PowerShell switches). `rm` is handled with the
+// Unix cluster rule instead — see destructiveDeleteRisk.
+var powershellDeleteWords = map[string]bool{
+	"remove-item": true, "ri": true, "del": true, "erase": true, "rd": true, "rmdir": true,
 }
 
 // ClassifyShell is a backstop for clearly destructive or credential-stealing
 // commands. It is intentionally not presented as a sandbox; safe-looking
 // commands still go through approval unless auto-accept mode is enabled.
 func ClassifyShell(command string) ShellRisk {
-	lower := strings.ToLower(command)
-	if (strings.Contains(lower, "remove-item") || recursiveDeleteAlias.MatchString(lower)) && strings.Contains(lower, "-recurse") && strings.Contains(lower, "-force") {
-		return ShellRisk{Blocked: true, Reason: "recursive force delete"}
-	}
 	if registryHiveRef.MatchString(command) && registryMutationCmdlet.MatchString(command) {
 		return ShellRisk{Blocked: true, Reason: "registry mutation"}
 	}
@@ -99,24 +68,88 @@ func ClassifyShell(command string) ShellRisk {
 			return ShellRisk{Blocked: true, Reason: pattern.reason}
 		}
 	}
-	for _, match := range rmCommand.FindAllStringSubmatch(stripQuotedSpans(command), -1) {
-		recursive, force := false, false
-		for _, field := range strings.Fields(match[1]) {
-			lower := strings.ToLower(field)
-			if lower == "--recursive" {
-				recursive = true
+	return destructiveDeleteRisk(command)
+}
+
+// destructiveDeleteRisk blocks a recursive force delete wherever the delete verb
+// sits at a real COMMAND position — the first word of a chain segment, the word
+// a wrapper (sudo/env/xargs/nohup) runs, or the first word inside a subshell or
+// substitution. Tokenizing (rather than regex-scanning) is what closes the
+// laundering vectors: `/bin/rm`, `\rm`, `RM.EXE`, and `(rm -rf /)` all normalize
+// to `rm` at command position, and a delete verb that appears only inside quotes
+// (`git log --grep "rm -rf"`) is never at command position, so it stays a
+// searchable string rather than a blocked command. The tokenizer is shared with
+// the read-only classifier so the two gates cannot drift.
+func destructiveDeleteRisk(command string) ShellRisk {
+	for _, segment := range shellsafe.Segments(command) {
+		shellsafe.MarkThroughWrappers(segment)
+		for i, token := range segment {
+			if !token.CommandPos {
+				continue
 			}
-			if lower == "--force" {
-				force = true
+			word := shellsafe.NormalizeCommandWord(token.Word)
+			isRM := word == "rm"
+			if !isRM && !powershellDeleteWords[word] {
+				continue
 			}
-			if strings.HasPrefix(lower, "-") && !strings.HasPrefix(lower, "--") {
-				recursive = recursive || strings.Contains(lower[1:], "r")
-				force = force || strings.Contains(lower[1:], "f")
+			recursive, force := deleteSwitches(commandFlags(segment, i), isRM)
+			if recursive && force {
+				return ShellRisk{Blocked: true, Reason: "recursive force delete"}
 			}
-		}
-		if recursive && force {
-			return ShellRisk{Blocked: true, Reason: "recursive force delete"}
 		}
 	}
 	return ShellRisk{}
+}
+
+// commandFlags returns the argument tokens that belong to the delete verb at
+// cmdIndex: everything up to the next command-position token (a wrapped or
+// subshelled command) or the end of the segment. Tokens are already lowercased
+// by shellsafe.Segments.
+func commandFlags(segment []shellsafe.Token, cmdIndex int) []string {
+	var flags []string
+	for j := cmdIndex + 1; j < len(segment); j++ {
+		if segment[j].CommandPos {
+			break
+		}
+		flags = append(flags, segment[j].Word)
+	}
+	return flags
+}
+
+// deleteSwitches reports whether the flags request recursion and force. `rm`
+// uses the Unix cluster rule (a single-dash cluster carries each letter, so
+// `-rf` is both, plus the long `--recursive`/`--force`). PowerShell delete verbs
+// use prefix matching against the full switch name, so any unambiguous
+// abbreviation counts (`-r`, `-rec`, `-recurse`; `-f`, `-fo`, `-force`) while a
+// force-only `-Force` is NOT misread as recursion.
+func deleteSwitches(flags []string, unix bool) (recursive, force bool) {
+	for _, flag := range flags {
+		if unix {
+			if flag == "--recursive" {
+				recursive = true
+			}
+			if flag == "--force" {
+				force = true
+			}
+			if strings.HasPrefix(flag, "-") && !strings.HasPrefix(flag, "--") {
+				recursive = recursive || strings.Contains(flag[1:], "r")
+				force = force || strings.Contains(flag[1:], "f")
+			}
+			continue
+		}
+		if !strings.HasPrefix(flag, "-") {
+			continue
+		}
+		name := strings.TrimLeft(flag, "-")
+		if name == "" {
+			continue
+		}
+		if strings.HasPrefix("recurse", name) {
+			recursive = true
+		}
+		if strings.HasPrefix("force", name) {
+			force = true
+		}
+	}
+	return recursive, force
 }

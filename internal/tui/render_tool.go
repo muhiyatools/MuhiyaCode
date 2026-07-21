@@ -275,42 +275,9 @@ func (m *Model) diffLineStyle(source string) lipgloss.Style {
 	}
 }
 
-func (m *Model) renderAgentChip(agent *agentView, width int) string {
-	marker := m.palette.brand.Render(m.glyphs.brand)
-	if agent.status == "running" {
-		marker = m.palette.brand.Render(m.spinner())
-	} else if agent.status == "failed" || agent.status == "cancelled" {
-		marker = m.palette.danger.Render(m.glyphs.brand)
-	}
-	// Hover affordance: underline the subagent title when the row is under the mouse.
-	titleStyle := m.palette.text
-	if agent.hovered {
-		titleStyle = titleStyle.Underline(true)
-	}
-	line := fmt.Sprintf("%s [%d] %s", marker, agent.index, titleStyle.Render(agent.title))
-	// The chip shows the agent's role in this task, never the internal kind
-	// string: the model names each dispatch, and the free-form title is the
-	// fallback when it did not.
-	identity := agent.role
-	if identity == "" {
-		identity = agent.title
-	}
-	if identity == "" {
-		identity = agent.agent
-	}
-	label := identity + " · " + agent.status
-	if agent.model != "" {
-		label = identity + " (" + agent.model + ") · " + agent.status
-	}
-	line += "  " + m.palette.faint.Render(label)
-	if agent.usage.TotalTokens > 0 {
-		line += "  " + m.palette.faint.Render(contract.HumanTokens(agent.usage.TotalTokens))
-	}
-	if agent.active != "" {
-		line += "\n  " + m.palette.faint.Render("└ "+agent.active)
-	}
-	return fitLine(line, width)
-}
+// renderAgentChip drew one subagent's transcript card — marker, index, title,
+// role, model, tokens, and its currently-running tool. It is gone with the
+// subagent system; ordinary tool rows are the only chips now.
 
 // deriveToolTarget recovers a path-target tool's file from its diff output when
 // no persisted target is available (a tool row from a session that predates the
@@ -328,7 +295,7 @@ func deriveToolTarget(name, output string) string {
 }
 
 func toolLabel(name string) string {
-	labels := map[string]string{"list_files": "List", "read_file": "Read", "grep": "Grep", "search_text": "Search", "glob": "Glob", "edit_file": "Edit", "multi_edit": "Edit", "write_file": "Write", "apply_patch": "Patch", "run_shell": "Shell", "git_status": "Git status", "git_diff": "Git diff", "update_plan": "To-dos", "ask_user": "Question", "propose_changes": "Change plan", "run_subagent": "Delegate", "web_search": "Web search", "save_memory": "Memory", "recall_memory": "Memory", "edit_memory": "Memory"}
+	labels := map[string]string{"list_files": "List", "read_file": "Read", "grep": "Grep", "search_text": "Search", "glob": "Glob", "edit_file": "Edit", "multi_edit": "Edit", "write_file": "Write", "apply_patch": "Patch", "run_shell": "Shell", "git_status": "Git status", "git_diff": "Git diff", "update_plan": "To-dos", "ask_user": "Question", "propose_changes": "Change plan", "web_search": "Web search", "save_memory": "Memory", "recall_memory": "Memory", "edit_memory": "Memory"}
 	if label := labels[name]; label != "" {
 		return label
 	}

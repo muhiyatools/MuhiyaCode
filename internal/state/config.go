@@ -142,79 +142,48 @@ func ActiveModel(settings contract.Settings) (contract.Model, bool) {
 	return contract.Model{}, false
 }
 
-func SubagentModel(settings contract.Settings) (contract.Model, bool) {
-	for _, model := range settings.Provider.Models {
-		if model.ID == settings.Provider.SubagentModelID {
-			return model, true
-		}
-	}
-	return ActiveModel(settings)
-}
-
 func AutoAssignModels(settings *contract.Settings) {
 	if len(settings.Provider.Models) == 0 {
 		return
 	}
+	if modelExists(settings.Provider.Models, settings.Provider.ActiveModelID) {
+		return
+	}
 	ranked := append([]contract.Model(nil), settings.Provider.Models...)
 	sort.SliceStable(ranked, func(i, j int) bool { return modelScore(ranked[i]) > modelScore(ranked[j]) })
-	if !modelExists(settings.Provider.Models, settings.Provider.ActiveModelID) {
-		// Prefer a Pro/Reasoner-class model for the main agent; fall back to the
-		// highest-scoring model when no name matches (deterministic ranked order).
-		if pro, ok := firstModelMatching(ranked, "pro", "reasoner", "max", "large"); ok {
-			settings.Provider.ActiveModelID = pro.ID
-		} else {
-			settings.Provider.ActiveModelID = ranked[0].ID
-		}
-	}
-	if !modelExists(settings.Provider.Models, settings.Provider.SubagentModelID) {
-		// Prefer a Flash/lite-class model for the subagent; fall back to the
-		// lowest-scoring model that is not already the main model.
-		if flash, ok := firstModelMatching(ranked, "flash", "mini", "lite", "fast", "small"); ok && (flash.ID != settings.Provider.ActiveModelID || len(ranked) == 1) {
-			settings.Provider.SubagentModelID = flash.ID
-		} else {
-			for i := len(ranked) - 1; i >= 0; i-- {
-				if ranked[i].ID != settings.Provider.ActiveModelID || len(ranked) == 1 {
-					settings.Provider.SubagentModelID = ranked[i].ID
-					break
-				}
-			}
-		}
+	// Prefer a Pro/Reasoner-class model; fall back to the highest-scoring model
+	// when no name matches (deterministic ranked order).
+	if pro, ok := firstModelMatching(ranked, "pro", "reasoner", "max", "large"); ok {
+		settings.Provider.ActiveModelID = pro.ID
+	} else {
+		settings.Provider.ActiveModelID = ranked[0].ID
 	}
 }
 
-// AssignFreshDefaultModels applies the explicit mixed-provider first-run pair.
-// It is intentionally separate from score-based AutoAssignModels: V4 Pro's
-// "pro" marker otherwise wins the main role, while M3's context score does not
-// reliably place it opposite V4 Pro. Existing role choices are never touched.
+// AssignFreshDefaultModels picks the explicit first-run model. It is
+// intentionally separate from score-based AutoAssignModels: M3's enormous
+// window makes it the right session default, but its context score alone does
+// not reliably beat a "pro"-marked model. An existing choice is never touched.
 func AssignFreshDefaultModels(settings *contract.Settings) bool {
-	if settings == nil || strings.TrimSpace(settings.Provider.ActiveModelID) != "" || strings.TrimSpace(settings.Provider.SubagentModelID) != "" {
+	if settings == nil || strings.TrimSpace(settings.Provider.ActiveModelID) != "" {
 		return false
 	}
-	var minimaxM3, deepSeekV4Pro contract.Model
 	for _, model := range settings.Provider.Models {
-		name := strings.ToLower(model.ID + " " + model.Name)
 		// The M3 detector is shared with the capability profile (gateway
-		// package) so the pairing can never miss a catalog entry the profile
+		// package) so the default can never miss a catalog entry the profile
 		// resolver already treats as M3 (e.g. a bare "M3" name).
-		if contract.IsMiniMaxM3Name(name) {
-			minimaxM3 = model
-		}
-		if strings.Contains(name, "deepseek") && strings.Contains(name, "v4") && strings.Contains(name, "pro") {
-			deepSeekV4Pro = model
+		if contract.IsMiniMaxM3Name(strings.ToLower(model.ID + " " + model.Name)) {
+			settings.Provider.ActiveModelID = model.ID
+			return true
 		}
 	}
-	if minimaxM3.ID == "" || deepSeekV4Pro.ID == "" {
-		return false
-	}
-	settings.Provider.ActiveModelID = minimaxM3.ID
-	settings.Provider.SubagentModelID = deepSeekV4Pro.ID
-	return true
+	return false
 }
 
 // firstModelMatching returns the first model in ranked order whose id or name
 // contains any of the given lowercase substrings. It lets AutoAssignModels honor
-// an explicit family preference (Pro for main, Flash for subagent) while keeping
-// the score-based ranking as the tiebreaker and fallback.
+// an explicit family preference while keeping the score-based ranking as the
+// tiebreaker and fallback.
 func firstModelMatching(models []contract.Model, substrings ...string) (contract.Model, bool) {
 	for _, model := range models {
 		name := strings.ToLower(model.ID + " " + model.Name)
@@ -263,18 +232,9 @@ func SetConfig(key, value string, settings *contract.Settings, secrets *contract
 	case "model":
 		UpsertModel(settings, contract.Model{ID: value, Name: value, Source: "manual"}, true)
 		AutoAssignModels(settings)
-		// An explicit choice pins the roles: the session advisor proposes, but it
-		// never overrides what the user asked for.
+		// An explicit choice pins the model: the advisor proposes, but it never
+		// overrides what the user asked for.
 		settings.Provider.RolesPinned = true
-	case "subagentModel":
-		for _, model := range settings.Provider.Models {
-			if model.ID == value || model.Name == value {
-				settings.Provider.SubagentModelID = model.ID
-				settings.Provider.RolesPinned = true
-				return nil
-			}
-		}
-		return fmt.Errorf("unknown model %q", value)
 	case "contextLimit":
 		limit, err := strconv.Atoi(value)
 		if err != nil || limit <= 0 {
@@ -314,16 +274,6 @@ func SetConfig(key, value string, settings *contract.Settings, secrets *contract
 			settings.Provider.Advisor = normalized
 		default:
 			return fmt.Errorf("advisor must be auto or off")
-		}
-	case "contextLinking":
-		// Feature 012 FR-017: "off" restores pre-012 dispatch behavior exactly
-		// (no continuation, no digest seeding, read gate disabled).
-		normalized := strings.TrimSpace(strings.ToLower(value))
-		switch normalized {
-		case "", "default", "off":
-			settings.ContextLinking = normalized
-		default:
-			return fmt.Errorf("contextLinking must be off or default")
 		}
 	case "rtlMode":
 		settings.RTL.Mode = value

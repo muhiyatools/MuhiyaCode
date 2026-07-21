@@ -21,15 +21,19 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false
       - name: Verify release source
         run: |
           go mod verify
+          make check-fmt
           go vet ./...
-          go test ./... -count=1
+          CGO_ENABLED=1 go test -race ./... -count=1
+          npm run check:npm
+          npm pack --dry-run
       - name: Build and publish archives
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -43,10 +47,8 @@ jobs:
         with:
           subject-checksums: ./dist/checksums.txt
       - name: Publish npm wrapper
-        # Runs after the GitHub Release archives exist (the postinstall pulls the
-        # binary from them). The tag must match package.json's version, and an
-        # already-published version is skipped rather than failing the run — so
-        # re-tagging v1.0.0 just (re)creates the release without a duplicate publish.
+        # Configure npm trusted publishing for muhiyatools/MuhiyaCode and this
+        # release.yml workflow before pushing the v1.1.0 tag.
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
           PKG_VERSION="$(node -p "require('./package.json').version")"
@@ -54,11 +56,4 @@ jobs:
             echo "::error::tag $GITHUB_REF_NAME (=$VERSION) != package.json version $PKG_VERSION"
             exit 1
           fi
-          if npm view "muhiyacode@$VERSION" version >/dev/null 2>&1; then
-            echo "muhiyacode@$VERSION already on npm — skipping publish."
-          else
-            npm publish
-          fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
+          npm publish --access public

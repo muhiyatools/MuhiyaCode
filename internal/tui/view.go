@@ -34,7 +34,7 @@ func (m *Model) View() tea.View {
 	if m.modal != nil {
 		hint := m.chromeModeLine()
 		available := max(4, m.height-lineCount(header)-lineCount(hint))
-		dialog := m.renderModal() // also records m.modalRows (dialog-relative choice rows)
+		dialog := m.renderModal(available) // also records m.modalRows (dialog-relative choice rows)
 		// renderModal sizes itself to the terminal, but clamp as a hard
 		// invariant: an oversized dialog is cut rather than allowed to push
 		// the rest of the interface off-screen.
@@ -61,8 +61,8 @@ func (m *Model) View() tea.View {
 		vp = m.highlightSelection(vp, m.viewport.YOffset())
 		im.add(targetTranscript, 0, rect{0, y, m.width, vpHeight})
 		// US4: project each visible transcript chip's header row to a screen rect so
-		// clicking a tool/agent chip toggles/opens it. Content rows are converted with
-		// the live viewport offset and clipped to the visible transcript band, so a
+		// clicking a tool chip toggles it. Content rows are converted with the live
+		// viewport offset and clipped to the visible transcript band, so a
 		// scrolled-away chip has no hit region.
 		yOffset := m.viewport.YOffset()
 		for _, chip := range m.transcriptChips {
@@ -70,11 +70,7 @@ func (m *Model) View() tea.View {
 			if screenRow < y || screenRow >= y+vpHeight {
 				continue
 			}
-			kind := targetToolChip
-			if chip.agentID != "" {
-				kind = targetAgentChip
-			}
-			im.addChip(kind, rect{0, screenRow, m.width, 1}, chip.tool, chip.agentID)
+			im.addChip(targetToolChip, rect{0, screenRow, m.width, 1}, chip.tool)
 		}
 		parts = append(parts, vp)
 		y += vpHeight

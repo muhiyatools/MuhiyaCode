@@ -229,7 +229,6 @@ func TestUsageIntegrityThroughApplicationLoop(t *testing.T) {
 	settings := state.DefaultSettings()
 	settings.Provider.BaseURL = server.URL + "/v1"
 	settings.Provider.ActiveModelID = "model"
-	settings.Provider.SubagentModelID = "model"
 	settings.Provider.Models = []contract.Model{{ID: "model", Name: "Model", ContextLimit: 128000}}
 	if err := state.SaveSettings(settings, paths); err != nil {
 		t.Fatal(err)

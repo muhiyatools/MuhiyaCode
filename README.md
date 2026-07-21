@@ -42,12 +42,10 @@ You can also sign in from inside the app with `/login`.
 - **Browser sign-in** — one command, no API keys or endpoints to manage.
 - **Guarded agentic tools** — read, search, exact edits, patches, and shell, with a permission mode you control.
 - **DeepSeek prefix-cache optimized** — byte-stable prompts keep the cache warm across a whole session.
-- **Plan and execute, split** — the main model plans, analyzes, and instructs; every change to your workspace is carried out by an execution sub-agent it dispatches. It sizes delegation to the job — no quota to spend down — and trusts a report that shows its checks instead of re-reading the files it just verified.
-- **A checklist you can read** — for multi-step work the agent keeps a plain `tasks.md` at your workspace root (`- [ ]` lines, ordinary markdown, yours to edit) and the live to-do panel follows it.
-- **Session-stable models** — three roles (main, execution, utility) are settled once at the start of a session and then frozen, so the cache never cold-starts mid-task. Nothing to choose in the UI.
-- **Scoped subagents** — `explore`, `general`, and `review`, each on its own cache pin with optional token ceilings and an optional role name you'll see in the transcript.
-- **Subagent context linking** — a continuation subagent resumes its predecessor's conversation stream, so the provider bills the shared prefix as cache reads instead of re-reading everything from zero; the execution agent keeps one chain for the whole session. Staleness-checked, provider-verified, and visible per dispatch (`contextLinking`: off/default).
-- **Right-sized reviews** — a deterministic gate decides when an automatic review is warranted and at what depth (`reviewGating`: off/conservative/default); trivial changes skip with a visible rationale, risk-area changes always review, and explicit review requests always run.
+- **One agent, no hand-offs** — the same model reads, searches, edits, runs shells, and verifies its own work in a single continuous session. There is no planner/executor split, no delegation, and nothing waiting for a report.
+- **A checklist you can read** — for multi-step work the agent keeps a plain `tasks.md` (`- [ ]` lines, ordinary markdown, yours to edit) — usually at your workspace root, or beside the work for a task scoped to one part of it — and the live to-do panel follows it.
+- **Task-tuned models** — a cheap advisor checks once per task whether the current model still fits, then its choice is frozen for that whole task so the provider's cache stays warm while the work runs. It only ever moves you for free: to a small conversation, or back to a model already warm this session.
+- **Right-sized reviews** — a deterministic gate decides when a review pass is warranted and how deep it should go (`reviewGating`: off/conservative/default); trivial changes skip with a visible rationale, and risk-area changes (auth, billing, concurrency, security config, migrations) always get one.
 - **MCP servers** — stdio and Streamable HTTP, with OAuth and per-tool permissions.
 - **Persistent project memory** — root-local `MEMORY.md` and `MUHIYA.md` travel with your repo.
 
@@ -61,8 +59,7 @@ Commands are typed inside MuhiyaCode (not your shell).
 | `/logout` | Sign out and clear the credential |
 | `/usage` | View account usage |
 | `/reasoning` (`/effort`) | Set reasoning effort (low–max) |
-| `/permissions` (`/mode`) | Change permission mode |
-| `/context` | Inspect context usage & model capability |
+| `/context` | Inspect context usage |
 | `/compact` | Compact the conversation |
 | `/skills` | Assign skills to the next prompt |
 | `/mcp` | Manage MCP servers |
@@ -71,16 +68,51 @@ Commands are typed inside MuhiyaCode (not your shell).
 | `/resume` | Resume a workspace session |
 | `/new` | Start a new session |
 | `/rewind` | Restore the latest checkpoint |
-| `/errors` | Inspect recent harness events |
+
+Permission mode has no command: **Shift+Tab** cycles it, and the footer shows the
+current mode with that shortcut named underneath.
+
+### Keys
+
+| Key | Action |
+|---|---|
+| `Shift+Tab` | Cycle permission mode (normal ⇄ auto-accept) |
+| `Tab` | Complete the highlighted `/command` |
+| `Esc` | Stop the running task, or clear the input |
+| `Ctrl+C` | Copy the selection, else cancel; `Ctrl+D` quits |
 
 ## How a task runs
 
 Ask for something and the agent does it — there is no mode to enter and no plan to approve first. What happens under the hood:
 
-- **The main model plans and instructs; it does not edit.** It reads, searches, runs read-only commands, and then hands the actual work to an execution sub-agent. If it tries to change a file itself, a gate stops it and tells it to delegate.
+- **One model does the whole task.** It reads, searches, edits, runs shells, and verifies its own work, all in the same session — there is no one to hand work to, and no gate stops it from touching a file.
 - **Planning is applied when it's warranted** — genuinely large work, or when you ask for a plan. It recalls what it already knows about the project before designing and saves the durable decisions afterward. A plan is always **written to `tasks.md` first** and summarized second, so you get a file you can read, edit, and commit rather than a wall of chat — and if you asked for a plan, that file *is* the answer: the agent stops there instead of starting to build.
-- **Multi-step work gets a checklist.** The agent writes `tasks.md` at your workspace root as plain markdown and updates it as it goes; the to-do panel reflects it, and a finished task tells you what's still open.
-- **The sub-agent's report is taken at its word.** Each one ends with a status — done, needs a check you should run, or blocked — and the main model accepts a report that shows the checks it ran instead of re-verifying it from scratch. You stop paying twice for the same verification, and a sub-agent that couldn't verify something says so rather than reporting success.
+- **Multi-step work gets a checklist.** The agent keeps `tasks.md` as plain markdown and updates it as it goes — usually at your workspace root, or created beside the work when a task is scoped to one part of it; the to-do panel reflects it, and a finished task tells you what's still open.
+- **It verifies its own work.** After a change it runs the check that proves it works and ticks the item, never reporting a result it did not observe — then it stops: no re-reading files or re-running checks that already passed.
+
+## Skills
+
+A skill is a folder with a `SKILL.md` inside — a name, a one-line description, and
+your instructions for a kind of work. MuhiyaCode finds them at session start in:
+
+```text
+<workspace>/.agents/skills/       <workspace>/.codex/skills/
+~/.agents/skills/                 ~/.codex/skills/        $MUHIYA_SKILLS_DIR
+```
+
+**You don't invoke them.** The agent sees the list of installed skills and decides
+for itself when one applies: ask it to build a landing page with a frontend-design
+skill installed, and it reads that skill before it starts designing, then works
+from it for the rest of the task. Ask it something no skill covers and it loads
+nothing.
+
+A skill informs the work; it doesn't script it. The model applies your guidance
+with its own reasoning and voice, so the result reads like good work that followed
+your conventions — not a filled-in template.
+
+`/skills` still exists for the times you want to force the issue: pick skills for
+the next prompt and they're applied whether or not the agent would have chosen
+them (and it won't load them twice).
 
 ## Configuration
 
@@ -90,17 +122,16 @@ Signing in sets up your endpoint and credential for you — there's nothing to w
 muhiyacode config set effort high              # or /reasoning
 ```
 
-**Models are not something you manage.** Three roles — main (plans), execution (does the work in sub-agents), and utility (cheap auxiliary calls) — are decided once per session and then held fixed, so the models never change out from under a running task. The TUI no longer displays or selects them, and `/model` is gone. On the first prompt of each session a short advisor check either keeps the configured pairing or proposes a better one; from then on the session is frozen. If a later request is a genuinely different piece of large work, you'll get a one-line note that `/new` would give it a clean start.
+**Models are not something you manage.** One model runs your work. A cheap advisor checks it at the start of every task — keeping it or proposing a better fit — and then that choice is frozen for the rest of the task so the cache stays warm while it runs. The TUI no longer displays or selects a model, and `/model` is gone. The advisor only ever moves you when the switch is free: the conversation is still small, or you're returning to a model already warm this session; anything more expensive and it leaves you where you are. If a later request is a genuinely different piece of large work, you'll get a one-line note that `/new` would give it a clean start.
 
 To take manual control:
 
 ```sh
-muhiyacode config set model <model-id>          # pin the main model
-muhiyacode config set subagentModel <model-id>  # pin the execution model
-muhiyacode config set advisor off               # never propose a pairing
+muhiyacode config set model <model-id>   # pin the model
+muhiyacode config set advisor off        # never propose a change
 ```
 
-Setting either model pins both roles — the advisor proposes, but it never overrides what you asked for.
+Setting the model pins it: the advisor stops running entirely, so nothing moves it out from under you.
 
 Settings live under `~/.muhiya` (or `$MUHIYA_HOME`). See [docs/](docs/) for the full reference, including advanced overrides.
 

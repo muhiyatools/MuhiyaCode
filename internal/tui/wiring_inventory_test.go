@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -318,47 +317,10 @@ func setOf(values []string) map[string]bool {
 	return set
 }
 
-// --- live surface: AgentEvent kinds and the Handoff field ---------------
-
-// agentEventKindPattern matches every `Kind: "..."` literal subagent.go
-// writes onto a contract.AgentEvent — the actual emission sites, not a
-// separately-maintained enum (contract.AgentEvent.Kind is a bare string).
-var agentEventKindPattern = regexp.MustCompile(`Kind:\s*"([a-z_]+)"`)
-
-func liveAgentEventKinds(t *testing.T, root string) map[string]bool {
-	t.Helper()
-	path := filepath.Join(root, "internal", "orchestrator", "subagent.go")
-	src, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	set := map[string]bool{}
-	for _, m := range agentEventKindPattern.FindAllStringSubmatch(string(src), -1) {
-		set[m[1]] = true
-	}
-	return set
-}
-
-// liveAgentEventFields proves WI-6's Handoff carve-out structurally:
-// contract.AgentEvent must still declare the field (reflection), AND the
-// delegation benchmark's audit — its one real consumer (RL-021) — must still
-// reference it. Losing either makes "Handoff" disappear from the live set.
-func liveAgentEventFields(t *testing.T, root string) map[string]bool {
-	t.Helper()
-	set := map[string]bool{}
-	if _, ok := reflect.TypeOf(contract.AgentEvent{}).FieldByName("Handoff"); !ok {
-		return set
-	}
-	path := filepath.Join(root, "benchmarks", "delegationbench", "audit.go")
-	src, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
-	if strings.Contains(string(src), ".Handoff") {
-		set["Handoff"] = true
-	}
-	return set
-}
+// The AgentEvent Kind and Field surfaces were removed with the subagent system:
+// both scanned orchestrator/subagent.go for the lifecycle events a delegated run
+// emitted. With one session there are no agent events to advertise, so the two
+// surfaces (and their rows in the wiring-inventory data file) are gone.
 
 // --- the guard itself ----------------------------------------------------
 
@@ -375,8 +337,6 @@ func TestWiringInventoryMatchesLiveSurface(t *testing.T) {
 		"Slash Command":    liveSlashCommands(t, root),
 		"Keybinding":       liveKeybindings(t, root),
 		"Settings Field":   setOf(settingsFieldPaths()),
-		"AgentEvent Kind":  liveAgentEventKinds(t, root),
-		"AgentEvent Field": liveAgentEventFields(t, root),
 		"Callbacks Member": setOf(callbacksMemberNames()),
 	}
 

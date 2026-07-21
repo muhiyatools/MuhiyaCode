@@ -30,10 +30,3 @@ func RegisterExample(e Example) Example {
 	exampleOrder = append(exampleOrder, e.ID)
 	return e
 }
-
-// DelegationTaskExampleBody is the worked example in the run_subagent tool
-// description showing the caller how to phrase a delegated task.
-const DelegationTaskExampleBody = `find every caller of ApplyDiscount across services/, check which pass a nil tax table, and report file:line for each`
-
-// ExampleDelegationTask is the registered form of DelegationTaskExampleBody.
-var ExampleDelegationTask = RegisterExample(Example{ID: "example.delegation-task", Body: DelegationTaskExampleBody})

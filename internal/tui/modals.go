@@ -80,7 +80,7 @@ func (m *Model) handleAction(action actionMsg) tea.Cmd {
 		payload, ok := action.value.(runtimeActionValue)
 		if ok && payload.runtime.Engine != nil {
 			m.runtime = payload.runtime
-			m.items, m.agents, m.agentByID, m.viewAgent = nil, nil, make(map[string]*agentView), ""
+			m.items = nil
 			// L2: also drop the active-tool index and the streaming draft, which point
 			// into the discarded session's items; a stale entry would otherwise linger.
 			m.activeTools = make(map[string]*toolView)

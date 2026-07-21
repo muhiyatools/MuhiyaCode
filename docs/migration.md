@@ -25,7 +25,8 @@ No explicit conversion command is needed. The Go binary reads and continues to w
 | `knowledge.json` | Uses the same v1 facts/files/edit-epoch shape and task-key algorithm |
 | Transcript/checkpoints | Keeps the existing file names and formats |
 | Plan sidecars | Retired in v1.1.0: the session directory's `plan.md`, `plan_state.json`, `goal.json`, and the session-dir `tasks.md` twin are no longer read or written. Stale copies are ignored, never treated as corruption, and left on disk for you to delete |
-| `tasks.md` | Now a plain markdown checklist at the project root, maintained by the model with ordinary file tools. It is not a session artifact and does not move with `~/.muhiya` |
+| `tasks.md` | A plain markdown checklist maintained by the model with ordinary file tools — usually at the project root, or created beside the work for a task scoped to one part of it. It is not a session artifact and does not move with `~/.muhiya` |
+| Subagent sidecars | Retired with the subagent system: the session directory's `agents/` transcript records are no longer read or written. Stale copies are ignored, never treated as corruption, and left on disk for you to delete |
 
 Corrupt JSON is moved aside as a timestamped `.corrupt-*.bak` and replaced with a safe default. This behavior never deletes the backup. Retired sidecars are not corrupt files and are never backed up or rewritten — they are simply not opened.
 
@@ -80,6 +81,49 @@ The header shows `Update available <new> (you have <current>)` when the npm regi
 version — one cached GET per day, silent on failure. Set `MUHIYACODE_NO_UPDATE_CHECK` to disable
 it. The "Welcome to MuhiyaCode" first-run cue is gone; an empty session now starts with an empty
 transcript.
+
+## Upgrading to the unified session
+
+A later change removes the subagent system entirely. The plan/execute split introduced in
+v1.1.0 — a main model that planned and instructed, and an execution sub-agent it dispatched to
+do the actual editing — is gone. One model now reads, edits, runs shells, and verifies its own
+work in a single session; nothing is delegated and there is no report to hand back.
+
+### Removed tool
+
+`run_subagent` no longer exists. There is nothing to delegate to, so there is no handoff to
+compose: the model that used to describe a task for an execution agent now just does it.
+
+### Removed config keys
+
+`subagentModel` (the underlying `subagentModelId` setting) and `contextLinking` are gone —
+`muhiyacode config set subagentModel <id>` and `config set contextLinking <value>` both fail with
+"unknown config key". If your `settings.json` already has values stored under either key from
+before the upgrade, they are silently ignored on load: not an error, and not migrated onto
+anything else. They are harmless to leave in the file, or remove them at your convenience.
+
+### Removed keybinding
+
+`←` / `→` no longer switch between the main session and a running agent, and `Alt+1`…`9` no
+longer jump to one — there are no agent views left to navigate to. Both keys now belong entirely
+to the composer's text cursor.
+
+### One model, chosen per task instead of three roles frozen per session
+
+v1.1.0 froze three roles — main, execution, utility — once at the start of a session. Now there
+is one model, and a lightweight advisor call chooses it fresh at the start of *every* task, not
+just the session's first one; its choice is then frozen for that task's duration. The advisor
+only moves you when the switch is affordable — the conversation is still small, or you are
+returning to a model already warm this session — so a long-running session does not silently
+eat a full cold start to chase a marginally better model. See
+[prompt-caching.md](prompt-caching.md) for the mechanics. `config set model <id>` still pins the
+model and `config set advisor off` still disables the advisor; `config set subagentModel` is gone
+because there is only one role left to pin.
+
+### Historical data
+
+Usage records already tagged with the old `subagent` stream label (from sessions run before this
+upgrade) still display correctly; the client simply never writes that label again.
 
 ## Rollback
 

@@ -349,6 +349,11 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		}
 		return a.callbacks.Confirm(ctx, approvalMessage(request))
 	})
+	// engineRef is bound after NewEngine below; the shell-output closure captures
+	// it (a var, so the later assignment is visible) to route run_shell streaming
+	// through the engine's scope — a subagent's shell to its own card, the main
+	// loop's to the transcript (D2).
+	var engineRef *orchestrator.Engine
 	service, err := workspace.New(session.WorkspacePath, workspace.Options{
 		PermissionMode: a.settings.PermissionMode,
 		Trust:          a.db,
@@ -360,6 +365,10 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		Checkpoints:    checkpoint,
 		Status:         a.callbacks.Status,
 		ShellOutput: func(chunk string) {
+			if engineRef != nil {
+				engineRef.RouteShellOutput(chunk)
+				return
+			}
 			if a.callbacks.ToolOutput != nil {
 				a.callbacks.ToolOutput("run_shell", chunk)
 			}
@@ -422,7 +431,6 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	}
 
 	active, _ := state.ActiveModel(*a.settings)
-	subagent, _ := state.SubagentModel(*a.settings)
 	profile := gateway.ResolveModelProfile(active.ID + " " + active.Name)
 	shell, _ := workspace.ChooseShell(a.settings.Shell.Preferred)
 	// 005 US3: compose (new session) or restore (resume) the project-context boot
@@ -443,7 +451,7 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	_ = workspace.EnsureMemoryIndexTemplate(memoryDir)
 	userInstructionsPath := filepath.Join(a.paths.Home, workspace.ProjectInstructionsFile)
 	secretValues := append([]string{a.secrets.ProviderAPIKey}, mcpSecretValues(a.paths)...)
-	skills := workspaceSkillListings(session.WorkspacePath)
+	skills := sessionSkillListings(session.WorkspacePath)
 	// 006: create the MUHIYA.md template when the workspace has none, so the user
 	// has a clear file to edit. Non-fatal on a read-only workspace.
 	_ = workspace.EnsureProjectInstructionsTemplate(session.WorkspacePath)
@@ -516,19 +524,18 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			WritePrefixShape: func(_ context.Context, snapshot contract.PrefixShapeSnapshot) error {
 				return a.sessions.WritePrefixShape(session.ID, snapshot)
 			},
-			// Feature 012 R-D3: one verbatim context record per completed
-			// subagent run, under the session's agents/ sidecar family.
-			WriteAgentRecord: func(_ context.Context, runID string, record any) error {
-				return a.sessions.WriteAgentRecord(session.ID, runID, record)
-			},
 		},
 		Prompt: orchestrator.PromptContext{
 			Workspace: session.WorkspacePath, Shell: shell,
-			Model: active.Name, ModelAddendum: profile.PromptAddendum, SubagentModel: subagent.Name,
+			Model: active.Name, ModelAddendum: profile.PromptAddendum,
 			Skills:              skills,
 			ProjectMemory:       true,
 			ProjectContextBlock: projectContext.RenderedBootContext,
 		},
+		// 013 US1: the same listing the prompt advertises backs read_skill's
+		// name resolution, so the catalog can never disagree with the prompt.
+		SkillCatalog:          skills,
+		LoadSkill:             a.loadSkillBody,
 		InitialProjectContext: &initialProjectContext,
 		InitialPrefixShape:    priorPrefixShape,
 		ProjectContextProbe: func(pctx context.Context) (contract.ProjectContextProbe, error) {
@@ -563,12 +570,12 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		}
 		return runtimeBundle{}, err
 	}
-	// Feature 012 R-D3: restore persisted subagent context records so linking
-	// survives a restart (linkability still re-verifies staleness and provider
-	// warmth at dispatch — a dead cache surfaces as "linked but cold").
-	if agentRecords, recordsErr := a.sessions.ReadAgentRecords(session.ID); recordsErr == nil && len(agentRecords) > 0 {
-		engine.RestoreAgentRecords(agentRecords)
-	}
+	// Bind the shell-output router now that the engine exists; until this line the
+	// closure above falls back to the direct sink (no task can run before it anyway).
+	engineRef = engine
+	// Legacy note: sessions created before the unified-session change may still
+	// hold agents/<runID>.json sidecars. Nothing reads them now; they are inert
+	// and are removed with the session directory.
 	recent, err := a.db.Events(ctx, session.ID, 300)
 	if err != nil {
 		if manager != nil {

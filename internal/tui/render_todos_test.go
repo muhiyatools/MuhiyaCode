@@ -84,10 +84,10 @@ func TestTodoRowRTLTitleStaysValid(t *testing.T) {
 	}
 }
 
-// TestTodoPanelGating covers the panel's whole gating table: the busy checklist,
-// the Ctrl+T hide, and the two retire cases — no steps at all, and every step
-// completed (A3 T031/T034). The panel is now driven purely by m.plan's step
-// statuses; there is no lifecycle predicate behind it.
+// TestTodoPanelGating covers the panel's whole gating table: the busy checklist
+// and the two retire cases — no steps at all, and every step completed (A3
+// T031/T034). The panel is driven purely by m.plan's step statuses; there is no
+// lifecycle predicate and, since 013, no visibility toggle behind it.
 func TestTodoPanelGating(t *testing.T) {
 	m := todoModel(t)
 	m.plan = contract.Plan{Steps: todoSteps(contract.PlanCompleted, contract.PlanInProgress)}
@@ -95,11 +95,6 @@ func TestTodoPanelGating(t *testing.T) {
 	if got := m.renderTodos(); got == "" || !strings.Contains(got, m.glyphs.todoActive) {
 		t.Fatalf("busy panel should show the checklist:\n%s", got)
 	}
-	m.todoVisible = false
-	if got := m.renderTodos(); got != "" {
-		t.Fatalf("Ctrl+T-hidden panel should render nothing, got:\n%s", got)
-	}
-	m.todoVisible = true
 
 	// No steps at all → nothing to show, busy or idle.
 	m.plan = contract.Plan{}
@@ -144,27 +139,26 @@ func TestTodoPanelIdleSummaryLine(t *testing.T) {
 	}
 }
 
-// TestCtrlTTogglesTodoPanel drives the real keybinding to prove Ctrl+T flips the
-// panel visibility (A3 T033, the wiring-inventory Verified-by for ctrl+t).
-func TestCtrlTTogglesTodoPanel(t *testing.T) {
+// TestTodoPanelStaysVisibleWhileActive (013 FR-025/FR-026): the checklist is
+// simply there for the whole active life of a task. Ctrl+T is gone, and no key
+// may hide the panel — the replacement for the old toggle test.
+func TestTodoPanelStaysVisibleWhileActive(t *testing.T) {
 	m := todoModel(t)
 	m.plan = contract.Plan{Steps: todoSteps(contract.PlanInProgress, contract.PlanPending)}
 	m.busy = true
 	if m.renderTodos() == "" {
-		t.Fatal("panel should be visible by default")
+		t.Fatal("panel should be visible while the agent is active")
 	}
-	if cmd := m.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl}); cmd != nil {
-		t.Fatal("ctrl+t should be a pure UI toggle with no command")
-	}
-	if m.todoVisible {
-		t.Fatal("ctrl+t did not clear todoVisible")
-	}
-	if m.renderTodos() != "" {
-		t.Fatal("panel should be hidden after ctrl+t")
-	}
-	// A second press restores it.
+	// Ctrl+T is no longer handled: it falls through to the composer, and the
+	// panel is unaffected.
 	m.handleKey(tea.KeyPressMsg{Code: 't', Mod: tea.ModCtrl})
-	if !m.todoVisible || m.renderTodos() == "" {
-		t.Fatal("second ctrl+t did not restore the panel")
+	if m.renderTodos() == "" {
+		t.Fatal("ctrl+t must no longer be able to hide the to-do panel")
+	}
+	// Repeated renders across the task's life keep showing it.
+	for i := 0; i < 3; i++ {
+		if m.renderTodos() == "" {
+			t.Fatalf("panel disappeared on render %d while still active", i)
+		}
 	}
 }

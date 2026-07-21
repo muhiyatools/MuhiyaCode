@@ -48,10 +48,6 @@ type Persistence struct {
 	// so the next resume can attribute a skills/tools/model change vs a silent cold
 	// start. Optional: a nil hook leaves resume attribution dormant.
 	WritePrefixShape func(context.Context, contract.PrefixShapeSnapshot) error
-	// WriteAgentRecord (feature 012 R-D3) persists one completed subagent run's
-	// context record as a session sidecar (agents/<runID>.json). Optional and
-	// best-effort: a nil hook keeps records in-memory for the session only.
-	WriteAgentRecord func(context.Context, string, any) error
 }
 
 type RescueFunc func(string, []string) ([]contract.ToolCall, string)
@@ -95,6 +91,13 @@ type EngineConfig struct {
 	// prefix shape so the first request of a resumed session can attribute a
 	// system/tools/model change. Nil on a fresh session.
 	InitialPrefixShape *contract.PrefixShapeSnapshot
+	// SkillCatalog (013 US1) is the session's discovered skills, the same slice
+	// Prompt.Skills renders. Empty or nil simply means no skills are installed:
+	// read_skill is then not advertised at all. LoadSkill reads one skill's body
+	// (bounded); it is injected because the file layer lives in a package the
+	// orchestrator must not import.
+	SkillCatalog []SkillListing
+	LoadSkill    SkillLoader
 }
 
 type Engine struct {
@@ -113,6 +116,12 @@ type Engine struct {
 	rescue        RescueFunc
 	redactFn      func(string) string
 	boundaryTools BoundaryToolSource
+	// skills is the session-frozen skill catalog behind read_skill and
+	// run_subagent's skills argument (013 US1). Built from the same listing that
+	// renders the SKILLS prefix section, so name resolution can never disagree
+	// with what the model was shown. Never mutated after construction.
+	skills      *SkillCatalog
+	skillLoader SkillLoader
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -122,8 +131,17 @@ type Engine struct {
 	// it is parsed from the file whenever a tool call writes it, never authored
 	// by the harness.
 	checklist contract.Plan
-	previous  TaskClass
-	effortMu  sync.RWMutex
+	// activeChecklistPath is the tasks.md most recently written this session
+	// (TA01). Empty means "none written yet" and the workspace root is used, which
+	// preserves the historical behavior for sessions that keep the checklist there.
+	activeChecklistPath string
+	previous            TaskClass
+	// liveSettingsMu guards the settings fields a user can change WHILE a task
+	// runs (Effort, PermissionMode). Those live on the *contract.Settings the
+	// engine shares with the app/TUI, so a mid-task /effort or /permission would
+	// otherwise write a field the task goroutine is reading. Every read and write
+	// of those two fields goes through this lock.
+	liveSettingsMu sync.RWMutex
 
 	// writeMu serializes off-hot-path sidecar writes (project context, prefix
 	// shape, agent records) so a slow disk sync never blocks a task turn.
@@ -139,7 +157,8 @@ type Engine struct {
 	projectContextProbe     func(context.Context) (contract.ProjectContextProbe, error)
 
 	taskMu               sync.Mutex
-	usageEmitMu          sync.Mutex // serializes usage-ledger append + ordered live emission queue
+	usageWriteMu         sync.Mutex // serializes persistence without blocking task-state readers during fsync
+	usageEmitMu          sync.Mutex // preserves live usage callback order
 	usageEmitting        bool
 	usageEmissionQueue   []contract.Usage
 	sessionUsage         contract.Usage
@@ -162,10 +181,22 @@ type Engine struct {
 	invalidations         *InvalidationLedger
 	latestPromptTokens    int
 	latestPromptAvailable bool
-	maintenancePasses     int
-	maintenanceLatched    bool
-	softNoticeShown       bool // T039: soft-band advisory fires at most once per compaction cycle
-	taskAgentUsage        contract.Usage
+	// warmPrefix maps a model id to the history revision it last saw on the main
+	// stream — the warm-model ledger the task advisor prices switches against
+	// (switchcost.go). In-memory by design: a resumed session cannot know what a
+	// provider still holds, and treating everything as cold keeps it put.
+	warmPrefix map[string]int
+	// lastUpstream is the routing-layer provider the previous main request was
+	// served from; pendingUpstreamNotice carries the one-line explanation to the
+	// request loop when it changes. Both stay empty on a direct connection.
+	lastUpstream          string
+	pendingUpstreamNotice string
+	// routedWindowNoted bounds the routed-window advisory to once per compaction
+	// cycle, cleared by resetMaintenanceLatch alongside the soft-pressure notice.
+	routedWindowNoted  bool
+	maintenancePasses  int
+	maintenanceLatched bool
+	softNoticeShown    bool // T039: soft-band advisory fires at most once per compaction cycle
 	// Session accumulators for the usage panel (feature 008 UD-6/UD-9):
 	// in-memory, reset on resume, rendered with the "this session" label.
 	sessionActiveMS     int64
@@ -176,8 +207,6 @@ type Engine struct {
 	assemblyPromptChars  int
 	assemblyToolDefChars int
 	assemblyProjectChars int
-	taskAgentRuns        int
-	taskAgentReused      int
 	// taskUsageStart snapshots sessionUsage at task start. Live Usage callbacks
 	// emit subtractUsage(sessionUsage, taskUsageStart) — the cumulative usage of
 	// EVERY request this task made (main + subagent + aux) — so the activity
@@ -193,17 +222,12 @@ type Engine struct {
 	// taskTerminalReads counts run_shell invocations that merely read a file
 	// where a dedicated tool sufficed (feature 011 SC-006 violation counter).
 	taskTerminalReads int
-	// taskRoleBlocks counts main-loop mutations refused by the execution role
-	// gate this task; the refusal escalates once it repeats (gate policy: never
-	// return the same sentence forever).
-	taskRoleBlocks int
 	// taskFilesChanged is the scope-agnostic tally of files this task changed —
 	// the execution agent's writes count exactly like the main loop's would.
 	taskFilesChanged map[string]bool
 	// freshSessionAdvised bounds the "start a new session" advisory to once per
 	// session — it is guidance, not nagging.
 	freshSessionAdvised bool
-	runCounter          int
 	// harnessEvents is the bounded (harnessEventRingCap) in-memory ring of
 	// harness-caused friction events (T010), guarded by taskMu. It backs /errors
 	// and the task-summary friction marker without a DB read; the same events are
@@ -215,19 +239,26 @@ type Engine struct {
 	// parent's. (B6/T024.)
 	taskCounters *callCounters
 	taskFailures []int // H5: turn numbers of failed tool calls (sliding window for the distinct-failure terminator)
-	// Feature 012 context linking (guarded by taskMu): completed-run records,
-	// their completion order, the per-dispatch link ledger for the current
-	// task, and the task ordinal that stamps record lineage.
-	agentRecords     map[string]*SubagentContextRecord
-	agentRecordOrder []string
-	taskLinks        []contract.LinkOutcome
-	taskSeq          int
+	// taskSkillsProvided (013 FR-008) holds the lowercased names of skills whose
+	// instructions are already in this task's context — seeded from the manual
+	// /skills markers in the submitted prompt, then extended by each read_skill.
+	// Guarded by taskMu because read_skill runs on the dispatch path.
+	taskSkillsProvided map[string]bool
 }
 
 type toolOutcome struct {
 	Call   contract.ToolCall
 	Output string
 	Failed bool
+	// GateRejected is true when a PRE-DISPATCH gate refused the call — H1 argument
+	// validation, the H2 verbatim-repeat short-circuit, the repeat limiter, or an
+	// output-cap truncation — rather than the tool running and failing. Such a
+	// refusal is recoverable guidance (fix the arguments, change approach), so it
+	// must NOT feed the H5 distinct-failure terminator, which force-finalizes the
+	// task with a misleading "genuine blocker" report. The gate's own escalation
+	// ladder, the B7 all-failed-turn guard, the consecutive-failure nudge, and the
+	// hard turn ceiling remain the backstops.
+	GateRejected bool
 	// Err carries the underlying dispatch error when Failed is true.
 	Err error
 }
@@ -244,6 +275,11 @@ type mainUsageObservation struct {
 	changeReasons []string
 	messageCount  int
 	durationMS    *int64 // provider-request wall time (feature 008 UD-6); nil = unknown
+	// rewriteVersion is the history revision this request was built from. It is
+	// what makes the warm-model ledger honest: a model is only warm for the
+	// conversation shape it actually saw, so a compaction or a trim retires
+	// every model's warmth instead of leaving a stale claim behind (switchcost.go).
+	rewriteVersion int
 }
 
 type usageRecordInput struct {
@@ -304,6 +340,8 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		rescue:                config.Rescue,
 		redactFn:              config.Redact,
 		boundaryTools:         config.BoundaryTools,
+		skills:                NewSkillCatalog(config.SkillCatalog),
+		skillLoader:           config.LoadSkill,
 		sessionUsage:          usageFromAggregate(aggregate),
 		usageRecords:          usageRecords,
 		usageAggregate:        aggregate,
@@ -331,6 +369,17 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 			ToolsHash:  config.InitialPrefixShape.ToolsHash,
 			ModelID:    config.InitialPrefixShape.ModelID,
 		}
+		// Resume onto the upstream that last served this conversation. Without
+		// this the first request of every resume is unpinned and may land on any
+		// of the provider's peers, cold-starting a prefix the previous machine
+		// still holds — and a resume is precisely when the conversation is at its
+		// largest, so it is the most expensive request in the session to lose.
+		//
+		// Restoring the PIN is safe where restoring warmth would not be: the pin
+		// is a preference a router may ignore, and a stale name is skipped
+		// harmlessly. warmPrefix stays empty on purpose (switchcost.go) — we
+		// cannot know what a provider still holds, so switches stay conservative.
+		engine.lastUpstream = config.InitialPrefixShape.Upstream
 	}
 	// Seed the checklist from the workspace so a resumed session shows the work
 	// already in flight. Best-effort: a missing tasks.md just leaves it empty.
@@ -343,14 +392,15 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 // turn loop's prologue.
 func (e *Engine) resetTaskState(budget Budget) {
 	e.taskMu.Lock()
-	e.taskAgentUsage = contract.Usage{}
-	e.taskAgentRuns, e.taskAgentReused, e.taskDuplicates, e.taskOverBudget = 0, 0, 0, 0
-	e.taskReviewDecision, e.taskTerminalReads, e.taskRoleBlocks = nil, 0, 0
+	e.taskDuplicates, e.taskOverBudget = 0, 0
+	e.taskReviewDecision, e.taskTerminalReads = nil, 0
 	e.taskFilesChanged = nil
-	e.resetLinkTaskState()
 	e.taskPeakContext = 0
 	e.taskCounters = newCallCounters()
 	e.taskFailures = nil // H5: reset the per-task failure window
+	// 013 FR-008: the provided-skills set is per task. seedProvidedSkills fills it
+	// from the submitted prompt right after this reset.
+	e.taskSkillsProvided = nil
 	e.taskMu.Unlock()
 }
 
@@ -363,9 +413,26 @@ func (e *Engine) IsBusy() bool {
 
 // SetEffort updates the live effort ceiling safely between model turns.
 func (e *Engine) SetEffort(level contract.EffortLevel) {
-	e.effortMu.Lock()
+	e.liveSettingsMu.Lock()
 	e.settings.Effort = level
-	e.effortMu.Unlock()
+	e.liveSettingsMu.Unlock()
+}
+
+// SetPermissionMode updates the engine-visible permission mode under the same
+// lock its reader uses, so a mid-task /permission does not race the task
+// goroutine. The TUI calls this instead of writing the shared settings struct
+// directly (F-1). The workspace guard's own live mode is set separately.
+func (e *Engine) SetPermissionMode(mode contract.PermissionMode) {
+	e.liveSettingsMu.Lock()
+	e.settings.PermissionMode = mode
+	e.liveSettingsMu.Unlock()
+}
+
+// permissionMode reads the live permission mode under liveSettingsMu.
+func (e *Engine) permissionMode() contract.PermissionMode {
+	e.liveSettingsMu.RLock()
+	defer e.liveSettingsMu.RUnlock()
+	return e.settings.PermissionMode
 }
 
 // SwitchModel applies a user-requested model change from OUTSIDE a task (the
@@ -392,54 +459,41 @@ func (e *Engine) SwitchModel(ctx context.Context, role, id, name, addendum strin
 // would never switch anything, with no visible symptom. The prologue is safe
 // because it executes before the session's first Chat, which is the hazard the
 // busy check exists to prevent.
+// The role parameter is retained for the CLI's SwitchModel signature but there
+// is only one model now; the "subagent" branch went with the subagents.
 func (e *Engine) applyModelSwitch(ctx context.Context, role, id, name, addendum string) error {
 	e.mu.Lock()
 	oldPrompt := e.prompt
-	oldMain, oldSubagent := e.settings.Provider.ActiveModelID, e.settings.Provider.SubagentModelID
-	old := oldMain
-	if role == "subagent" {
-		old = oldSubagent
-		if old == id {
-			e.mu.Unlock()
-			return nil
-		}
-		e.settings.Provider.SubagentModelID = id
-		e.prompt.SubagentModel = name
-	} else {
-		role = "main"
-		if old == id {
-			e.mu.Unlock()
-			return nil
-		}
-		e.settings.Provider.ActiveModelID = id
-		e.prompt.Model = name
-		e.prompt.ModelAddendum = addendum
+	old := e.settings.Provider.ActiveModelID
+	if old == id {
+		e.mu.Unlock()
+		return nil
 	}
+	e.settings.Provider.ActiveModelID = id
+	e.prompt.Model = name
+	e.prompt.ModelAddendum = addendum
 	e.mu.Unlock()
 
 	event := contract.InvalidationEvent{
 		Cause: contract.InvalidationModelSwitch, Trigger: contract.InvalidationUserAction,
-		Scope: fmt.Sprintf("%s model changed from %s to %s", role, old, id), RequestSeq: e.nextRequestSeq(),
+		Scope: fmt.Sprintf("model changed from %s to %s", old, id), RequestSeq: e.nextRequestSeq(),
 	}
 	if err := e.recordInvalidation(ctx, event); err != nil {
 		e.mu.Lock()
-		e.settings.Provider.ActiveModelID = oldMain
-		e.settings.Provider.SubagentModelID = oldSubagent
+		e.settings.Provider.ActiveModelID = old
 		e.prompt = oldPrompt
 		e.mu.Unlock()
 		return err
 	}
-	// C3: the main model changed, so the persisted prefix shape is now stale —
-	// re-arm the one-shot persist so the next request records the new stable shape.
-	if role == "main" {
-		e.prefixShapeSaved = false
-	}
+	// C3: the model changed, so the persisted prefix shape is now stale — re-arm
+	// the one-shot persist so the next request records the new stable shape.
+	e.prefixShapeSaved = false
 	return nil
 }
 
 func (e *Engine) effort() contract.EffortLevel {
-	e.effortMu.RLock()
-	defer e.effortMu.RUnlock()
+	e.liveSettingsMu.RLock()
+	defer e.liveSettingsMu.RUnlock()
 	return e.settings.Effort
 }
 
@@ -463,6 +517,32 @@ func (e *Engine) Cancel() {
 		e.cancel()
 	}
 	e.mu.Unlock()
+}
+
+// outputBudget is the explicit per-request output-token cap (TB02). Before this,
+// both agent loops sent no max_tokens at all, so the family default (16k) silently
+// governed and a single-file write was cut mid-JSON. The catalog's per-model
+// MaxOutput — parsed from the models endpoint and previously unused anywhere —
+// takes precedence over the family default; the profile clamps the result.
+func (e *Engine) outputBudget(modelID string) int {
+	catalog := 0
+	for _, model := range e.settings.Provider.Models {
+		if model.ID == modelID {
+			catalog = model.MaxOutput
+			break
+		}
+	}
+	return gateway.ResolveModelProfile(modelID + " " + e.catalogModelName(modelID)).OutputBudget(catalog)
+}
+
+// RouteShellOutput streams a run_shell output chunk to the transcript's
+// run_shell row. It stays a method (rather than the app calling ToolOutput
+// directly) because the shell writer is wired once at workspace construction
+// and the engine owns the callback surface.
+func (e *Engine) RouteShellOutput(chunk string) {
+	if e.callbacks.ToolOutput != nil {
+		e.callbacks.ToolOutput("run_shell", chunk)
+	}
 }
 
 // WaitIdle waits until the active task has unwound all persistence and

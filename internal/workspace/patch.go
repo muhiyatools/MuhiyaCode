@@ -19,9 +19,19 @@ type unifiedPatch struct {
 type patchHunk struct {
 	oldStart int
 	lines    []string
+	// newFinalNewline records whether the NEW-side content this hunk produces
+	// ends with a newline. It is false only when a "\ No newline at end of file"
+	// marker follows the hunk's last new-side (' ' or '+') line. Used to decide
+	// the file's terminal newline when the last hunk rewrites through EOF (C-5).
+	newFinalNewline bool
 }
 
-var hunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+// hunkHeader captures the four fields of an "@@ -a,b +c,d @@" header: old start,
+// old line count, new start, new line count. The counts are optional (a lone
+// "@@ -a +c @@" means a count of 1) and bound how many body lines the hunk has —
+// which is what lets a deleted "-- comment" line (rendered "--- comment") be
+// read as body rather than mistaken for the next file header (C-1).
+var hunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 
 func (w *Workspace) ApplyPatch(ctx context.Context, text string) (PatchResult, error) {
 	patches, err := parseUnifiedPatch(text)
@@ -60,7 +70,9 @@ func (w *Workspace) ApplyPatch(ctx context.Context, text string) (PatchResult, e
 		if err != nil {
 			return PatchResult{}, fmt.Errorf("patch %s: %w", name, err)
 		}
-		if strings.Contains(string(data), "\r\n") {
+		// Re-encode to CRLF only when it is the file's DOMINANT ending, so a
+		// mostly-LF file with a stray CRLF is not flipped wholesale to CRLF (C-2).
+		if dominantCRLF(string(data)) {
 			after = strings.ReplaceAll(after, "\n", "\r\n")
 		}
 		changes = append(changes, change{path: target, before: string(data), after: after, existed: existed, drop: patch.newName == "/dev/null"})
@@ -130,24 +142,59 @@ func parseUnifiedPatch(text string) ([]unifiedPatch, error) {
 				continue
 			}
 			start, _ := strconv.Atoi(match[1])
-			hunk := patchHunk{oldStart: start}
+			oldRemaining := hunkLineCount(match[2])
+			newRemaining := hunkLineCount(match[4])
+			hunk := patchHunk{oldStart: start, newFinalNewline: true}
 			i++
-			for i < len(lines) && !strings.HasPrefix(lines[i], "@@ ") && !strings.HasPrefix(lines[i], "--- ") {
+			// Consume exactly the counted body lines. Bounding by the header's line
+			// counts — not by the first "--- "/"@@ " prefix — is what lets a deleted
+			// "-- comment" line (rendered "--- comment") and an added "++ x" line
+			// (rendered "+++ x") be read as body instead of a file header (C-1).
+			lastNewSide := false
+			for i < len(lines) && (oldRemaining > 0 || newRemaining > 0) {
 				line := lines[i]
 				if line == `\ No newline at end of file` {
+					if lastNewSide {
+						hunk.newFinalNewline = false
+					}
 					i++
 					continue
 				}
-				if line == "" {
-					// An empty line outside a hunk body is harmless. Inside a
-					// unified hunk, an empty content line carries a prefix.
-					i++
-					continue
+				prefix := byte(' ')
+				if line != "" {
+					prefix = line[0]
 				}
-				if !strings.ContainsRune(" +-", rune(line[0])) {
-					break
+				if line != "" && prefix != ' ' && prefix != '-' && prefix != '+' {
+					break // not a body line: the hunk ended (counts over-specified)
 				}
-				hunk.lines = append(hunk.lines, line)
+				// An empty line is an empty context line whose leading space was
+				// dropped; normalize it so counts and applyHunks stay aligned.
+				body := line
+				if body == "" {
+					body = " "
+				}
+				hunk.lines = append(hunk.lines, body)
+				switch prefix {
+				case ' ':
+					oldRemaining--
+					newRemaining--
+					lastNewSide = true
+				case '-':
+					oldRemaining--
+					lastNewSide = false
+				case '+':
+					newRemaining--
+					lastNewSide = true
+				}
+				i++
+			}
+			// The new-side "\ No newline at end of file" marker sits AFTER the last
+			// counted body line, so the loop above exits before reaching it; honor a
+			// trailing one when the hunk's last body line was new-side.
+			if i < len(lines) && lines[i] == `\ No newline at end of file` {
+				if lastNewSide {
+					hunk.newFinalNewline = false
+				}
 				i++
 			}
 			patch.hunks = append(patch.hunks, hunk)
@@ -194,10 +241,30 @@ func applyHunks(content string, hunks []patchHunk) (string, error) {
 	}
 	output = append(output, source[cursor:]...)
 	result := strings.Join(output, "\n")
-	if hadNewline || len(hunks) > 0 {
+	// Terminal newline: when the final hunk rewrites through EOF, the patch's own
+	// no-newline marker governs (a well-formed diff of a file lacking a trailing
+	// newline carries "\ No newline at end of file"); otherwise the file's
+	// original state is preserved. The former `len(hunks) > 0` appended a newline
+	// unconditionally, so a file WITHOUT one gained one on every patch (C-5).
+	addNewline := hadNewline
+	if len(hunks) > 0 && cursor >= len(source) {
+		addNewline = hunks[len(hunks)-1].newFinalNewline
+	}
+	if len(output) > 0 && addNewline {
 		result += "\n"
 	}
 	return result, nil
+}
+
+// hunkLineCount parses an "@@" header's optional line-count field. A missing
+// count (a lone "@@ -a +c @@") means exactly one line, per unified-diff rules; a
+// present count (including 0, for a creation or deletion side) is used verbatim.
+func hunkLineCount(field string) int {
+	if field == "" {
+		return 1
+	}
+	n, _ := strconv.Atoi(field)
+	return n
 }
 
 func patchName(value string) string {

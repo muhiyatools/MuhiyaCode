@@ -25,7 +25,7 @@ func TestPromptStabilityDynamicDateLivesOnlyInTaskBrief(t *testing.T) {
 // constructions with identical config and carry no dynamic values, so the added
 // section costs one upgrade-time cache break and then rides the cache forever.
 func TestSystemPromptByteIdenticalAcrossConstructions(t *testing.T) {
-	ctx := PromptContext{Workspace: "/w", OS: "linux", Shell: "bash", Model: "m", HasWeb: true, HasSubagents: true, SubagentModel: "sub"}
+	ctx := PromptContext{Workspace: "/w", OS: "linux", Shell: "bash", Model: "m", HasWeb: true}
 	a := SystemPrompt(ctx)
 	b := SystemPrompt(ctx)
 	if a != b {

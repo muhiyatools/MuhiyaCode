@@ -144,6 +144,26 @@ func (g *Guard) ApprovePath(ctx context.Context, action Action, target string) (
 	return canonical, nil
 }
 
+// IsSensitive reports whether path lies inside (or equals) a protected
+// credential root. Traversal tools (grep/list_files/glob) MUST call it for every
+// directory and file they enumerate: ApprovePath authorizes only the single root
+// they were pointed at, so a walk started at a NON-sensitive ancestor (the home
+// directory, say) would otherwise descend straight into ~/.ssh, ~/.aws, or
+// ~/.muhiya and read what a direct target would have been denied.
+//
+// The check is lexical against the canonical sensitive roots. Callers pass paths
+// discovered under an already-authorized canonical root, and filepath.WalkDir
+// does not follow directory symlinks, so every enumerated path has a canonical
+// ancestry — no per-entry syscall is needed to compare it.
+func (g *Guard) IsSensitive(path string) bool {
+	for _, root := range g.sensitive {
+		if IsInside(root, path) {
+			return true
+		}
+	}
+	return false
+}
+
 func (g *Guard) ApproveShell(ctx context.Context, command string) error {
 	risk := ClassifyShell(command)
 	if risk.Blocked {

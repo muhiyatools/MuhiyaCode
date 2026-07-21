@@ -29,8 +29,11 @@ func (e *Engine) executeOne(ctx context.Context, call contract.ToolCall, definit
 		// Memory Parity N2: update, delete, or consolidate one saved entry. The
 		// definition, matcher, approval-gate parity, and rewrite live in memory.go.
 		return e.editMemory(ctx, json.RawMessage(call.ArgumentsJSON()))
-	case "run_subagent":
-		return e.runSubagentTool(ctx, json.RawMessage(call.ArgumentsJSON()))
+	case "read_skill":
+		// 013 US1: load one advertised skill's instructions by name. Read-only and
+		// catalog-bounded, so no approval gate; skills_tool.go owns the resolution,
+		// the size bound, and the already-provided dedupe.
+		return e.readSkillTool(ctx, json.RawMessage(call.ArgumentsJSON()))
 	default:
 		allowed := make(map[string]bool)
 		for _, definition := range definitions {

@@ -17,8 +17,13 @@ func TestDeepSeekProfileLimits(t *testing.T) {
 	if profile.ContextWindowLimit != 1_000_000 {
 		t.Errorf("ContextWindowLimit = %d, want 1000000", profile.ContextWindowLimit)
 	}
-	if profile.MaxOutputTokens != 16_000 {
-		t.Errorf("MaxOutputTokens = %d, want 16000", profile.MaxOutputTokens)
+	// TB02 raised the operational default from 16k to 32k. A single-file write
+	// plus reasoning did not fit in 16k, so the tool call was cut mid-JSON and the
+	// unusable payload was then re-billed on every later turn. DeepSeek bills
+	// output separately from the context window and documents a 384k ceiling, so
+	// the headroom costs nothing per request.
+	if profile.MaxOutputTokens != 32_000 {
+		t.Errorf("MaxOutputTokens = %d, want 32000", profile.MaxOutputTokens)
 	}
 	if profile.DefaultContextWindow != 128_000 {
 		t.Errorf("DefaultContextWindow = %d, want 128000", profile.DefaultContextWindow)

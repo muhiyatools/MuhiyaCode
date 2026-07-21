@@ -37,6 +37,15 @@ type ContextReport struct {
 	LinesAdded   int
 	LinesRemoved int
 	ByModel      []contract.ModelUsageRow
+	// WarmModels lists, oldest first, the models this session has already sent
+	// a real request to — the ones whose provider-side prefix cache is already
+	// paid for. Switching between them is nearly free; anything else is a cold
+	// start. See switchcost.go, which is what the advisor decides on.
+	WarmModels []string
+	// Upstream is the routing-layer provider this session is pinned to, when a
+	// routing layer is in the path at all. Empty on a direct connection, where
+	// there is nothing to choose between and nothing to report.
+	Upstream string
 	// Categories (UD-10..12) is the estimated usage-by-category split of the
 	// current context window; every row is labeled estimated by the display.
 	Categories []ContextCategory
@@ -57,6 +66,15 @@ func (e *Engine) ContextReport() ContextReport {
 	limit := e.contextLimit()
 	pressure := e.contextPressure()
 	e.taskMu.Lock()
+	// Context-in-use is REQUEST-based, matching the live footer (emitContext) and
+	// the compaction trigger (contextPressure): the last request's prompt tokens
+	// include the system prompt and tool schemas that the raw history estimate
+	// omits, so opening /context no longer drops the figure below the footer (E-2).
+	// The history estimate is the fallback before any provider figure exists.
+	inUse := history
+	if e.latestPromptAvailable {
+		inUse = max(history, e.latestPromptTokens)
+	}
 	latched := e.maintenanceLatched
 	credits := contract.SumCreditsUSD(e.usageRecords)
 	byModel := contract.AggregateUsageByModel(e.usageRecords)
@@ -72,9 +90,9 @@ func (e *Engine) ContextReport() ContextReport {
 	e.taskMu.Unlock()
 	return ContextReport{
 		PerPairing:              perPairing,
-		HistoryTokens:           history,
+		HistoryTokens:           inUse,
 		ContextLimit:            limit,
-		Percent:                 float64(history) / float64(max(1, limit)) * 100,
+		Percent:                 float64(inUse) / float64(max(1, limit)) * 100,
 		Usage:                   e.Usage(),
 		UsageAggregate:          e.UsageAggregate(),
 		Invalidations:           e.InvalidationEvents(),
@@ -91,6 +109,8 @@ func (e *Engine) ContextReport() ContextReport {
 		LinesAdded:              linesAdded,
 		LinesRemoved:            linesRemoved,
 		ByModel:                 byModel,
+		WarmModels:              e.warmModelsThisSession(),
+		Upstream:                e.upstreamPin(),
 		Categories:              e.contextCategories(history, limit),
 	}
 }

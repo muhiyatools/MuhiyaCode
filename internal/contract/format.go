@@ -6,12 +6,34 @@ import (
 	"unicode"
 )
 
-// HumanTokens renders a token count compactly (1.2k / 3.4m) for notices and
-// display lines shared by the orchestrator's compaction notices and the TUI's
-// usage/context rendering (feature 010 T036: the two byte-identical
-// implementations — orchestrator.humanTokens and tui.formatTokens — merged
-// into this one foundation-layer helper so a future format change can only
-// happen in one place).
+// FullTokens renders a token count in full, comma-grouped digits (1,234,567).
+//
+// It replaced the abbreviated form at every user-visible site (013 FR-020):
+// "1.2m" hides up to 50,000 tokens behind a rounding, and users make cost and
+// trust decisions from these numbers. Grouping is ASCII and locale-independent
+// on purpose — a locale-varying separator would make golden tests and Arabic
+// sessions non-deterministic for no reader benefit.
+func FullTokens(value int) string {
+	digits := fmt.Sprintf("%d", value)
+	negative := strings.HasPrefix(digits, "-")
+	if negative {
+		digits = digits[1:]
+	}
+	var b strings.Builder
+	for i, r := range digits {
+		if i > 0 && (len(digits)-i)%3 == 0 {
+			b.WriteByte(',')
+		}
+		b.WriteRune(r)
+	}
+	if negative {
+		return "-" + b.String()
+	}
+	return b.String()
+}
+
+// HumanTokens renders a token count compactly (1.2k / 3.4m). It survives for
+// non-display consumers only — user-visible figures use FullTokens (013 FR-020).
 func HumanTokens(value int) string {
 	switch {
 	case value >= 1_000_000:
@@ -94,6 +116,10 @@ func TruncateMiddle(value string, maxChars int) string {
 	if budget < 2 {
 		return TruncateEllipsis(value, maxChars)
 	}
+	// The output keeps only `budget` runes of content, so the real removed count is
+	// len(runes)-budget — bigger than len(runes)-maxChars by the marker's own
+	// length. The marker used to understate it by ~45 chars (E-4).
+	marker = fmt.Sprintf("\n…[%d characters trimmed from the middle]…\n", len(runes)-budget)
 	head := budget * 6 / 10
 	return string(runes[:head]) + marker + string(runes[len(runes)-(budget-head):])
 }

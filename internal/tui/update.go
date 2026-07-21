@@ -129,7 +129,6 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	beforeOffset := m.viewport.YOffset()
 	beforeItems := len(m.items)
 	beforeWidth := m.width
-	beforeViewAgent := m.viewAgent
 	dirty := false
 	var commandsOut []tea.Cmd
 	switch value := message.(type) {
@@ -190,8 +189,6 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.usage = contract.Usage(value)
 	case contextMsg:
 		m.context = contract.ContextInfo(value)
-	case agentMsg:
-		m.applyAgent(contract.AgentEvent(value))
 	case statsMsg:
 		// T1: snapshot on statsMsg. The persistent per-task summary is appended
 		// to the transcript on the resultMsg that follows (taskSummaryLine);
@@ -302,7 +299,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	// instant regardless of transcript length. Presentation-only: the provider
 	// request path (and therefore the prefix cache) is untouched.
 	switch message.(type) {
-	case streamMsg, toolStartMsg, toolEndMsg, toolOutputMsg, agentMsg, resultMsg, statsMsg, initialMsg, actionMsg:
+	case streamMsg, toolStartMsg, toolEndMsg, toolOutputMsg, resultMsg, statsMsg, initialMsg, actionMsg:
 		dirty = true
 	}
 	if len(m.items) != beforeItems || m.width != beforeWidth {
@@ -331,27 +328,16 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	if scrolled {
 		m.followOutput = m.viewport.AtBottom()
 	}
-	// 009 polish: an agent-view switch (Tab, Alt+N, Esc, or a chip click)
-	// changes which transcript body renders — repaint NOW. Keyboard switches
-	// previously set no dirty signal, so on an idle session (no content events
-	// coming) the header changed but the body never did: the switch looked
-	// dead. Scroll resets deliberately on a switch: a detail view opens at its
-	// top (the "Agent task:" header), and returning to the main session
-	// resumes following the live bottom.
-	viewSwitched := m.viewAgent != beforeViewAgent
-	if viewSwitched {
-		dirty = true
-		m.followOutput = m.viewAgent == ""
-	}
+	// The agent-view switch repaint lived here: switching into or out of a
+	// subagent's detail body changed which transcript rendered, and needed an
+	// explicit dirty signal because a keyboard switch produced no content event.
+	// There is one transcript body now, so the only repaint trigger is content.
 	forceBottom := m.followOutput
 	if dirty {
 		// New content re-renders and pins to the bottom only while following, so a
 		// reader who scrolled up mid-stream is never yanked down.
 		m.frameState.markDirty() // US2 T032: record that the transcript pane changed
 		m.refreshViewport(forceBottom)
-		if viewSwitched && m.viewAgent != "" {
-			m.viewport.GotoTop()
-		}
 	} else if forceBottom && wasBottom {
 		// Content unchanged but the layout may have shifted (input grew): keep the
 		// bottom pinned only when we were already there — never pull a scrolled-up
@@ -378,23 +364,6 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(commandsOut...)
 }
 
-func (m *Model) cycleAgent() {
-	if len(m.agents) == 0 {
-		return
-	}
-	if m.viewAgent == "" {
-		m.viewAgent = m.agents[0].id
-		return
-	}
-	for index, agent := range m.agents {
-		if agent.id == m.viewAgent {
-			if index == len(m.agents)-1 {
-				m.viewAgent = ""
-			} else {
-				m.viewAgent = m.agents[index+1].id
-			}
-			return
-		}
-	}
-	m.viewAgent = ""
-}
+// cycleAgent / cycleAgentBack walked the ring main → agent[0] → … → main,
+// bound to → and ←. Both are gone with the agent views they cycled between;
+// the arrow keys belong entirely to the caret again.

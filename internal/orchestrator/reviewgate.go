@@ -23,12 +23,14 @@ import (
 // benchmark harness.
 var reviewLegacyMode = os.Getenv("MUHIYA_BENCH_LEGACY_REVIEW") == "1"
 
-// Review gating (feature 011, D1/D6 — contracts/review-gating.md). Both
-// automatic review triggers (the pipeline validation dispatch and the
-// AutoReview nudge) consult Decide before launching a review subagent; neither
-// may dispatch unconditionally. Explicit user requests NEVER route through
-// here — they run via the ungated model-invoked run_subagent("review") path
-// (contract §6a), in every gating mode including "off".
+// Review gating (feature 011, D1/D6 — contracts/review-gating.md). The
+// automatic review trigger — the AutoReview nudge at the end of a
+// file-changing task — consults Decide before it fires, so a trivial two-file
+// change does not spend a turn on ceremony just because the effort is max.
+//
+// The gate governs the AUTOMATIC trigger only. A user who asks for a review in
+// their prompt gets one: that is ordinary work the session does directly, and
+// no gating mode, including "off", suppresses an explicit request.
 //
 // Decide is deterministic and side-effect-free: same profile, same decision,
 // zero model calls, zero token cost.
@@ -178,8 +180,9 @@ type TaskProfile struct {
 	// risk matcher; empty is valid (paths alone still match).
 	ContentSamples []string
 	GatingMode     ReviewGatingMode
-	// ExplicitRequest is defense in depth only: explicit requests dispatch via
-	// the ungated run_subagent path and normally never reach Decide (§6a).
+	// ExplicitRequest is defense in depth only: an explicitly requested review
+	// is work the session simply does, so it does not reach the automatic
+	// trigger this gate governs (§6a). Set, it forces a review through anyway.
 	ExplicitRequest bool
 }
 

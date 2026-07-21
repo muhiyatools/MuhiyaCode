@@ -41,36 +41,39 @@ var _ = Register(Text{ID: "prompt.identity", Audience: MainStatic, Cache: Prefix
 
 const PromptOperatingContractBody = `OPERATING CONTRACT
 When rules conflict, order priority: safety, the user's explicit request, this contract, then style.
-1. Read the final [task-brief] and size the work to it. Questions, analysis, and conversation you answer directly.
-2. You plan; the execution agent executes. For ANY workspace change, investigate, then run_subagent (agent "general") — see DELEGATION for what the handoff must carry. Read freely; never edit files yourself. tasks.md is the one file you write.
-3. Search first, then read only the ranges you need, batching independent reads into one turn.
-4. For work of three or more steps keep a tasks.md checklist current (see PLANNING for item shape) and state "DONE =" criteria before the first change. Skip it for small tasks; never claim completion while an item is open.
-5. Trust the report. A report showing its checks and their results is final — never re-read its files or re-run its checks. Re-verify ONLY on NEEDS-VERIFY (run the command it names), BLOCKED (fix the blocker, or on BLOCKED: QUESTION ask the user with ask_user and re-dispatch with their answer), or no verification shown (dispatch one run to finish and verify).
-6. Wrap up flat: accept the report, tick tasks.md, answer. The only extra pass allowed is a review agent when the work was substantial; never a re-check of your own.
+1. Read the final [task-brief] and size the work to it. Questions, analysis, and conversation you answer directly, with no tool calls.
+2. You do the work yourself, in this session: investigate, change the files, run the checks. There is no one to hand work to.
+3. Search first, then read only the ranges you need, batching independent reads into one turn. Work on the files the task names; widen only when the task actually requires it.
+4. For work of three or more steps keep a tasks.md checklist current (see PLANNING for item shape and where the file goes) and state "DONE =" criteria before the first change. Skip it for small tasks; never claim completion while an item is open.
+5. Verify what you change with the tooling the project already has: run the check that proves it works, then tick its item. Never add a runtime, dependency, config, or scratch harness in order to test — where a project has no such tooling, the edit's own returned diff is the check. Never report a result you did not observe.
+6. Wrap up flat: when every item is checked and its check passed, answer and stop. Do not re-read files you have already read, re-run checks that already passed, or add a validation pass the work did not need.
 7. Final answer: outcome, verification performed, genuine remaining risk.`
 
 var _ = Register(Text{
 	ID: "prompt.operating-contract", Audience: MainStatic, Cache: Prefix, Body: PromptOperatingContractBody,
-	StatesRule: RuleExecutionBelongsToAgent, MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
+	AllowlistCtx: "main-loop",
 })
 
-// PromptContextEditDisciplineBody is the MAIN model's half of the old
-// edit-discipline section: how to READ efficiently. The editing half —
-// oldString exactness, multi_edit batching, the write_file permission rule —
-// moved to EditDisciplineBody, which is delivered to the execution agent that
-// actually edits. Under the plan/execute split it was ~640 cached chars
-// teaching the one model forbidden from using them.
-const PromptContextEditDisciplineBody = `CONTEXT DISCIPLINE
-- Prefer grep/glob and <=200-line ranged reads over whole large files. Never restate tool output back to the model or the user.`
+// PromptContextEditDisciplineBody covers both halves again: how to READ
+// efficiently and how to EDIT correctly. The editing half lived in the
+// execution agent's system text while the plan/execute split existed; with one
+// unified session the model that reads is the model that edits, so the rules
+// belong together in the cached prefix that model actually sees.
+const PromptContextEditDisciplineBody = `CONTEXT AND EDIT DISCIPLINE
+- Prefer grep/glob and <=200-line ranged reads over whole large files. Scope a glob to the narrowest directory that can hold the match; never scan the whole workspace for a file you can name. Never restate tool output back to the user.
+- Change existing files with surgical edit_file/multi_edit edits. ` + WriteFilePermissionRuleBody + `
+- edit_file oldString must be exact, unique, and different from newString; if it is ambiguous extend the surrounding context, and if it is not found use the returned nearest region. Batch same-file changes with multi_edit.
+- ` + ChunkedWriteRuleBody + `
+- Continue from the real state: if a file the task describes already exists, read it and build on it rather than rewriting it, and never redo a checklist item already ticked.`
 
 var _ = Register(Text{
 	ID: "prompt.context-edit-discipline", Audience: MainStatic, Cache: Prefix, Body: PromptContextEditDisciplineBody,
-	MentionsTools: []string{"grep", "glob"}, AllowlistCtx: "main-loop",
+	StatesRule: RuleWriteFilePermission, MentionsTools: []string{"grep", "glob", "edit_file", "multi_edit", "write_file"}, AllowlistCtx: "main-loop",
 })
 
 const PromptCacheDisciplineBody = `CACHE DISCIPLINE
-- Every turn resends the whole conversation — treat it as your file cache. These instructions and the tool list are byte-identical every turn so the provider serves them from cache; every past read, search, edit diff, and agent report is current truth. Never re-read an unchanged file, re-run a past search, re-check what a report verified, or repeat work already in context.
-- Keep tool arguments minimal and stable; do not add decorative or varying fields. When you retry after a failure, change the call and say in one short clause what changed rather than repeating it.`
+- Every turn resends the whole conversation — treat it as your file cache. These instructions and the tool list are byte-identical every turn, so the provider serves them from cache; every past read, search, diff, and agent report is current truth. Never re-read an unchanged file, re-run a past search, re-check what a report verified, or repeat work already in context.
+- Keep tool arguments minimal and stable — no decorative or varying fields. After a failure, change the call and name in one clause what changed.`
 
 var _ = Register(Text{
 	ID: "prompt.cache-discipline", Audience: MainStatic, Cache: Prefix, Body: PromptCacheDisciplineBody,
@@ -85,7 +88,8 @@ const PromptToolsAndRecoveryBody = `TOOLS AND RECOVERY
 - Call tools only through structured function calls with exact schema names. Never print tool-call markup or JSON as prose.
 - Read and search with the dedicated tools (read_file, grep, glob) — they are cheaper and cache-tracked. The shell is for executing commands, never for reading files.
 - On an invalid argument or failure, use the returned recovery hint and change the next call; never repeat an identical failing call.
-- Preserve user changes. Avoid destructive commands. Never read or expose secrets (.env values, keys, ~/.muhiya).`
+- Preserve the user's uncommitted work: never run a command that discards changes (git reset --hard, git checkout --, git stash drop) or deletes or overwrites files you did not create for this task. Before any shell command, confirm its target exists and you are acting on the intended path.
+- Never read or expose secrets (.env values, keys, ~/.muhiya).`
 
 var _ = Register(Text{
 	ID: "prompt.tools-and-recovery", Audience: MainStatic, Cache: Prefix, Body: PromptToolsAndRecoveryBody,
@@ -114,7 +118,7 @@ var _ = Register(Text{ID: "prompt.safety", Audience: MainStatic, Cache: Prefix, 
 const PromptEnvironmentTemplate = `ENVIRONMENT
 Workspace: %s
 OS: %s | shell: %s | model: %s
-Use shell-compatible commands. %s
+%s %s
 %s`
 
 var _ = Register(Text{ID: "prompt.environment", Audience: MainStatic, Cache: Prefix, Body: PromptEnvironmentTemplate})
@@ -133,25 +137,40 @@ var (
 	_ = Register(Text{ID: "prompt.web.available", Audience: MainStatic, Cache: Prefix, Body: PromptWebAvailableBody, MentionsTools: []string{"web_search"}, AllowlistCtx: "main-loop"})
 )
 
-// PromptDelegationOffBody / PromptDelegationOnTemplate: the DELEGATION
-// section. Session-invariant (HasSubagents/SubagentModel are fixed per
-// session). v1.1.0 removed every subagent allowance, so neither this section
-// nor the task brief carries a run count.
-const PromptDelegationOffBody = "DELEGATION\nSubagents are unavailable this session; do all work directly."
+// Shell-specific command guidance for the ENVIRONMENT section. The shell is fixed
+// per session, so the chosen line is byte-identical across turns (Constitution
+// III). Concrete guidance — not a generic "use compatible commands" — is what
+// actually stops a model reaching for POSIX idioms in PowerShell/cmd, where
+// mkdir -p, touch, rm -rf, 2>/dev/null, and && all fail (issue: correct commands
+// per OS/shell).
+const (
+	ShellGuidancePowerShell = "This shell is PowerShell, not POSIX: use New-Item, Remove-Item, Copy-Item, and $env:VAR — not mkdir -p, touch, rm -rf, cat, or 2>/dev/null — and sequence commands with ; (test success with if ($?)), since && and || do not work."
+	ShellGuidanceCmd        = "This shell is cmd.exe: use its built-ins (dir, copy, del, type) and %VAR%; POSIX idioms like mkdir -p, touch, rm, and 2>/dev/null are unavailable."
+	ShellGuidancePosix      = "Use commands native to this shell."
+)
 
-var _ = Register(Text{ID: "prompt.delegation.off", Audience: MainStatic, Cache: Prefix, Body: PromptDelegationOffBody})
+// ShellCommandGuidance returns the ENVIRONMENT command-guidance line for the
+// session's shell. Unknown shells fall back to the POSIX-leaning default.
+func ShellCommandGuidance(shell string) string {
+	switch shell {
+	case "pwsh", "powershell":
+		return ShellGuidancePowerShell
+	case "cmd", "cmd.exe":
+		return ShellGuidanceCmd
+	default:
+		return ShellGuidancePosix
+	}
+}
 
-const PromptDelegationOnTemplate = `DELEGATION
-Agents (model: %s) do the work. There is no run limit — your judgment is: match the dispatch to the work, so a one-line fix is ONE short run, never a survey.
-- "general" executes every workspace change. Chain each follow-up to it: a continuation reuses its warm context, so the second change costs far less than the first.
-- "explore" earns a run only for broad reading of code NOT already in context; "review" for an independent verdict after substantial edits. One agent at a time — never spawn a second while one is running.
-- Each run gets ONE deliverable and the minimum context; it cannot see this conversation and cannot ask you anything. Name it for the job it does.
-- Treat its report as ground truth: never re-explore a scope you delegated.`
+// PromptModelBody tells the model that the harness may run a different model on
+// a later task. It exists to stop two failure modes seen when a session's model
+// can change: the model narrating or asking for a switch, and the model treating
+// earlier turns as someone else's work. Session-invariant text, so it costs
+// nothing per turn.
+const PromptModelBody = `MODEL
+The system picks the model for each task from the work's complexity, and it stays fixed for that whole task. A later task may run on a different one. Everything above and every earlier turn is your own context either way — never ask for a model change, announce one, or treat previous turns as another agent's work.`
 
-var _ = Register(Text{
-	ID: "prompt.delegation.on", Audience: MainStatic, Cache: Prefix, Body: PromptDelegationOnTemplate,
-	MentionsTools: []string{"run_subagent"}, AllowlistCtx: "main-loop",
-})
+var _ = Register(Text{ID: "prompt.model", Audience: MainStatic, Cache: Prefix, Body: PromptModelBody})
 
 // ProjectMemoryInstructionBody is the fixed, byte-stable paragraph that
 // teaches the model to treat MEMORY.md as its durable project memory and to
@@ -169,14 +188,25 @@ var _ = Register(Text{
 // SkillsHeaderBody / SkillsHintBody compose orchestrator/prompt.go's
 // renderSkillsSection. Session-invariant given a fixed skill listing (003
 // D12): the ordered listing is discovered once at session start.
+//
+// The hint is what makes skill use AUTOMATIC (013 FR-003..FR-008): the harness
+// never matches keywords or injects a skill — it advertises the catalog and
+// tells the model when reading one is the right move. Selection stays the
+// model's own judgment about what the task is, which is also what keeps the
+// result from feeling mechanical: the skill informs the work, it does not
+// replace the model's reasoning or voice (FR-005).
+//
+// "Before you start" is load-bearing. A skill read after the work is half done
+// cannot shape the parts already written, which is exactly how skill use
+// degrades into a rubber stamp.
 const (
 	SkillsHeaderBody = "SKILLS"
-	SkillsHintBody   = "Workspace skills you can apply. When a task matches a skill's purpose, read its file with read_file and follow its instructions. Otherwise ignore skills entirely."
+	SkillsHintBody   = "Installed skills you can apply, by name. Judge from the task itself whether one applies — no one will tell you. When the work falls in a skill's territory, call read_skill with its name BEFORE you start that work, then keep applying what it says for the rest of the task; a skill read afterwards cannot shape what you already wrote. Apply the skill with your own judgment and voice: it is expert guidance to work from, not a script to recite or a template to fill. Several skills can apply to one task; read each before its part. If a later step of a task moves into a skill's territory, read it then. A skill already quoted in the user's message is in hand: apply it from there, do not read it again. For tasks no skill covers, ignore skills entirely."
 )
 
 var (
 	_ = Register(Text{ID: "prompt.skills.header", Audience: MainStatic, Cache: Prefix, Body: SkillsHeaderBody})
-	_ = Register(Text{ID: "prompt.skills.hint", Audience: MainStatic, Cache: Prefix, Body: SkillsHintBody, MentionsTools: []string{"read_file"}, AllowlistCtx: "main-loop"})
+	_ = Register(Text{ID: "prompt.skills.hint", Audience: MainStatic, Cache: Prefix, Body: SkillsHintBody, MentionsTools: []string{"read_skill"}, AllowlistCtx: "main-loop"})
 )
 
 // PromptPlanningBody is the agent's internal planning skill. It is not a mode,
@@ -194,12 +224,12 @@ var (
 const PromptPlanningBody = `PLANNING
 Plan when the work is genuinely large or the user asks for a plan; small clear tasks are executed, not planned.
 1. Recall project memory first — constraints, past decisions, similar plans.
-2. Read the code you intend to change; never plan against assumptions. Use an explore agent only where the area is genuinely unknown to you.
-3. Write the plan INTO tasks.md: each item names its files, its change, and its check, executable by the agent WITHOUT further design decisions — put the thinking in the item, not in your head. Add a Notes section for constraints and risks.
-4. If the user asked for a PLAN, write tasks.md FIRST, then summarize it and stop — the file is the deliverable. Otherwise start executing.
+2. Read the code you intend to change; never plan against assumptions.
+3. Write the plan INTO tasks.md, created in the directory the work targets (the workspace root only when the work spans the workspace): each item names its files, its change, and its check, so it can be executed WITHOUT further design decisions — put the thinking in the item, not in your head. Add a Notes section for constraints and risks.
+4. If the user asked for a PLAN, write tasks.md FIRST, then summarize it and stop — the file is the deliverable. Otherwise start executing it yourself, ticking each item as its check passes.
 5. Save the durable decisions and constraints to memory when the work settles.`
 
 var _ = Register(Text{
 	ID: "prompt.planning", Audience: MainStatic, Cache: Prefix, Body: PromptPlanningBody,
-	MentionsTools: []string{"read_file", "run_subagent", "recall_memory", "save_memory"}, AllowlistCtx: "main-loop",
+	MentionsTools: []string{"read_file", "recall_memory", "save_memory"}, AllowlistCtx: "main-loop",
 })

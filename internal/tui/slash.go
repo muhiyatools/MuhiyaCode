@@ -6,7 +6,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"github.com/muhiya/muhiyacode/internal/gateway"
 	"github.com/muhiya/muhiyacode/internal/orchestrator"
 )
 
@@ -57,7 +56,7 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	args := strings.Fields(value)
 	command := strings.ToLower(args[0])
 	if m.busy {
-		allowed := command == "/reasoning" || command == "/effort" || command == "/context" || command == "/errors"
+		allowed := command == "/reasoning" || command == "/effort" || command == "/context"
 		if !allowed {
 			m.notify(command + " is unavailable while a task is running. Press Esc to stop it, or send plain text to steer it.")
 			return nil
@@ -65,15 +64,7 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	}
 	switch command {
 	case "/context":
-		report := formatContextReport(m.runtime.Engine.ContextReport())
-		if m.runtime.Settings != nil {
-			report += "\n\n" + formatCapabilityProfile(gateway.ResolveModelProfile(m.runtime.Settings.Provider.ActiveModelID))
-		}
-		m.openInfo("Context usage", report)
-	case "/errors":
-		// HarnessEvents() is a read-only, lock-guarded ring copy — safe on the
-		// Update goroutine (see uithread_guard allowlist, T022).
-		m.openInfo("Harness events", formatHarnessEvents(m.runtime.Engine.HarnessEvents()))
+		m.openInfo("Context usage", formatContextReport(m.runtime.Engine.ContextReport(), m.sessionModelName()))
 	case "/compact":
 		if m.busy {
 			m.notify("Stop the running task before compacting.")
@@ -89,6 +80,9 @@ func (m *Model) runSlash(value string) tea.Cmd {
 		}
 		return actionCommand("rewind", func() (any, error) { return m.actions.Rewind(m.ctx) })
 	case "/reasoning", "/effort":
+		if m.runtime.Settings == nil { // H-2: guard the Effort deref below
+			return nil
+		}
 		if len(args) > 1 {
 			return m.setEffort(args[1])
 		}
@@ -96,13 +90,10 @@ func (m *Model) runSlash(value string) tea.Cmd {
 		for _, level := range []contract.EffortLevel{contract.EffortLow, contract.EffortMedium, contract.EffortHigh, contract.EffortMax} {
 			choices = append(choices, contract.QuestionChoice{Label: string(level), Description: reasoningSummary(level), Recommended: level == m.runtime.Settings.Effort})
 		}
-		m.openChoice("Reasoning effort", "How hard the model thinks. The gateway maps this to each model's thinking level (DeepSeek: low/medium→high, high/max→max).", choices, func(index int) tea.Cmd { return m.setEffort(choices[index].Label) })
-	case "/permissions", "/mode":
-		if len(args) > 1 {
-			return m.setPermission(contract.PermissionMode(args[1]))
-		}
-		choices := []contract.QuestionChoice{{Label: "normal", Description: "Confirm mutations and shell commands", Recommended: m.runtime.Settings.PermissionMode == contract.PermissionNormal}, {Label: "auto-accept", Description: "Automatically allow safe workspace actions", Recommended: m.runtime.Settings.PermissionMode == contract.PermissionAutoAccept}}
-		m.openChoice("Permission mode", "Destructive commands and credential paths remain blocked in every mode.", choices, func(index int) tea.Cmd { return m.setPermission(contract.PermissionMode(choices[index].Label)) })
+		m.openChoice("Reasoning effort", "How hard the model thinks.", choices, func(index int) tea.Cmd { return m.setEffort(choices[index].Label) })
+	// /permissions and /mode are gone (013 FR-014): Shift+Tab cycles the mode and
+	// the footer names the current one with the shortcut beneath it, so a command
+	// for the same two-state toggle was pure surface area.
 	case "/login":
 		// `/login <key>` pastes a key directly; bare `/login` opens the browser
 		// sign-in (loopback + PKCE) through the Muhiya platform.
@@ -182,19 +173,43 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	return nil
 }
 
+// reasoningSummary describes each level in terms of the user's choice — how
+// hard the model thinks — with no provider-mapping trivia (013 FR-016). Which
+// internal thinking tier a given model receives is the gateway's business, and
+// naming one vendor in a multi-provider tool only invited the question of what
+// the other providers do.
 func reasoningSummary(level contract.EffortLevel) string {
 	switch level {
 	case contract.EffortLow:
-		return "Lightest thinking, fastest — the default. DeepSeek maps this to high."
+		return "Lightest thinking, fastest — the default."
 	case contract.EffortMedium:
-		return "Balanced thinking. DeepSeek maps this to high."
+		return "Balanced thinking."
 	case contract.EffortHigh:
-		return "Deep thinking for tricky work. DeepSeek maps this to max."
+		return "Deep thinking for tricky work."
 	case contract.EffortMax:
-		return "Maximum thinking for the hardest problems. DeepSeek maps this to max."
+		return "Maximum thinking for the hardest problems."
 	default:
 		return ""
 	}
+}
+
+// sessionModelName resolves the display name of the session's model for the
+// context card (013 FR-023). The name comes from the configured model list; an
+// unlisted ID falls back to the ID itself so the card is never blank.
+func (m *Model) sessionModelName() string {
+	if m.runtime.Settings == nil {
+		return ""
+	}
+	provider := m.runtime.Settings.Provider
+	if provider.ActiveModelID == "" {
+		return ""
+	}
+	for _, model := range provider.Models {
+		if model.ID == provider.ActiveModelID {
+			return model.Name
+		}
+	}
+	return provider.ActiveModelID
 }
 
 // engineOp and suffix went with the interactive engine mutations (/model and
@@ -226,7 +241,14 @@ func (m *Model) setPermission(mode contract.PermissionMode) tea.Cmd {
 		m.notify("Permission mode must be normal or auto-accept.")
 		return nil
 	}
-	m.runtime.Settings.PermissionMode = mode
+	if m.runtime.Engine != nil {
+		// Route through the engine's synchronized setter so a mid-task change does
+		// not race the task goroutine reading permission mode (F-1). This writes
+		// the same shared settings field, under liveSettingsMu.
+		m.runtime.Engine.SetPermissionMode(mode)
+	} else if m.runtime.Settings != nil {
+		m.runtime.Settings.PermissionMode = mode
+	}
 	if m.actions.SetPermission != nil {
 		return actionCommand("permission", func() (any, error) { return mode, m.actions.SetPermission(m.ctx, mode) })
 	}
@@ -237,6 +259,9 @@ func (m *Model) setPermission(mode contract.PermissionMode) tea.Cmd {
 }
 
 func (m *Model) cyclePermission() tea.Cmd {
+	if m.runtime.Settings == nil { // H-2: no settings → nothing to toggle, never panic
+		return nil
+	}
 	mode := contract.PermissionAutoAccept
 	if m.runtime.Settings.PermissionMode == contract.PermissionAutoAccept {
 		mode = contract.PermissionNormal

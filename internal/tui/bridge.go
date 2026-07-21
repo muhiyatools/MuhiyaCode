@@ -23,7 +23,6 @@ type toolOutputMsg struct{ name, output string }
 type planMsg contract.Plan
 type usageMsg contract.Usage
 type contextMsg contract.ContextInfo
-type agentMsg contract.AgentEvent
 type statsMsg contract.TaskStats
 type mcpStatusMsg string
 
@@ -99,17 +98,15 @@ func (b *Bridge) Callbacks() contract.Callbacks {
 		// hook entirely, so thought tokens cost no channel traffic and no frames.
 		// The star spinner + status verb remain the only "working" indication.
 		ToolStart: func(name string, input json.RawMessage) {
-			b.flush()
-			b.send(toolStartMsg{name: name, input: append(json.RawMessage(nil), input...)})
+			b.sendAfterFlush(toolStartMsg{name: name, input: append(json.RawMessage(nil), input...)})
 		},
 		ToolOutput:   func(name, output string) { b.queueToolOutput(name, output) },
-		ToolEnd:      func(name, output string) { b.flush(); b.send(toolEndMsg{name: name, output: output}) },
+		ToolEnd:      func(name, output string) { b.sendAfterFlush(toolEndMsg{name: name, output: output}) },
 		PlanUpdate:   func(value contract.Plan) { b.send(planMsg(value)) },
 		Usage:        func(value contract.Usage) { b.send(usageMsg(value)) },
 		Context:      func(value contract.ContextInfo) { b.send(contextMsg(value)) },
-		Agent:        func(value contract.AgentEvent) { b.send(agentMsg(value)) },
 		MCPStatus:    func(value string) { b.send(mcpStatusMsg(value)) },
-		TaskComplete: func(value contract.TaskStats) { b.flush(); b.send(statsMsg(value)) },
+		TaskComplete: func(value contract.TaskStats) { b.sendAfterFlush(statsMsg(value)) },
 		Confirm: func(ctx context.Context, message string) (bool, error) {
 			index, err := b.request(ctx, modalRequest{title: "Permission required", message: message, choices: []contract.QuestionChoice{{Label: "Allow once", Recommended: true}, {Label: "Deny"}}})
 			return index == 0, err
@@ -189,12 +186,12 @@ func (b *Bridge) scheduleLocked() {
 	time.AfterFunc(35*time.Millisecond, b.flush)
 }
 
-func (b *Bridge) flush() {
-	b.mu.Lock()
+// drainLocked collects the buffered stream + tool output into ordered messages
+// and clears the buffers. Callers hold b.mu.
+func (b *Bridge) drainLocked() (*streamMsg, []toolOutputMsg) {
 	if b.pending == "" && len(b.toolOrder) == 0 {
 		b.scheduled = false
-		b.mu.Unlock()
-		return
+		return nil, nil
 	}
 	var stream *streamMsg
 	if b.pending != "" {
@@ -208,18 +205,49 @@ func (b *Bridge) flush() {
 	}
 	b.pending, b.scheduled = "", false
 	b.toolOrder, b.toolBuf = nil, nil
-	program := b.program
-	b.mu.Unlock()
-	if program == nil {
+	return stream, toolMsgs
+}
+
+// flush drains and emits the buffered stream + tool output. D3: the sends happen
+// WHILE HOLDING b.mu so a concurrently-firing flush (the 35 ms timer) or a tool
+// marker (sendAfterFlush) cannot interleave a send between the buffered assistant
+// text and a following tool row — which would render the text beneath its own
+// tool call. Update never acquires b.mu, so holding it across program.Send is
+// deadlock-free; the sends are few and fast.
+func (b *Bridge) flush() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	stream, toolMsgs := b.drainLocked()
+	if b.program == nil {
 		return
 	}
 	// Assistant text precedes tool output in a turn, so flush the stream first.
 	if stream != nil {
-		program.Send(*stream)
+		b.program.Send(*stream)
 	}
 	for _, message := range toolMsgs {
-		program.Send(message)
+		b.program.Send(message)
 	}
+}
+
+// sendAfterFlush emits any buffered stream/tool output and then msg, all under a
+// single lock, so a tool-start / tool-end / task-complete marker is never
+// reordered ahead of the assistant text it should follow (D3). Used for the
+// structured markers that must land in transcript order relative to the stream.
+func (b *Bridge) sendAfterFlush(msg tea.Msg) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	stream, toolMsgs := b.drainLocked()
+	if b.program == nil {
+		return
+	}
+	if stream != nil {
+		b.program.Send(*stream)
+	}
+	for _, message := range toolMsgs {
+		b.program.Send(message)
+	}
+	b.program.Send(msg)
 }
 
 func recommendedChoice(choices []contract.QuestionChoice) int {

@@ -22,11 +22,6 @@ func (m *Model) refreshViewport(forceBottom bool) {
 
 func (m *Model) renderTranscript() string {
 	items := m.items
-	if m.viewAgent != "" {
-		if agent := m.agentByID[m.viewAgent]; agent != nil {
-			items = append([]item{{kind: "system", content: "Agent task: " + agent.task}}, agent.items...)
-		}
-	}
 	// An empty session renders an empty transcript. The welcome cue that used to
 	// live here is gone (v1.1.0): the composer, the header, and the "/" hint in
 	// the mode line already orient a new user, and a greeting that has to be
@@ -46,17 +41,15 @@ func (m *Model) renderTranscript() string {
 	// row tracks the content-row where the NEXT appended block begins. Blocks are
 	// joined with "\n\n", so each contributes its own rows plus one separator blank.
 	// Empty blocks are skipped entirely — they would otherwise inject stray blank
-	// rows and desync the chip row math. A tool/agent chip's clickable header is its
-	// block's first row (row). Chips register in the agent detail view too (009
-	// polish): a subagent's tool rows were previously inert — their captured
-	// output existed but could never be expanded.
+	// rows and desync the chip row math. A tool chip's clickable header is its
+	// block's first row (row).
 	row := 0
-	appendBlock := func(block string, tool *toolView, agentID string) {
+	appendBlock := func(block string, tool *toolView) {
 		if block == "" {
 			return
 		}
-		if tool != nil || agentID != "" {
-			m.transcriptChips = append(m.transcriptChips, chipSpan{row: row, tool: tool, agentID: agentID})
+		if tool != nil {
+			m.transcriptChips = append(m.transcriptChips, chipSpan{row: row, tool: tool})
 		}
 		blocks = append(blocks, block)
 		row += lineCount(block) + 1
@@ -70,22 +63,18 @@ func (m *Model) renderTranscript() string {
 			// frame, so streaming re-renders only the growing draft, not the whole
 			// history. cachedWidth==0 (zero value) means "no cache yet".
 			if entry.cachedWidth == width && entry.cachedLen == len(entry.content) && entry.cachedTitle == entry.title {
-				appendBlock(entry.cachedBlock, nil, "")
+				appendBlock(entry.cachedBlock, nil)
 				continue
 			}
 			block := m.renderTextBlock(entry, width, rtl)
 			entry.cachedBlock, entry.cachedWidth, entry.cachedLen, entry.cachedTitle = block, width, len(entry.content), entry.title
-			appendBlock(block, nil, "")
+			appendBlock(block, nil)
 		case "summary":
 			if entry.stats != nil {
-				appendBlock(taskSummaryLine(*entry.stats, m.palette), nil, "")
+				appendBlock(taskSummaryLine(*entry.stats, m.palette), nil)
 			}
 		case "tool":
-			appendBlock(m.renderTool(entry.tool, width), entry.tool, "")
-		case "agent":
-			if agent := m.agentByID[entry.agentID]; agent != nil {
-				appendBlock(m.renderAgentChip(agent, width), nil, entry.agentID)
-			}
+			appendBlock(m.renderTool(entry.tool, width), entry.tool)
 		}
 	}
 	content := indentLines(strings.Join(blocks, "\n\n"), transcriptGutter)

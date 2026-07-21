@@ -1,6 +1,10 @@
 package orchestrator
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/muhiya/muhiyacode/internal/shellsafe"
+)
 
 // IsReadOnlyShell reports whether a shell command is safe for a read-only agent
 // (a research/plan/review subagent, or the main loop in manual plan mode) to run
@@ -40,22 +44,22 @@ func IsReadOnlyShell(command string) bool {
 	// main.go`, `rg kill internal/`, `git log --grep "rm -rf"` are all reads. The
 	// prior flat scan blocked them. Destructive FLAGS (--fix, -delete, …) mutate
 	// wherever they appear, so they are checked at every position.
-	for _, segment := range shellCommandSegments(trimmed) {
-		markThroughWrappers(segment)
+	for _, segment := range shellsafe.Segments(trimmed) {
+		shellsafe.MarkThroughWrappers(segment)
 		for i, token := range segment {
-			word := token.word
+			word := token.Word
 			if shellDestructiveFlags[word] {
 				return false
 			}
 			if flag, _, cut := strings.Cut(word, "="); cut && shellDestructiveFlags[flag] {
 				return false
 			}
-			if !token.commandPos {
+			if !token.CommandPos {
 				continue
 			}
 			// Normalize before the lookup: `\rm`, `/bin/rm`, and `RM.EXE` are all
 			// the same program, and each of them used to miss the map.
-			program := normalizeCommandWord(word)
+			program := shellsafe.NormalizeCommandWord(word)
 			if shellDestructiveWords[program] {
 				return false
 			}
@@ -78,58 +82,11 @@ func IsReadOnlyShell(command string) bool {
 	return true
 }
 
-// normalizeCommandWord reduces a command-position word to the bare program name
-// the destructive-word map is keyed on. A leading backslash (the shell idiom for
-// bypassing an alias), any directory prefix, and a Windows .exe suffix all name
-// the same program and must not be a way past the map.
-func normalizeCommandWord(word string) string {
-	word = strings.TrimPrefix(word, `\`)
-	if index := strings.LastIndexAny(word, `/\`); index >= 0 {
-		word = word[index+1:]
-	}
-	return strings.TrimSuffix(word, ".exe")
-}
-
-// markThroughWrappers re-marks the program a wrapper is about to run as command
-// position. `env rm -rf .`, `sudo rm -rf /`, and `xargs rm -rf` all put the real
-// verb at argument position, where the destructive-word check skips it. Chains
-// resolve naturally: marking a token that is itself a wrapper lets the same loop
-// see through the next one.
-func markThroughWrappers(segment []shellToken) {
-	for i := 0; i < len(segment); i++ {
-		if !segment[i].commandPos || !shellWrapperCommands[normalizeCommandWord(segment[i].word)] {
-			continue
-		}
-		for j := i + 1; j < len(segment); j++ {
-			word := segment[j].word
-			// Skip the wrapper's own flags, its VAR=value assignments (env), and
-			// its numeric arguments (nice 10, timeout 5).
-			if strings.HasPrefix(word, "-") || strings.Contains(word, "=") || isNumericToken(word) {
-				continue
-			}
-			segment[j].commandPos = true
-			break
-		}
-	}
-}
-
-func isNumericToken(word string) bool {
-	if word == "" {
-		return false
-	}
-	for _, r := range word {
-		if (r < '0' || r > '9') && r != '.' && r != 's' && r != 'm' && r != 'h' {
-			return false
-		}
-	}
-	return true
-}
-
 // hasInlineCodeFlag reports whether an interpreter's arguments carry code to
 // execute rather than a file to read.
-func hasInlineCodeFlag(rest []shellToken) bool {
+func hasInlineCodeFlag(rest []shellsafe.Token) bool {
 	for _, token := range rest {
-		switch token.word {
+		switch token.Word {
 		case "-c", "-e", "--command", "-command", "/c", "/k", "-encodedcommand", "-enc", "-ec", "-file":
 			return true
 		}
@@ -140,9 +97,9 @@ func hasInlineCodeFlag(rest []shellToken) bool {
 // gitSubcommand finds the real subcommand past git's global flags. `-c` and `-C`
 // take a separate argument; the tokenizer lowercases, so one skip rule covers
 // both spellings.
-func gitSubcommand(rest []shellToken) string {
+func gitSubcommand(rest []shellsafe.Token) string {
 	for i := 0; i < len(rest); i++ {
-		word := rest[i].word
+		word := rest[i].Word
 		if !strings.HasPrefix(word, "-") {
 			return word
 		}
@@ -151,15 +108,6 @@ func gitSubcommand(rest []shellToken) string {
 		}
 	}
 	return ""
-}
-
-// shellWrapperCommands run another program, so the token after them (past their
-// own flags) is the command that actually executes.
-var shellWrapperCommands = map[string]bool{
-	"env": true, "xargs": true, "sudo": true, "doas": true, "nice": true,
-	"nohup": true, "time": true, "timeout": true, "command": true,
-	"builtin": true, "exec": true, "stdbuf": true, "busybox": true, "setsid": true,
-	"watch": true, "script": true,
 }
 
 // shellInterpreters execute code passed inline. Combined with an inline-code
@@ -271,79 +219,6 @@ func harmlessRedirectTarget(rest string) bool {
 		}
 	}
 	return false
-}
-
-// shellToken is one bare word plus whether it sits at COMMAND position — the
-// first word of a pipeline/chain segment, or the first word inside a command
-// substitution ($(…) / backticks / a subshell). Only command-position words can
-// be a destructive command; the same word as an argument is data.
-type shellToken struct {
-	word       string
-	commandPos bool
-}
-
-// shellCommandSegments tokenizes a command into segments split on the unquoted
-// separators `|`, `;`, `&`, `&&`, `||`, and marks each token's command position.
-// Quoted spans are opaque data appended to the current word (so `"rm -rf"` is one
-// harmless argument token). A substitution boundary (`$`, backtick, `(`) starts a
-// fresh command position, so a destructive word hidden in `$(rm -rf x)` is still
-// caught. Redirect characters (`<`, `>`) are treated as ordinary word bytes here;
-// real file writes are rejected earlier by hasFileWriteRedirect.
-func shellCommandSegments(command string) [][]shellToken {
-	var segments [][]shellToken
-	var current []shellToken
-	var word strings.Builder
-	inDouble, inSingle := false, false
-	commandPending := true // the next word begins a command
-
-	flushWord := func() {
-		if word.Len() > 0 {
-			current = append(current, shellToken{word: strings.ToLower(word.String()), commandPos: commandPending})
-			word.Reset()
-			commandPending = false
-		}
-	}
-	flushSegment := func() {
-		flushWord()
-		if len(current) > 0 {
-			segments = append(segments, current)
-			current = nil
-		}
-		commandPending = true // first word of the next segment is a command
-	}
-
-	for i := 0; i < len(command); i++ {
-		c := command[i]
-		switch {
-		case c == '"' && !inSingle:
-			inDouble = !inDouble
-		case c == '\'' && !inDouble:
-			inSingle = !inSingle
-		case inDouble || inSingle:
-			word.WriteByte(c) // quoted data belongs to the current word
-		// A NEWLINE SEPARATES COMMANDS. It used to sit in the whitespace case
-		// below, which only flushes the word and leaves commandPending false — so
-		// every word after a line break was classified as an ARGUMENT, and the
-		// destructive-word check at IsReadOnlyShell skips arguments. That made
-		// "git status\nrm -rf ." read-only to this classifier while `sh -c` and
-		// `powershell -Command` execute it as two commands.
-		case c == '|' || c == ';' || c == '&' || c == '\n' || c == '\r':
-			flushSegment()
-			if (c == '|' || c == '&') && i+1 < len(command) && command[i+1] == c { // second char of && or ||
-				i++
-			}
-		case c == '$' || c == '`' || c == '(':
-			// substitution / subshell boundary: the next word is a nested command
-			flushWord()
-			commandPending = true
-		case c == ' ' || c == '\t' || c == ')' || c == '{' || c == '}':
-			flushWord()
-		default:
-			word.WriteByte(c)
-		}
-	}
-	flushSegment()
-	return segments
 }
 
 func uniqueStrings(values []string) []string {

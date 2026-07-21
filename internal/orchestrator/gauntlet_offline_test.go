@@ -80,23 +80,26 @@ func TestGauntletOffline(t *testing.T) {
 		scanForbidden(t, answer)
 	})
 
-	// Scenario 3 — Subagent turn-budget: a subagent that can only loop returns a
-	// guided partial, never the forbidden turn-limit string (INV-3), end to end.
-	t.Run("subagent-turn-budget-guided-partial", func(t *testing.T) {
+	// Scenario 3 — Turn-budget liveness: a session that can only loop still ends
+	// with a usable answer and never emits a forbidden turn-limit string (INV-3).
+	// It exercised a subagent's own ladder while subagents existed; the surviving
+	// bound is the main loop's hard turn ceiling.
+	t.Run("turn-budget-guided-answer", func(t *testing.T) {
 		settings := engineSettings()
 		engine, err := NewEngine(EngineConfig{
-			Settings: &settings, Session: contract.Session{ID: "g-sub", WorkspacePath: seededWorkspace(t)},
+			Settings: &settings, Session: contract.Session{ID: "g-loop", WorkspacePath: seededWorkspace(t)},
 			Provider: alwaysToolCallProvider{}, Registry: NewRegistry(&recordingTool{name: "read_file"}),
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		spec := engine.subagentSpecs()["explore"]
-		spec.MaxTurns = 2
-		result := engine.executeSubagent(context.Background(), "g-sub", subagentInput{Agent: "explore", Title: "loop", Task: "explore forever"}, spec)
-		scanForbidden(t, result.Report)
-		if !strings.Contains(result.Report, "partial progress") {
-			t.Fatalf("expected a guided partial, got: %q", result.Report)
+		answer, stats, err := engine.Run(context.Background(), "read the seeded file over and over")
+		if err != nil {
+			t.Fatalf("a looping session must still return: %v", err)
+		}
+		scanForbidden(t, answer)
+		if stats.Turns == 0 {
+			t.Fatal("expected the loop to burn turns before the ceiling stopped it")
 		}
 	})
 

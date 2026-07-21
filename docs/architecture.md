@@ -21,14 +21,14 @@ The only compatibility boundary is the user's durable data in `~/.muhiya` (or
 - `internal/mcpclient`: lifecycle-managed stdio and Streamable HTTP MCP clients,
   namespaced tool schemas, OAuth, deadlines, and failure isolation.
 - `internal/orchestrator`: task sizing, effort budgets, prompt compiler,
-  cache-stable history, inspection/knowledge ledgers, subagents, steering,
-  compaction, the workspace checklist, and the bounded landing protocol.
-  Feature 012 adds subagent context linking (`contextlink.go`/
-  `contextrecord.go`: continuation-first stream reuse with verbatim transcript
-  records under the session's `agents/` sidecars). v1.1.0 adds the plan/execute
-  role gate (`rolesplit.go`), the `tasks.md` checklist observer and the
-  executor's `STATUS`-line parser (`checklist.go`), and the once-per-session
-  model advisor (`advisor.go`).
+  cache-stable history, inspection/knowledge ledgers, steering, compaction,
+  the workspace checklist, and the bounded landing protocol. The subagent
+  system — dispatch, the plan/execute role gate, and context linking between
+  delegated runs — is gone: one session now reads, edits, and verifies for
+  itself. In its place, a per-task model advisor (`advisor.go`) picks the
+  model for each task and weighs the switch against its cold-start cost
+  (`switchcost.go`), and the `tasks.md` checklist observer and parser
+  (`checklist.go`) still track the model's own plan.
 - `internal/app`: the frontend-neutral core seam. It holds the types a frontend
   needs to drive a session — `Runtime`, `Actions`, `Skill`, `UsageData`, and the
   MCP view models — plus `app.AssemblePrompt`, the single prompt-assembly path
@@ -36,8 +36,8 @@ The only compatibility boundary is the user's durable data in `~/.muhiya` (or
 - `internal/tui`: Bubble Tea v2 presentation. It consumes runtime events and
   owns keyboard input, menus, responsive layout, RTL display, and accessibility.
 - `internal/command`: Cobra command graph and application composition. It also
-  refreshes the gateway model catalog on a 24-hour TTL, so the role defaults and
-  the session advisor resolve against current entries.
+  refreshes the gateway model catalog on a 24-hour TTL, so the default model and
+  the task advisor resolve against current entries.
 - `cmd/muhiyacode`: a minimal executable entry point.
 
 Dependencies point inward toward `contract`; presentation and commands compose
@@ -61,39 +61,30 @@ goroutines are allowed.
    ancestors, including symlinks and Windows junctions.
 4. Every assistant tool call has exactly one ordered tool result, including
    cancellation and failure paths.
-5. Across a session, model request prefixes are byte-stable. Folding, trimming,
+5. Within a task, model request prefixes are byte-stable. Folding, trimming,
    compaction, and tool-surface changes occur only at deliberate, attributable
-   boundaries. The session's models are chosen once — by configuration, a pin,
-   or the first-prompt advisor — and then frozen: after the first request no
-   path switches the main or execution model, because a switch would cold-start
-   the main prefix and break the execution agent's continuation chain. The user
-   does not manage models; there is no `/model`.
+   boundaries — a model switch is one of them, recorded as an
+   `InvalidationModelSwitch` event. The model for a task is chosen once — by
+   configuration, a pin, or a per-task advisor call — and then frozen for that
+   task's duration: no path switches it once the task is under way. Between
+   tasks the advisor may move to a different model, but only when the switch is
+   affordable: the conversation is still small enough to re-read for free, or
+   the target model is already warm in this session. The user does not manage
+   models; there is no `/model`.
 6. All task classes use one stable full prompt and pinned tool surface. Task
    sizing sets tool and turn budgets only — it never selects a different
-   execution path or prompt, and never a number of subagent runs. Prompt and
-   schema regression budgets are enforced in tests.
-7. Subagents run one at a time and ordinary tools stay ordered; a batch of
-   dispatches executes serially, announced up front so the queue is visible.
-   Read-only subagents have physically restricted tool registries.
-   There are exactly three capability classes — `explore`, `general`, `review` —
-   and only `general` can change the workspace. Each kind carries its own
-   provider cache pin (`:sub:<kind>`), an optional provider-reported token
-   ceiling, and — for the review kind — a deterministic dispatch gate
-   (feature 011) with a user-visible rationale. A run's LLM-chosen `role` name
-   is display and handoff only: pin, system message, and context-record kind
-   stay keyed on the fixed class, so a novel name cannot fragment the cache.
-   The main model plans and instructs; the execution subagent changes the
-   workspace. The dispatch gate refuses main-loop file writes, patches,
-   mutating shell, and MCP calls with an actionable, escalating message, with
-   exactly four carve-outs: the `tasks.md` checklist, read-only shell, memory
-   writes, and every subagent scope. There is deliberately **no** subagent
-   budget: a per-class allowance plus the split left a `chat`-sized turn unable
-   to edit and unable to delegate, so delegation scale is the model's judgment,
-   bounded by the one-at-a-time rule and the liveness guards rather than by a
-   quota. The caller trusts a report that shows its checks — it re-verifies only
-   on the executor's own `STATUS: NEEDS-VERIFY` / `BLOCKED` or a missing status,
-   and then runs exactly the named check. A missing status is never read as
-   success.
+   execution path or prompt. Prompt and schema regression budgets are enforced
+   in tests.
+7. There is exactly one agent and one toolset: the session that reads the
+   workspace is the session that edits it, verifies it, and reports on it —
+   no restricted registry, and no gate refusing a mutation on the grounds that
+   it belongs to someone else. A deterministic review gate (feature 011,
+   `reviewgate.go`) still decides whether a change is substantial or risky
+   enough to warrant a dedicated review pass and how deep it should go, with a
+   user-visible rationale line; risk-area changes (auth, billing, concurrency,
+   security config, migrations) always review regardless of size. The model
+   verifies its own work: it runs the check that proves a change works and
+   ticks the checklist item, and never reports a result it did not observe.
 8. A task never silently dies at a turn cap: it escalates once when warranted,
    receives a convergence warning, then lands with tools disabled and a factual
    final report.
@@ -121,7 +112,7 @@ goroutines are allowed.
     arm64, with one linker-injected version and checksumed archives.
 12. The TUI is mouse-native: an immutable per-frame InteractionMap resolves every
     click/hover to the same action as its keyboard equivalent (command rows,
-    modal/MCP choices, tool/subagent chips, the composer), and dragging over
+    modal/MCP choices, tool chips, the composer), and dragging over
     transcript text selects it with Ctrl+C copying via OSC 52. All of this is
     presentation-only — it never reaches the request-assembly path or the prefix
     cache. On very long sessions the in-memory transcript window is bounded (with a

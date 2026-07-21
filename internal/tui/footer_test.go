@@ -111,29 +111,59 @@ func TestContextMeterStyle(t *testing.T) {
 
 // TestModeLineFooterLayout proves the mode line leaves a 2-column right margin so
 // the effort chip aligns with the composer content edge instead of the terminal
-// edge (Ultimate Polish U1), and always ends with the chip (A1 T012).
+// edge (Ultimate Polish U1), and always ends with the chip (A1 T012). Since 013
+// the pane is two lines — chips, then the Shift+Tab hint beneath them — so the
+// margin invariant is asserted per line.
 func TestModeLineFooterLayout(t *testing.T) {
 	for _, width := range []int{60, 80, 120} {
 		m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 		_ = m.Init()
 		m = mustUpdate(t, m, tea.WindowSizeMsg{Width: width, Height: 24})
 		m.runtime.Settings.Effort = contract.EffortMax
-		line := m.renderModeLine()
-		// U1: never past column W-2 — a 2-column right margin at every width.
-		if w := ansi.StringWidth(line); w > width-2 {
-			t.Fatalf("width %d: mode line lacks the 2-col right margin (%d): %q", width, w, line)
-		}
-		// At a wide terminal the whole cluster fits, so the chip ends exactly at W-2.
-		if width == 120 {
-			if w := ansi.StringWidth(line); w != width-2 {
-				t.Fatalf("width %d: chip should end at column %d, line width %d: %q", width, width-2, w, line)
+		pane := m.renderModeLine()
+		lines := strings.Split(pane, "\n")
+		for i, line := range lines {
+			// U1: never past column W-2 — a 2-column right margin at every width.
+			if w := ansi.StringWidth(line); w > width-2 {
+				t.Fatalf("width %d line %d lacks the 2-col right margin (%d): %q", width, i, w, line)
 			}
 		}
-		if !strings.Contains(line, "Max") {
-			t.Fatalf("width %d: mode line missing the effort chip: %q", width, line)
+		chips := lines[0]
+		// At a wide terminal the whole cluster fits, so the chip ends exactly at W-2.
+		if width == 120 {
+			if w := ansi.StringWidth(chips); w != width-2 {
+				t.Fatalf("width %d: chip should end at column %d, line width %d: %q", width, width-2, w, chips)
+			}
 		}
-		if strings.Contains(line, "auto-accept") {
-			t.Fatalf("width %d: normal mode should not show a permission badge: %q", width, line)
+		if !strings.Contains(chips, "Max") {
+			t.Fatalf("width %d: mode line missing the effort chip: %q", width, chips)
 		}
+		// 013 FR-015: the mode is now named in every mode, with the cycle hint
+		// beneath it — that pair is the only remaining way to discover Shift+Tab.
+		if !strings.Contains(chips, "normal") {
+			t.Fatalf("width %d: permission mode must always be shown: %q", width, chips)
+		}
+		if strings.Contains(chips, "auto-accept") {
+			t.Fatalf("width %d: normal mode must not read as auto-accept: %q", width, chips)
+		}
+		if len(lines) < 2 || !strings.Contains(lines[1], "Shift + Tab to cycle") {
+			t.Fatalf("width %d: cycle hint missing beneath the chips: %q", width, pane)
+		}
+	}
+}
+
+// TestModeLineShowsAutoAcceptDistinctly: the looser mode has to be visually
+// unmistakable, since it is the one where the agent stops asking.
+func TestModeLineShowsAutoAccept(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	_ = m.Init()
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 24})
+	m.runtime.Settings.PermissionMode = contract.PermissionAutoAccept
+	line := m.renderModeLine()
+	if !strings.Contains(line, "auto-accept") {
+		t.Fatalf("auto-accept mode not shown: %q", line)
+	}
+	if strings.Contains(strings.SplitN(line, "\n", 2)[0], "normal") {
+		t.Fatalf("both modes rendered at once: %q", line)
 	}
 }

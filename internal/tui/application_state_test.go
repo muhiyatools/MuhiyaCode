@@ -7,7 +7,6 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/charmbracelet/x/ansi"
-	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
 // stateModel builds an 80x24 model ready for state-cue assertions.
@@ -61,15 +60,9 @@ func TestToolRunningState(t *testing.T) {
 	}
 }
 
-// TestSubagentRunningState (US6 T071/T074) — a running subagent shows its chip.
-func TestSubagentRunningState(t *testing.T) {
-	m := stateModel(t)
-	m.applyAgent(contract.AgentEvent{Kind: "start", RunID: "r1", Agent: "explorer", Title: "Map code", Task: "explore"})
-	m.refreshViewport(true)
-	if !strings.Contains(frameText(m), "Map code") {
-		t.Fatal("subagent-running state cue missing")
-	}
-}
+// The subagent-running state retired with the subagent system: there are no
+// agent chips because there are no agents. The running-tool cue above is the
+// surviving in-flight indicator.
 
 // TestErrorState (US6 T071/T074) — an error surfaces on the notice line.
 func TestErrorState(t *testing.T) {

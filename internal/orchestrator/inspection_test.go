@@ -99,6 +99,36 @@ func TestInspectionFreshnessAndInvalidation(t *testing.T) {
 	}
 }
 
+// A-2: apply_patch must invalidate only the files its diff touches, not wipe the
+// whole ledger (which superseded reads of untouched files and forced needless
+// re-reads).
+func TestApplyPatchInvalidatesOnlyItsTargets(t *testing.T) {
+	root := t.TempDir()
+	for _, name := range []string{"a.go", "b.go"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("one\ntwo\nthree\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ledger := NewInspection(InspectionSnapshot{Version: 3}, nil, root)
+	a := contract.NewToolCall("a1", "read_file", `{"path":"a.go","limit":3}`)
+	b := contract.NewToolCall("b1", "read_file", `{"path":"b.go","limit":3}`)
+	ledger.Record(a, "Read a.go (lines 1-3 of 3).")
+	ledger.Record(b, "Read b.go (lines 1-3 of 3).")
+	intact := func(string) bool { return true }
+
+	patchCall := contract.NewToolCall("p1", "apply_patch", `{"patch":"--- a/a.go\n+++ b/a.go\n@@ -1 +1 @@\n-one\n+ONE\n"}`)
+	dropped := ledger.InvalidateFor(patchCall)
+	if len(dropped) != 1 || dropped[0] != "a1" {
+		t.Fatalf("apply_patch dropped ids = %v, want [a1]", dropped)
+	}
+	if _, duplicate := ledger.Duplicate(a, intact); duplicate {
+		t.Fatal("patched file remained deduplicated")
+	}
+	if _, duplicate := ledger.Duplicate(b, intact); !duplicate {
+		t.Fatal("patching a.go invalidated b.go's read — the whole-ledger wipe was not fixed")
+	}
+}
+
 func TestInspectionLoadsTypeScriptV3Fixture(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "fixture.go")

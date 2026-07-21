@@ -11,7 +11,7 @@ import (
 // terminal height, so the box always fits: on short terminals it drops the
 // vertical padding, blank separators, and description row, and it truncates
 // the message before it can squeeze out the choices or the hint.
-func (m *Model) renderModal() string {
+func (m *Model) renderModal(budgetRows int) string {
 	modal := m.modal
 	m.modalRows = m.modalRows[:0] // rebuilt below so mouse targets match this render
 	width := min(max(38, m.width-12), 78)
@@ -20,7 +20,10 @@ func (m *Model) renderModal() string {
 	// terminal; clamp so the box always fits the screen.
 	width = min(width, max(10, m.width-6))
 	inner := width - 6
-	budget := max(6, m.height-4) // rows for the whole box; header + mode line excluded
+	// Budget is the rows View actually reserves for the dialog (m.height minus the
+	// header and mode line), NOT m.height-4 — otherwise the box overflows the space
+	// View allocates and its bottom border/padding is sheared off (H-3).
+	budget := max(6, budgetRows)
 	pad := 0
 	if budget >= 16 {
 		pad = 1
@@ -50,13 +53,30 @@ func (m *Model) renderModal() string {
 		minContent = len(modal.choices) + sep
 	}
 	message := wrapMessage(modal.message, inner)
-	if limit := max(1, body-2-3*sep-minContent); len(message) > limit {
+	// Info modals (no input, no choices) carry only a title and a one-line hint, so
+	// they get the largest message budget. When the content is tall — the /context
+	// essentials card is 13 lines — they also drop the decorative title/hint blank
+	// separators to reclaim two rows, so the last rows (Models) stay visible at
+	// 80×24 instead of being truncated (H-1).
+	infoModal := !modal.input && len(modal.choices) == 0
+	titleSep, hintSep := sep, sep
+	limit := max(1, body-2-3*sep-minContent)
+	if infoModal {
+		limit = max(1, body-2-2*sep)
+		if len(message) > limit && len(message) <= body-2 {
+			titleSep, hintSep = 0, 0
+			limit = body - 2
+		}
+	}
+	if len(message) > limit {
 		message = message[:limit]
 		message[limit-1] += " …"
 	}
 
 	lines := []string{m.palette.brand.Render(modal.title)}
-	lines = blank(lines)
+	if titleSep == 1 {
+		lines = append(lines, "")
+	}
 	for _, line := range message {
 		lines = append(lines, m.palette.text.Render(m.rtl(line)))
 	}
@@ -74,7 +94,9 @@ func (m *Model) renderModal() string {
 		lines = blank(lines)
 		lines = append(lines, m.palette.faint.Render("Enter confirms · Esc cancels"))
 	case len(modal.choices) == 0:
-		lines = blank(lines)
+		if hintSep == 1 {
+			lines = append(lines, "")
+		}
 		lines = append(lines, m.palette.faint.Render("Enter or Esc closes"))
 	default:
 		lines = blank(lines)

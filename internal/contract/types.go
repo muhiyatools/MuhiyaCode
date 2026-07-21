@@ -49,13 +49,12 @@ type Settings struct {
 	Provider struct {
 		Type    string `json:"type"`
 		BaseURL string `json:"baseUrl"`
-		// ActiveModelID / SubagentModelID are the session's two roles: the main
-		// model plans and instructs, the subagent model executes. They are FROZEN
-		// for the life of a session (caching is the priority — see the session
-		// advisor); the user sets them with `muhiyacode config set model`.
-		ActiveModelID   string  `json:"activeModelId"`
-		SubagentModelID string  `json:"subagentModelId"`
-		Models          []Model `json:"models"`
+		// ActiveModelID is the model the session runs on. It is frozen for the
+		// duration of a task and may only change at a task boundary, where the
+		// advisor weighs the cold-start cost of the switch (caching is the
+		// priority); the user sets it with `muhiyacode config set model`.
+		ActiveModelID string  `json:"activeModelId"`
+		Models        []Model `json:"models"`
 		// ModelsRefreshedAt is when the gateway catalog was last discovered
 		// (RFC3339). It drives the TTL refresh that keeps the model list current
 		// now that the interactive refresh command is gone; empty means never.
@@ -73,13 +72,8 @@ type Settings struct {
 	// "off" | "conservative" | "default" (empty = default). Explicit review
 	// requests always run regardless of this setting.
 	ReviewGating string `json:"reviewGating,omitempty"`
-	// ContextLinking (feature 012 FR-017) controls subagent context reuse:
-	// "off" | "default" (empty = default). "off" restores pre-012 dispatch
-	// behavior exactly — every subagent starts fresh and the phase read gate
-	// is disabled.
-	ContextLinking string `json:"contextLinking,omitempty"`
-	Theme          string `json:"theme"`
-	Shell          struct {
+	Theme        string `json:"theme"`
+	Shell        struct {
 		Preferred   string `json:"preferred"`
 		TimeoutMS   int    `json:"timeoutMs"`
 		OutputLimit int    `json:"outputLimit"`
@@ -209,6 +203,13 @@ type Usage struct {
 	// CostLogID carries muhiya_log.log_id (the gateway request_logs.id) so the
 	// benchmark credits cross-check can match TUI credits against the ledger.
 	CostLogID string `json:"-"`
+	// Upstream is the provider a routing layer (OpenRouter) actually served the
+	// request from; empty on a direct connection. Prefix caches are per-upstream,
+	// so a flip between turns cold-starts a cache that every byte we send says
+	// should still be warm. Recorded per request so that becomes visible instead
+	// of looking like unexplained drift. Not folded by Add: it identifies one
+	// request, it does not accumulate.
+	Upstream string `json:"-"`
 }
 
 func (u Usage) Add(next Usage) Usage {
@@ -267,7 +268,17 @@ type ChatRequest struct {
 	// as the X-Muhiya-Session header. Long-lived providers key their cache by
 	// routing identity; without it, an upstream model flip silently invalidates
 	// the entire cached prefix. Must not be serialized into the JSON body.
-	SessionID        string
+	SessionID string
+	// PinUpstream asks a routing layer (OpenRouter) to prefer the named upstream
+	// provider. Prefix caches live on the upstream that served the request, so
+	// once a session has warmed one, every later request should go back to it —
+	// otherwise a silent re-route re-bills the whole conversation as uncached.
+	//
+	// It is a PREFERENCE, never a restriction: the wire form keeps fallbacks
+	// enabled, so an upstream outage costs a cold prefix rather than a failed
+	// task. Empty means "no preference", which is correct for a direct provider
+	// connection and for a session's first request.
+	PinUpstream      string
 	OnToken          func(string)
 	OnReasoningToken func(string)
 }
@@ -278,6 +289,15 @@ type ChatResponse struct {
 	ReasoningDetails json.RawMessage
 	ToolCalls        []ToolCall
 	Usage            Usage
+	// FinishReason is the provider's stop reason ("stop", "tool_calls",
+	// "length", …). "length" means the answer was cut at the output cap and is
+	// incomplete — the caller surfaces that instead of treating it as done (B-3).
+	FinishReason string
+	// TruncatedCalls names the IDs of tool calls whose arguments were cut off at
+	// the output cap. Such a call must NOT be dispatched: its JSON is incomplete,
+	// so it would fail validation, burn a turn, and (before TB03) re-bill its
+	// half-written payload on every later request.
+	TruncatedCalls []string
 }
 
 type Provider interface {
@@ -340,25 +360,10 @@ type Answer struct {
 	Index    int
 }
 
-type AgentEvent struct {
-	Kind  string
-	RunID string
-	Agent string
-	Role  string
-	Title string
-	Task  string
-	// Handoff carries the rendered launch contract for audit consumers (the
-	// delegation benchmark's SC-004 handoff audit); the TUI does not render it.
-	Handoff   string
-	Model     string
-	Tool      string
-	Arguments string
-	Output    string
-	Content   string
-	Status    string
-	Report    string
-	Usage     Usage
-}
+// AgentEvent was the subagent lifecycle event (start / tool_start / tool_end /
+// text / usage / done) a delegated run emitted so the TUI could render its card.
+// It was removed with the subagent system: one session emits ordinary tool
+// events, and there are no agent cards left to feed.
 
 type ContextInfo struct {
 	HistoryTokens     int
@@ -445,39 +450,6 @@ type TaskStats struct {
 	// friction (gate/tool/ui classes) recorded during THIS task. >0 appends a
 	// dimmed "⚠ N harness" marker to the task summary; 0 adds no noise.
 	HarnessEvents int `json:"harnessEvents,omitempty"`
-	// Links (feature 012 FR-015) records every subagent dispatch's context-link
-	// decision this task — including declines with their reason — so the summary
-	// and benchmark records always explain what was reused and what was not.
-	Links []LinkOutcome `json:"links,omitempty"`
-}
-
-// LinkOutcome (feature 012, data-model.md ContextLink) is the per-dispatch
-// record of the context-link decision and its provider-verified outcome. Cache
-// figures are provider-reported or absent — never estimated (Constitution VI).
-type LinkOutcome struct {
-	RunID       string `json:"runId"`
-	Kind        string `json:"kind"`
-	Predecessor string `json:"predecessor,omitempty"`
-	// Decision: "continued" | "digest-seeded" | "fresh".
-	Decision string `json:"decision"`
-	// Form is set when Decision=="continued": "same-kind" | "review-after-implement".
-	Form string `json:"form,omitempty"`
-	// Reason is the machine-readable first-failing (or passing) criterion from
-	// contracts/context-linking.md CL-1, e.g. "eligible", "no-candidate",
-	// "terminal-shape:failed", "stale:60%", "window-overflow", "disabled".
-	Reason string `json:"reason"`
-	// CacheShare is the first continuation request's paired cache-read share
-	// (read/(read+miss)) from provider-reported usage; nil when the provider
-	// reported no cache fields (rendered "unavailable", never estimated).
-	CacheShare    *float64 `json:"cacheShare,omitempty"`
-	CacheReported bool     `json:"cacheReported,omitempty"`
-	// InheritedFiles/RereadFiles: touched-set members carried current vs
-	// staleness-directed re-reads named in the successor handoff.
-	InheritedFiles int `json:"inheritedFiles,omitempty"`
-	RereadFiles    int `json:"rereadFiles,omitempty"`
-	// OutboundChars/ReturnChars feed the SC-006 communication-overhead share.
-	OutboundChars int `json:"outboundChars,omitempty"`
-	ReturnChars   int `json:"returnChars,omitempty"`
 }
 
 // StopCause values for TaskStats.StopCause (003, FR-013a).
@@ -501,7 +473,6 @@ type Callbacks struct {
 	PlanUpdate     func(Plan)
 	Usage          func(Usage)
 	Context        func(ContextInfo)
-	Agent          func(AgentEvent)
 	MCPStatus      func(string)
 	TaskComplete   func(TaskStats)
 	Confirm        func(context.Context, string) (bool, error)

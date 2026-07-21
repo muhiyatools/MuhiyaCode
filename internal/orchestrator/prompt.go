@@ -21,8 +21,6 @@ type PromptContext struct {
 	Model         string
 	ModelAddendum string
 	HasWeb        bool
-	HasSubagents  bool
-	SubagentModel string
 	// Skills is the session-pinned, deterministically ordered listing of
 	// workspace-resident skills advertised in the stable prefix (003 D12). It is
 	// discovered once at session start; identical configuration ⇒ byte-identical
@@ -39,17 +37,22 @@ type PromptContext struct {
 	ProjectContextBlock string
 }
 
-// SkillListing is one advertised skill: a name, its workspace-relative SKILL.md
-// path (forward slashes), and a single-line description (may be empty).
+// SkillListing is one advertised skill: a name, the absolute path to its
+// SKILL.md, and a single-line description (may be empty).
+//
+// Path is engine-side only — read_skill resolves by NAME (013 contract
+// skills-autouse §2.2). Skills now come from home roots too, whose paths the
+// model could not use anyway, and a name-keyed tool is what keeps those files
+// reachable without widening file-tool containment.
 type SkillListing struct {
 	Name        string
 	Path        string
 	Description string
 }
 
-// renderSkillsSection returns the deterministic ## Skills block, or "" when no
+// renderSkillsSection returns the deterministic SKILLS block, or "" when no
 // skills are advertised. Order is caller-guaranteed stable; each line is
-// byte-fixed for identical input (contract skills-delivery.md §2).
+// byte-fixed for identical input (013 contract skills-autouse §2.2).
 func renderSkillsSection(skills []SkillListing) string {
 	if len(skills) == 0 {
 		return ""
@@ -59,9 +62,9 @@ func renderSkillsSection(skills []SkillListing) string {
 	b.WriteString(instructions.SkillsHintBody)
 	for _, skill := range skills {
 		if skill.Description == "" {
-			b.WriteString(fmt.Sprintf("\n- %s (%s)", skill.Name, skill.Path))
+			b.WriteString(fmt.Sprintf("\n- %s", skill.Name))
 		} else {
-			b.WriteString(fmt.Sprintf("\n- %s (%s): %s", skill.Name, skill.Path, skill.Description))
+			b.WriteString(fmt.Sprintf("\n- %s: %s", skill.Name, skill.Description))
 		}
 	}
 	return b.String()
@@ -79,16 +82,6 @@ func SystemPrompt(c PromptContext) string {
 	if c.HasWeb {
 		web = instructions.PromptWebAvailableBody
 	}
-	// DELEGATION (feature 008 US1, contract DG-1..3): the affirmative, criteria-based
-	// delegation section. Session-invariant (SubagentModel is fixed per session), so
-	// it is byte-stable in the prefix. There is no allowance number anywhere —
-	// delegation scale is the model's judgment (v1.1.0). Positioned as its own
-	// section — not a trailing environment clause — because instruction salience is
-	// part of the contract for the driven model family.
-	agents := instructions.PromptDelegationOffBody
-	if c.HasSubagents {
-		agents = fmt.Sprintf(instructions.PromptDelegationOnTemplate, c.SubagentModel)
-	}
 	sections := []string{
 		instructions.PromptIdentityBody,
 		instructions.PromptOperatingContractBody,
@@ -96,10 +89,10 @@ func SystemPrompt(c PromptContext) string {
 		instructions.PromptCacheDisciplineBody,
 		instructions.PromptPlanningBody,
 		instructions.PromptToolsAndRecoveryBody,
-		agents,
+		instructions.PromptModelBody,
 		instructions.PromptCommunicationBody,
 		instructions.PromptSafetyBody,
-		fmt.Sprintf(instructions.PromptEnvironmentTemplate, c.Workspace, c.OS, c.Shell, c.Model, c.ModelAddendum, web),
+		fmt.Sprintf(instructions.PromptEnvironmentTemplate, c.Workspace, c.OS, c.Shell, c.Model, instructions.ShellCommandGuidance(c.Shell), c.ModelAddendum, web),
 	}
 	base := strings.TrimSpace(strings.Join(sections, "\n\n"))
 	if section := renderSkillsSection(c.Skills); section != "" {

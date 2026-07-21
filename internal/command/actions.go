@@ -24,7 +24,20 @@ func (a *Application) Actions() tui.Actions {
 			if err := state.SaveSettings(*settings, a.paths); err != nil {
 				return err
 			}
-			*a.settings = *settings
+			// F-1: every caller passes a.settings itself (the TUI's m.runtime.Settings
+			// aliases it and mutates the field in place before dispatching this on a
+			// tea.Cmd goroutine), so this was a value-identical WHOLE-STRUCT self-copy —
+			// yet still a concurrent write to the struct the engine task goroutine is
+			// reading field-by-field, i.e. a data race across every settings field.
+			// Skip the no-op copy: the live-mutable fields already reach the engine
+			// through synchronized mutators (Engine.SetEffort / SetPermissionMode
+			// under liveSettingsMu). A
+			// distinct-pointer caller does not exist today; one must never stomp a
+			// struct a running task shares — it would race and must instead go through
+			// the engine's synchronized setters.
+			if settings != a.settings {
+				*a.settings = *settings
+			}
 			a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
 			return nil
 		},
@@ -196,11 +209,11 @@ func addDiscoveredModels(settings *contract.Settings, models []contract.Model) [
 // pruneStaleDiscoveredModels removes previously endpoint-discovered models the
 // gateway no longer offers (e.g. after an operator unchecks "MuhiyaCode
 // Discoverable"), so a hidden model does not linger in the picker forever. The
-// currently-selected main and subagent models are always kept even when newly
-// absent, so a refresh can never strand the running session; their ids are
-// returned so the caller can advise switching. Manually-added models
-// (Source != "endpoint") are never pruned. It is a no-op when fresh is empty: an
-// empty successful fetch is treated as "unknown", never as "unpublish everything".
+// currently-selected model is always kept even when newly absent, so a refresh
+// can never strand the running session; its id is returned so the caller can
+// advise switching. Manually-added models (Source != "endpoint") are never
+// pruned. It is a no-op when fresh is empty: an empty successful fetch is
+// treated as "unknown", never as "unpublish everything".
 func pruneStaleDiscoveredModels(settings *contract.Settings, fresh []contract.Model) []string {
 	if settings == nil || len(fresh) == 0 {
 		return nil
@@ -210,12 +223,11 @@ func pruneStaleDiscoveredModels(settings *contract.Settings, fresh []contract.Mo
 		freshIDs[model.ID] = true
 	}
 	active := settings.Provider.ActiveModelID
-	subagent := settings.Provider.SubagentModelID
 	kept := settings.Provider.Models[:0]
 	var stranded []string
 	for _, model := range settings.Provider.Models {
 		stale := model.Source == "endpoint" && !freshIDs[model.ID]
-		if stale && model.ID != active && model.ID != subagent {
+		if stale && model.ID != active {
 			continue // drop a model the gateway no longer lists
 		}
 		if stale {

@@ -100,40 +100,35 @@ func TestSubagentPrefixShapeGuardDetectsChange(t *testing.T) {
 	}
 }
 
-// TestSubagentMultiTurnRunDoesNotFalselyTripGuard (T011 / REV A3.2) runs a real
-// multi-turn explore subagent (tool call then final report) and asserts the
-// per-turn shape guard never falsely fails the run — the realistic risk, since
-// the guard compares a frozen shape against itself every turn.
-func TestSubagentMultiTurnRunDoesNotFalselyTripGuard(t *testing.T) {
+// TestMultiTurnRunDoesNotFalselyTripGuard (T011 / REV A3.2) runs a real
+// multi-turn task (tool calls then a final answer) and asserts the per-turn
+// shape guard never falsely fails it — the realistic risk, since the guard
+// compares a frozen shape against itself on every turn of a growing
+// conversation. It exercised a delegated run while subagents existed; the
+// guard is the same one, now protecting the only conversation there is.
+func TestMultiTurnRunDoesNotFalselyTripGuard(t *testing.T) {
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
-		{ToolCalls: []contract.ToolCall{contract.NewToolCall("s", "run_subagent", `{"agent":"explore","task":"find the config loader"}`)}},
-		{ToolCalls: []contract.ToolCall{contract.NewToolCall("r", "read_file", `{"path":"config.go"}`)}}, // subagent turn 1
-		{Content: "Findings: config loads from config.go; verified."},                                    // subagent turn 2 -> done
-		{Content: "All done."}, // main loop final
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("r", "read_file", `{"path":"config.go"}`)}},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("r2", "read_file", `{"path":"schema.go"}`)}},
+		{Content: "Findings: config loads from config.go; verified."},
 	}}
 	settings := engineSettings()
-	settings.Effort = contract.EffortHigh // grants a non-zero subagent budget
-	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "sub", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&recordingTool{name: "run_subagent"}, &recordingTool{name: "read_file"}), Prompt: PromptContext{Model: "Test"}})
+	settings.Effort = contract.EffortHigh
+	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "multiturn", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}), Prompt: PromptContext{Model: "Test"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A "large"-class prompt so the task grants a subagent budget (agents>0):
-	// breadth ("across the") plus four named paths are the two independent size
-	// signals the classifier requires to escalate.
 	if _, _, err := engine.Run(context.Background(), "Implement a new config loader module with validation across the package and verify it: internal/config/loader.go, internal/config/schema.go, internal/config/validate.go, internal/config/loader_test.go"); err != nil {
 		t.Fatal(err)
 	}
-	sawReport := false
 	for _, msg := range engine.history.All() {
 		if strings.Contains(msg.Content, "stable prefix changed") {
-			t.Fatalf("multi-turn subagent falsely tripped the prefix guard: %q", msg.Content)
-		}
-		if msg.Role == contract.RoleTool && strings.Contains(msg.Content, "Findings") {
-			sawReport = true
+			t.Fatalf("a multi-turn run falsely tripped the prefix guard: %q", msg.Content)
 		}
 	}
-	if !sawReport {
-		t.Fatalf("expected the subagent findings in history (multi-turn run), got %+v", engine.history.All())
+	// The conversation really did span several turns of tool work.
+	if len(provider.requests) < 3 {
+		t.Fatalf("expected a multi-turn run, got %d requests", len(provider.requests))
 	}
 }
 

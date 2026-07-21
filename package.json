@@ -10,11 +10,19 @@
     "scripts/npm-postinstall.js"
   ],
   "scripts": {
+    "check:npm": "node --check bin/muhiyacode.js && node --check scripts/npm-postinstall.js",
     "postinstall": "node scripts/npm-postinstall.js"
   },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/muhiyatools/MuhiyaCode.git"
+  },
+  "homepage": "https://github.com/muhiyatools/MuhiyaCode#readme",
+  "bugs": {
+    "url": "https://github.com/muhiyatools/MuhiyaCode/issues"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "cli",

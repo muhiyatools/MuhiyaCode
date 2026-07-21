@@ -68,19 +68,22 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	// first real request, so it must be substituted before the advisor reasons
 	// about the pairing.
 	e.reconcileCatalog()
-	e.runSessionAdvisor(ctx, userPrompt, e.workspaceSignal())
+	e.runTaskAdvisor(ctx, userPrompt, e.workspaceSignal())
 	e.maybeAdviseFreshSession(assessment, userPrompt)
 	modelPrompt := userPrompt
 	if profile.Onboarding && ShouldConsiderOnboarding(userPrompt) && e.callbacks.Ask != nil {
 		e.callbacks.EmitStatus("Clarifying the task...")
-		// Onboarding uses the SubagentModelID and shares the sub stream's gateway
-		// routing pin (C1). sessionPinSub is computed later in the same Run; for
-		// clarity we re-derive the same identity here (it must stay identical to
-		// the one main-loop uses).
+		// Onboarding is an auxiliary call: cheap model, its own routing pin, off
+		// the session's cached stream entirely. It ran on the configured subagent
+		// model while one existed; it now shares utilityModelID with the task
+		// advisor. The pin string is unchanged on purpose — pins are cache
+		// identity, and renaming one would orphan the usage rows already recorded
+		// against it.
 		onboardingStart := time.Now()
-		questions, usage := GenerateOnboardingQuestions(ctx, e.provider, e.settings.Provider.SubagentModelID, userPrompt, e.session.ID+":sub:onboarding")
+		utilityModel := e.utilityModelID()
+		questions, usage := GenerateOnboardingQuestions(ctx, e.provider, utilityModel, userPrompt, e.session.ID+":sub:onboarding")
 		if err := e.recordUsageAndEmit(func() error {
-			return e.recordAuxUsage(ctx, e.settings.Provider.SubagentModelID, ":sub:onboarding", usage, elapsedMS(onboardingStart))
+			return e.recordAuxUsage(ctx, utilityModel, ":sub:onboarding", usage, elapsedMS(onboardingStart))
 		}); err != nil {
 			return "", stats, fmt.Errorf("persist onboarding usage: %w", err)
 		}
@@ -91,6 +94,9 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		}
 	}
 	e.resetTaskState(budget)
+	// 013 FR-008: whatever the manual /skills flow already wrapped into this
+	// prompt counts as delivered, so read_skill will not send it a second time.
+	e.seedProvidedSkills(modelPrompt)
 	if err := e.applyBoundaryToolChange(ctx); err != nil {
 		return "", stats, err
 	}
@@ -105,21 +111,24 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// and sync.Mutex is not reentrant.
 		_, harnessVisible := e.harnessEventsSince(harnessStart)
 		e.taskMu.Lock()
-		stats = contract.TaskStats{DurationMS: time.Since(started).Milliseconds(), Effort: profile.Level, TaskClass: string(assessment.Class), Usage: subtractUsage(e.sessionUsage, usageStart), AgentUsage: e.taskAgentUsage, PeakContextPercent: e.taskPeakContext, ToolCalls: toolCalls, AgentRuns: e.taskAgentRuns, AgentRunsReused: e.taskAgentReused, Turns: turns, ChecksRun: checksRun, FoldedTokens: folded, DisciplineScore: max(0, 100-min(24, e.taskDuplicates*8)-min(16, e.taskOverBudget*2)), DoneCriteria: doneCriteria, TerminatedReason: terminateReason, LinesAdded: taskLinesAdded, LinesRemoved: taskLinesRemoved, HarnessEvents: harnessVisible}
+		stats = contract.TaskStats{DurationMS: time.Since(started).Milliseconds(), Effort: profile.Level, TaskClass: string(assessment.Class), Usage: subtractUsage(e.sessionUsage, usageStart), PeakContextPercent: e.taskPeakContext, ToolCalls: toolCalls, Turns: turns, ChecksRun: checksRun, FoldedTokens: folded, DisciplineScore: max(0, 100-min(24, e.taskDuplicates*8)-min(16, e.taskOverBudget*2)), DoneCriteria: doneCriteria, TerminatedReason: terminateReason, LinesAdded: taskLinesAdded, LinesRemoved: taskLinesRemoved, HarnessEvents: harnessVisible}
 		// UD-6/UD-9 (feature 008): session accumulators for the usage panel —
 		// active time and lines± are session-scoped (reset on resume, labeled
 		// "this session"); API time derives from persisted record durations.
 		e.sessionActiveMS += stats.DurationMS
 		e.sessionLinesAdded += taskLinesAdded
 		e.sessionLinesRemoved += taskLinesRemoved
-		// T043: attach the cumulative session hit-rate (provider-fields-only
-		// denominator) so the persistent footer can show session hit-rate, not
-		// just this task's cache tag. Computed under taskMu with usageRecords.
-		stats.SessionHitRate = contract.AggregateUsage(e.usageRecords).SessionHitRate
+		// T043: attach the cumulative session hit-rate so the persistent footer can
+		// show session hit-rate, not just this task's cache tag. Computed under
+		// taskMu with usageRecords.
+		//
+		// The ALL-STREAM rate: the session's turns plus the auxiliary calls
+		// (advisor, onboarding), so the figure covers everything the user paid for.
+		stats.SessionHitRate = contract.AggregateUsage(e.usageRecords).AllStreamHitRate
 		// Feature 011 D8: per-(model, pin) cache health for mixed-model sessions.
 		stats.PerPairing = contract.PerPairingRates(e.usageRecords)
-		// The credits figure is the FULL SESSION cost — every main-loop, subagent,
-		// and auxiliary request the gateway priced (user directive: the end-of-task
+		// The credits figure is the FULL SESSION cost — every session turn and
+		// auxiliary request the gateway priced (user directive: the end-of-task
 		// total is the whole session, not just this task; the token figure above
 		// stays per-task via stats.Usage). Member-set honesty still holds: a single
 		// unpriced eligible request collapses the sum to "unavailable" rather than
@@ -146,15 +155,14 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		if eventStart < len(allEvents) {
 			stats.Invalidations = append([]contract.InvalidationEvent(nil), allEvents[eventStart:]...)
 		}
-		// Fold in the execution agent's writes unconditionally: under the
-		// plan/execute split they ARE the task's file changes.
+		// Fold in the shared gate's write tally so every mutation this task made
+		// counts, wherever in the loop it happened.
 		e.mergeChangedFiles(filesChanged)
 		for file := range filesChanged {
 			stats.FilesChanged = append(stats.FilesChanged, file)
 		}
 		sort.Strings(stats.FilesChanged)
 		e.finalizeReviewStats(&stats, assessment.Class, filesChanged, taskLinesAdded, taskLinesRemoved)
-		e.finalizeLinkStats(&stats)
 		if e.callbacks.TaskComplete != nil {
 			e.callbacks.TaskComplete(stats)
 		}
@@ -216,7 +224,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	promptContext.Workspace = e.session.WorkspacePath
 	promptContext.OS = runtime.GOOS
 	promptContext.HasWeb = hasDefinition(definitions, "web_search")
-	promptContext.HasSubagents = hasDefinition(definitions, "run_subagent")
 	promptText := SystemPrompt(promptContext)
 	// UD-10/T025 (feature 008): record the component byte sizes behind the
 	// /context usage-by-category estimate. Measured once per task from values
@@ -287,6 +294,20 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			e.taskMu.Unlock()
 			if !shown {
 				e.callbacks.EmitStatus("Context is filling; earlier turns will be summarized when needed.")
+			}
+		}
+		// Routed-window risk: behind a load balancer the model's advertised window
+		// is the LARGEST peer's, not every peer's. Past the floor a fallback can
+		// drop this conversation on a machine too small to hold it, which fails the
+		// request outright rather than degrading. One notice per compaction cycle,
+		// sharing the soft-advisory latch so the two cannot both fire and nag.
+		if e.routedWindowRisk() {
+			e.taskMu.Lock()
+			shown := e.routedWindowNoted
+			e.routedWindowNoted = true
+			e.taskMu.Unlock()
+			if !shown {
+				e.callbacks.EmitNotice("This conversation has outgrown some of the providers serving this model. Run /compact to keep it safely routable.")
 			}
 		}
 		if e.needsCompact(live) {
@@ -361,7 +382,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// Feature 006: project memory is a file the agent edits with its ordinary
 		// tools, so answers no longer carry a <project-memory> trailer to hide — live
 		// tokens stream straight through to display.
-		request := contract.ChatRequest{SessionID: sessionPinMain, Messages: messages, Tools: definitions, ModelID: e.settings.Provider.ActiveModelID, ToolChoice: "auto", Reasoning: ReasoningForEffort(e.effort()), OnToken: e.callbacks.Token, OnReasoningToken: e.callbacks.ReasoningToken}
+		request := contract.ChatRequest{SessionID: sessionPinMain, Messages: messages, Tools: definitions, ModelID: e.settings.Provider.ActiveModelID, ToolChoice: "auto", Reasoning: ReasoningForEffort(e.effort()), MaxTokens: e.outputBudget(e.settings.Provider.ActiveModelID), PinUpstream: e.upstreamPin(), OnToken: e.callbacks.Token, OnReasoningToken: e.callbacks.ReasoningToken}
 		shapeRequest := request
 		if normalizer, ok := e.provider.(wireRequestNormalizer); ok {
 			normalizedMessages, normalizeErr := normalizer.StableRequestMessages(request)
@@ -428,18 +449,37 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			}
 			return "", stats, err
 		}
-		observation := mainUsageObservation{model: e.settings.Provider.ActiveModelID, usage: response.Usage, changeReasons: changeReasons, messageCount: len(messages), durationMS: elapsedMS(requestStart)}
+		// messageCount is the post-normalization wire count (== e.lastSentMessageCount
+		// basis) so suspiciousCacheMiss compares this turn's and the prior turn's
+		// counts on the same wire basis rather than a normalizer-skewed one.
+		observation := mainUsageObservation{model: e.settings.Provider.ActiveModelID, usage: response.Usage, changeReasons: changeReasons, messageCount: shape.MessageCount, durationMS: elapsedMS(requestStart), rewriteVersion: shape.RewriteVersion}
 		if err := e.recordUsageAndEmit(func() error { return e.recordMainUsage(ctx, observation) }); err != nil {
 			return "", stats, fmt.Errorf("persist request usage: %w", err)
 		}
 		e.emitColdStartNoticeIfPending(ctx) // C6: honest resume cold-start notice, off the usage lock
+		e.emitUpstreamNoticeIfPending(ctx)  // a routing-layer flip is the other honest cause of a cold turn
 		e.lastShape = &shape
-		e.lastSentMessageCount = len(messages)
+		// Record the POST-normalization wire message count, not len(messages). Next
+		// turn feeds this as settledCount to NewWirePrefixShape, which slices the
+		// settled window out of the NORMALIZED history it hashes. Storing the
+		// pre-normalization count mis-sizes that window whenever the provider's
+		// StableRequestMessages adds or drops an entry (e.g. repairing a dangling
+		// tool call on a resumed session), producing a false "history changed" abort
+		// on a purely append-only turn. With no normalizer shape.MessageCount ==
+		// len(messages), so this is a strict no-op there.
+		e.lastSentMessageCount = shape.MessageCount
 		e.persistPrefixShapeOnce(ctx, shape) // C3: baseline for the next resume's drift check
 		// Emit the task-cumulative usage (all streams), not this response's
 		// single-request usage: the live tokens/cache tag must describe the
 		// whole task so far, matching the end-of-task summary's semantics.
 		e.emitContext(response.Usage.PromptTokens)
+		// B-3: finish_reason "length" means the model's reply was cut at the output
+		// cap — surface it instead of silently treating a truncated answer as
+		// complete (MiniMax/GLM hit this at 16k).
+		if response.FinishReason == "length" {
+			e.recordHarnessEvent(ctx, contract.HarnessProvider, "output-truncated", "finish_reason=length")
+			e.callbacks.EmitNotice("The model's reply reached the output limit and was cut off — it may be incomplete.")
+		}
 		// T038: calibrate the token estimator from this real provider usage so the
 		// pressure estimate (used when provider tokens are unavailable, e.g. the
 		// bootstrap turn) tracks the actual tokenizer rather than a fixed 0.25
@@ -492,12 +532,9 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				continue
 			}
 			// DG-7 (feature 008): AutoReview — at max effort, when substantial
-			// file-changing work is about to finalize after substantial file-changing work,
-			// nudge ONCE for an independent review pass. A dynamic tail rider
-			// (never prefix), fired at most once per task, skipped when nothing
-			// meaningful changed.
-			// Fold in the execution agent's writes: under the plan/execute split
-			// they ARE the task's file changes.
+			// file-changing work is about to finalize, nudge ONCE to review it
+			// before answering. A dynamic tail rider (never prefix), fired at most
+			// once per task, skipped when nothing meaningful changed.
 			e.mergeChangedFiles(filesChanged)
 			if profile.AutoReview && !autoReviewNudged && len(filesChanged) >= 2 {
 				autoReviewNudged = true
@@ -505,15 +542,18 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				// trivial two-file change (docs, renames, tiny low-risk edits) no
 				// longer triggers a review just because the effort is max. The gate
 				// may only suppress or shape this trigger, never widen it (contract
-				// §6); explicit user requests bypass gating entirely via the
-				// run_subagent path (§6a).
+				// §6).
 				decision := Decide(e.reviewProfileForTask(currentClass, filesChanged, taskLinesAdded, taskLinesRemoved))
 				e.setTaskReviewDecision(decision)
 				if decision.Tier != ReviewTierSkip {
 					if trimmed != "" {
 						_ = e.persistAssistant(ctx, trimmed)
 					}
-					e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[review] Before finishing: run one %s review subagent over the files that changed, then dispatch fixes for verified findings only and give the final answer.", decision.Tier)})
+					// The session reviews its own work: it already holds the diff in
+					// context, so this is a re-read of what it just wrote, not a
+					// dispatch. Naming a tool here that no longer exists is how a
+					// nudge turns into a wasted turn and an invented tool call.
+					e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[review] Before finishing: re-read the files you changed and check them at a %s level — correctness first, then anything you left half-done. Fix what you find, then give the final answer.", decision.Tier)})
 					continue
 				}
 			}
@@ -527,8 +567,15 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				return "", stats, err
 			}
 		}
-		e.history.Append(assistantReplayMessage(response, assistantText, calls))
-		outcomes := e.executeBatch(ctx, calls, definitions, live)
+		// TB03: a call cut off at the output cap is never dispatched — its JSON is
+		// incomplete. It is answered with the chunked-write protocol, and history
+		// stores a marker instead of the half-written payload so the dead bytes are
+		// billed once rather than on every later request.
+		truncated := truncatedSet(response)
+		executable, cut := splitTruncatedCalls(calls, truncated)
+		e.history.Append(assistantReplayMessage(response, assistantText, sanitizeTruncatedCalls(calls, truncated)))
+		outcomes := e.truncatedOutcomes(e.mainScope(definitions), cut)
+		outcomes = append(outcomes, e.executeBatch(ctx, executable, definitions, live)...)
 		for _, outcome := range outcomes {
 			toolCalls++
 			if outcome.Failed {
@@ -538,7 +585,17 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				// reset-on-success consecutive counter) is what stops a model
 				// alternating between distinct failing actions from looping to
 				// the 120-turn ceiling.
-				e.recordTaskFailure(turns)
+				//
+				// A pre-dispatch gate rejection (role gate, arg validation, verbatim
+				// repeat, repeat limiter, read-only-shell, continuation-review mask)
+				// is recoverable guidance, not a tool that ran and failed, so it is
+				// excluded from this terminator — otherwise a single turn-1 batch of
+				// role-gated edits force-finalizes the task with a false "genuine
+				// blocker." The gate's own escalation, the B7 all-failed guard, the
+				// nudge below, and the hard ceiling remain the liveness backstops.
+				if !outcome.GateRejected {
+					e.recordTaskFailure(turns)
+				}
 			} else {
 				consecutiveFailures = 0
 			}

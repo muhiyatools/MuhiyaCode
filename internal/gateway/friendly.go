@@ -25,6 +25,10 @@ func FriendlyRequestError(err error) string {
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "the request timed out — the gateway or provider was slow; try again."
 	}
+	var stall *StalledError
+	if errors.As(err, &stall) {
+		return "the provider went quiet mid-response (retried automatically) — try again if it persists."
+	}
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {
 		switch {
@@ -72,6 +76,12 @@ func Recoverable(err error) bool {
 	}
 	if strings.Contains(strings.ToLower(err.Error()), "context canceled") {
 		return false
+	}
+	// A stall we induced (idle/first-byte timer) is worth one more try: the answer
+	// never arrived, and the request bytes are still cache-warm upstream.
+	var stall *StalledError
+	if errors.As(err, &stall) {
+		return true
 	}
 	var httpErr *HTTPError
 	if errors.As(err, &httpErr) {

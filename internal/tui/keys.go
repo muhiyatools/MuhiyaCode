@@ -49,10 +49,7 @@ func (m *Model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 			m.clearSelection()
 			return nil
 		}
-		if m.viewAgent != "" {
-			m.viewAgent = ""
-			m.status = "Main session"
-		} else if m.busy {
+		if m.busy {
 			m.runtime.Engine.Cancel()
 			m.status = "Stopping…"
 		} else {
@@ -76,16 +73,12 @@ func (m *Model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		return nil
 	case "shift+tab":
 		return m.cyclePermission()
-	case "ctrl+t":
-		// Toggle the live to-do checklist panel (Experience Overhaul A3). Pure UI
-		// state — no engine call, no notice.
-		m.todoVisible = !m.todoVisible
-		return nil
 	case "tab":
+		// Tab is autocomplete only (013 FR-027). Its agent-switching branch moved to
+		// the arrow keys; with no leading "/" it now does nothing, which is what a
+		// user pressing Tab mid-sentence expects.
 		if strings.HasPrefix(m.input.Value(), "/") {
 			m.completeCommand()
-		} else {
-			m.cycleAgent()
 		}
 		return nil
 	case "enter":
@@ -133,15 +126,8 @@ func (m *Model) handleKey(key tea.KeyPressMsg) tea.Cmd {
 		m.viewport.PageDown()
 		return nil
 	}
-	if strings.HasPrefix(stroke, "alt+") && len(stroke) == 5 && stroke[4] >= '1' && stroke[4] <= '9' {
-		index := int(stroke[4] - '0')
-		for _, agent := range m.agents {
-			if agent.index == index {
-				m.viewAgent = agent.id
-				return nil
-			}
-		}
-	}
+	// left/right agent cycling and alt+1..9 agent jumps were removed with the
+	// subagent views they navigated. Both keys now belong entirely to the caret.
 	updated, command := m.input.Update(key)
 	m.input = updated
 	if strings.HasPrefix(m.input.Value(), "/") {
@@ -223,7 +209,19 @@ func (m *Model) submit(prompt string) tea.Cmd {
 		if m.runtime.Engine.QueueUserMessage(prompt) {
 			m.items = append(m.items, item{kind: "user", content: display, title: "steering"})
 			m.status = "Message queued"
+			return nil
 		}
+		// D1: m.busy is true but the engine has no task to steer — the run is still
+		// starting, or the previous one just finished and its completion has not yet
+		// reached the UI. The enter handler already cleared the composer, so dropping
+		// here would silently lose what the user typed (the reported steering-loss
+		// bug). Restore the text instead: one more Enter delivers it — as steering
+		// once the run is live, or as a fresh task once busy clears. Falling through
+		// to start a task now would race the starting run into "a task is already
+		// running".
+		m.input.SetValue(display)
+		m.input.MoveToEnd()
+		m.notify("One moment — press Enter to send.")
 		return nil
 	}
 	m.items = append(m.items, item{kind: "user", content: display})
