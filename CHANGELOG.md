@@ -2,7 +2,7 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
-## 1.1.1 – Token-Economy Overhaul (Feature 014)
+## 1.2.0 – Token-Economy Overhaul (Feature 014)
 
 - **Lean fixed prefix (≤10,000 bytes / ≤2,500 estimated tokens):** Core system prompt and core tool definitions wire footprint reduced by >60% on zero-MCP baseline.
 - **ToolBroker & Deferred Tool Hydration:** Non-core built-in tools and MCP tool schemas are handled via a deferred hydration broker, preventing prefix bloat and cache invalidation when configuring MCP servers.

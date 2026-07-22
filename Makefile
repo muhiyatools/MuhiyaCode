@@ -1,6 +1,6 @@
 .PHONY: fmt check-fmt vet test test-race build verify snapshot clean
 
-VERSION ?= 1.1.1
+VERSION ?= 1.2.0
 LDFLAGS := -s -w -X github.com/muhiya/muhiyacode/internal/buildinfo.Version=$(VERSION)
 
 fmt:
