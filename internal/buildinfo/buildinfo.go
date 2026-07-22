@@ -5,7 +5,7 @@ package buildinfo
 // to the current release series for source builds and is overridden at release
 // time via -ldflags "-X .../buildinfo.Version=<tag>".
 var (
-	Version = "1.0.6"
+	Version = "1.3.0"
 	Commit  = "unknown"
 	Date    = "unknown"
 )

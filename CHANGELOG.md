@@ -2,7 +2,14 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
-## 1.0.6
+## 1.3.0 – Token-Economy Overhaul (Feature 014)
+
+- **Lean fixed prefix (≤10,000 bytes / ≤2,500 estimated tokens):** Core system prompt and core tool definitions wire footprint reduced by >60% on zero-MCP baseline.
+- **ToolBroker & Deferred Tool Hydration:** Non-core built-in tools and MCP tool schemas are handled via a deferred hydration broker, preventing prefix bloat and cache invalidation when configuring MCP servers.
+- **Security & Permission Parity:** Brokered tool calls strictly preserve workspace containment, OS sandbox, secret redaction, and approval confirmation gates.
+- **CLI & Config Control:** Added `--lean-prefix` and `--economy [off|observe|balanced|aggressive]` CLI flags alongside the `tokenEconomyMode` config setting.
+
+## 1.1.0
 
 - Version-alignment release: same code as 1.0.5, republished under 1.0.6 so the app, npm package, and published version number all read 1.0.6.
 
