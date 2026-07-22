@@ -187,6 +187,26 @@ func TestARefusedPinIsDroppedAndNeverFailsTheTask(t *testing.T) {
 	}
 }
 
+func TestPinFallbackRequiresExplicitAffinityFieldRejection(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  *HTTPError
+		want bool
+	}{
+		{"field rejected", &HTTPError{Status: 400, Body: `{"error":"unknown field provider"}`}, true},
+		{"authentication", &HTTPError{Status: 401, Body: `{"error":"provider credentials invalid"}`}, false},
+		{"unknown model", &HTTPError{Status: 400, Body: `{"error":"unknown model"}`}, false},
+		{"quota", &HTTPError{Status: 422, Body: `{"error":"provider quota exhausted"}`}, false},
+		{"server failure", &HTTPError{Status: 500, Body: `{"error":"unsupported provider"}`}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := rejectsUpstreamAffinity(test.err); got != test.want {
+				t.Fatalf("rejectsUpstreamAffinity(%+v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
 // A config reload (the user changes model or re-authenticates mid-session) must
 // not re-enable a pin the route has already refused. UpdateConfig replaces
 // settings and credentials only — this test exists so a future refactor that
@@ -202,6 +222,7 @@ func TestARejectedPinSurvivesAConfigReload(t *testing.T) {
 		attempts = append(attempts, hasProvider)
 		if hasProvider {
 			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte(`{"error":{"message":"unrecognized field: provider"}}`))
 			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")

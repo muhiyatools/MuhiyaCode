@@ -70,6 +70,27 @@ func TestApproveShellBlocksSensitiveRootReferences(t *testing.T) {
 	}
 }
 
+func TestWorkspaceCredentialFilesAreBlockedByPathAndShell(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	guard, err := NewGuard(root, GuardOptions{
+		Mode:     contract.PermissionAutoAccept,
+		Trust:    NewMemoryTrustStore(),
+		Approver: ApproverFunc(func(context.Context, ApprovalRequest) (bool, error) { return true, nil }),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".env", ".env.production", ".npmrc", "credentials.json"} {
+		if _, err := guard.ApprovePath(ctx, ActionRead, filepath.Join(root, "config", name)); !errors.Is(err, ErrSensitivePath) {
+			t.Errorf("ApprovePath(%q) = %v, want ErrSensitivePath", name, err)
+		}
+		if err := guard.ApproveShell(ctx, "type "+name); !errors.Is(err, ErrSensitivePath) {
+			t.Errorf("ApproveShell(%q) = %v, want ErrSensitivePath", name, err)
+		}
+	}
+}
+
 // TestMemoryStoreUnreachableByFileTools (Experience Overhaul B1 T065, INV-9): the
 // per-project memory store lives under ~/.muhiya, a hard-blocked sensitive root, so
 // the model's file tools (read_file/list_files/grep) can never reach it — only
@@ -346,6 +367,26 @@ func TestShellStreamingAndCancellation(t *testing.T) {
 	result, err := runner.Run(context.Background(), root, command, 10*time.Second)
 	if err != nil || result.ExitCode != 0 || !strings.Contains(result.Output, "hello") || !strings.Contains(streamed.String(), "hello") {
 		t.Fatalf("result=%+v streamed=%q err=%v", result, streamed.String(), err)
+	}
+}
+
+func TestShellStreamingHonorsOutputLimitBeforeCallback(t *testing.T) {
+	root := t.TempDir()
+	command := "printf 1234567890"
+	if runtime.GOOS == "windows" {
+		command = "[Console]::Write('1234567890')"
+	}
+	var streamed strings.Builder
+	runner := ShellRunner{Preferred: "auto", Timeout: 10 * time.Second, OutputLimit: 5, OnOutput: func(value string) { streamed.WriteString(value) }}
+	result, err := runner.Run(context.Background(), root, command, 10*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := streamed.String(); got != "12345" {
+		t.Fatalf("streamed output bypassed cap: %q", got)
+	}
+	if !result.Truncated || !strings.HasPrefix(result.Output, "12345") {
+		t.Fatalf("result=%+v", result)
 	}
 }
 

@@ -1,10 +1,13 @@
 package orchestrator
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/gateway"
+	"github.com/muhiya/muhiyacode/internal/workspace"
 )
 
 // 004 US4 (T041/FR-018): the system prompt must not exceed its recorded
@@ -97,6 +100,37 @@ func TestSystemPromptSizeWithinBudget(t *testing.T) {
 	}
 	if got := len(SystemPrompt(ctx)); got > promptBaselineChars {
 		t.Fatalf("system prompt grew to %d chars, over the %d baseline (FR-018: do not bloat)", got, promptBaselineChars)
+	}
+}
+
+func TestBalancedWirePrefixBudgetAndUnusedConfigurationStability(t *testing.T) {
+	service, err := workspace.New(t.TempDir(), workspace.Options{PermissionMode: contract.PermissionAutoAccept, Trust: workspace.NewMemoryTrustStore()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings := &contract.Settings{TokenEconomyMode: "balanced"}
+	base := &Engine{settings: settings, registry: NewRegistry(service.Tools()...), skills: NewSkillCatalog(nil)}
+	prompt := SystemPrompt(PromptContext{Workspace: "/w", OS: "linux", Shell: "bash", Model: "model", Lean: true})
+	encoded, err := json.Marshal(base.sessionDefinitions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wireBytes := len(prompt) + len(encoded)
+	if wireBytes > 10_000 || EstimateTokens(prompt+string(encoded)) > 2_500 {
+		t.Fatalf("balanced fixed prefix too large: bytes=%d tokens=%d prompt=%d tools=%d", wireBytes, EstimateTokens(prompt+string(encoded)), len(prompt), len(encoded))
+	}
+	withDeferred := NewRegistry(service.Tools()...)
+	for i := 0; i < 100; i++ {
+		name := "mcp__unused_" + strings.Repeat("x", i%5) + string(rune('a'+i%26))
+		withDeferred.Add(brokerTestTool{definition: definition(name, "unused remote integration schema", map[string]any{"value": map[string]any{"type": "string"}}, nil)})
+	}
+	many := &Engine{settings: settings, registry: withDeferred, skills: NewSkillCatalog([]SkillListing{{Name: "one"}, {Name: "two"}})}
+	manyEncoded, _ := json.Marshal(many.sessionDefinitions())
+	if delta := len(manyEncoded) - len(encoded); delta > 256 || delta < -256 {
+		t.Fatalf("unused definitions changed core by %d bytes", delta)
+	}
+	if string(encoded) == "" || string(manyEncoded) == "" {
+		t.Fatal("empty serialized definitions")
 	}
 }
 

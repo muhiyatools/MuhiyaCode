@@ -5,6 +5,53 @@ import (
 	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
+type TruncationObservation struct {
+	LogicalStepID string
+	RequestSeq    int
+	CurrentCap    int
+	MaximumCap    int
+	FinishReason  string
+}
+
+type TruncationDecision struct {
+	Retry   bool
+	Stop    bool
+	NextCap int
+	RetryOf int
+	Code    string
+}
+
+type PendingTruncationRetry struct {
+	LogicalStepID string
+	NextCap       int
+	RetryOf       int
+	Code          string
+}
+
+type TruncationController struct {
+	attempts map[string]int
+}
+
+func NewTruncationController() *TruncationController {
+	return &TruncationController{attempts: make(map[string]int)}
+}
+
+func (controller *TruncationController) Record(observation TruncationObservation) TruncationDecision {
+	if observation.FinishReason != "length" {
+		delete(controller.attempts, observation.LogicalStepID)
+		return TruncationDecision{Code: "output.complete"}
+	}
+	if observation.LogicalStepID == "" || controller.attempts[observation.LogicalStepID] > 0 {
+		return TruncationDecision{Stop: true, Code: "stop.output_truncated_twice"}
+	}
+	next := min(saturatingDoubleInt(max(1, observation.CurrentCap)), observation.MaximumCap)
+	if observation.MaximumCap <= 0 || next <= observation.CurrentCap {
+		return TruncationDecision{Stop: true, Code: "stop.output_truncation_ceiling"}
+	}
+	controller.attempts[observation.LogicalStepID]++
+	return TruncationDecision{Retry: true, NextCap: next, RetryOf: observation.RequestSeq, Code: "recover.output_truncated"}
+}
+
 // Output-cap truncation handling (TB03).
 //
 // When a model hits its output cap mid-tool-call, the stream still closes

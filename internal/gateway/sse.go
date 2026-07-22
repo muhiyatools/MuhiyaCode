@@ -328,12 +328,27 @@ func (a *StreamAccumulator) rebuildUsage() {
 	case usageNumberValid:
 		miss := a.deepSeekCacheMiss.value
 		usage.CacheMissTokens = &miss
+		usage.UncachedInputTokens = cloneUsageInt(&miss)
+		if a.deepSeekCacheRead.state == usageNumberValid {
+			usage.CacheUsageSchema = "deepseek.prompt_cache"
+			usage.CacheUsageDerivation = "direct-complementary"
+		} else {
+			usage.CacheUsageSchema = "mixed.cache-members"
+			usage.CacheUsageDerivation = "direct-members"
+		}
 	case usageNumberMissing, usageNumberNull:
 		if a.openAICacheRead.state == usageNumberValid && usage.PromptTokensAvailable && usage.CacheReadTokens != nil {
 			miss, ok := subtractInt(usage.PromptTokens, *usage.CacheReadTokens)
 			if ok {
 				usage.CacheMissTokens = &miss
+				usage.UncachedInputTokens = cloneUsageInt(&miss)
 				usage.MissDerived = true
+				if a.deepSeekCacheRead.state == usageNumberValid {
+					usage.CacheUsageSchema = "mixed.deepseek-read+derived"
+				} else {
+					usage.CacheUsageSchema = "openai.prompt_tokens_details"
+				}
+				usage.CacheUsageDerivation = "uncached=prompt-cache_read"
 			} else {
 				usage.Contradictory = true
 				a.addUsageDiagnostic("derived cache miss exceeds the integer range")
@@ -353,6 +368,14 @@ func (a *StreamAccumulator) rebuildUsage() {
 	}
 	usage.Diagnostic = strings.Join(a.usageDiagnostics, "; ")
 	a.usage = usage
+}
+
+func cloneUsageInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func (a *StreamAccumulator) addUsageDiagnostic(message string) {

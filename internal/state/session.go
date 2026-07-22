@@ -75,6 +75,9 @@ func (s *Sessions) AppendTranscript(sessionID string, value map[string]any) erro
 }
 
 func (s *Sessions) AppendUsage(sessionID string, record contract.UsageRecord) error {
+	// UsageRecord evolves additively. appendJSONLine preserves explicit null/zero
+	// distinctions while UsageRecords uses ordinary tolerant JSON decoding, so
+	// old sessions and rows carrying unknown future economy fields remain readable.
 	return s.appendJSONLine(sessionID, "usage.jsonl", record)
 }
 

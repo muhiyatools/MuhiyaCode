@@ -6,6 +6,16 @@ import (
 	"testing"
 )
 
+type Example struct {
+	ID   string
+	Body string
+}
+
+var (
+	examples     = map[string]Example{}
+	exampleOrder []string
+)
+
 // Audit suite for feature 010 US3 (contracts/instruction-system.md IS-4..8,
 // IS-10). Every check here walks the SAME registry the golden dump in
 // dump_test.go renders, so a reintroduced contradiction, an unavailable-

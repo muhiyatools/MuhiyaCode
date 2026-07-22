@@ -12,6 +12,126 @@ import (
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
+// NormalizedCacheUsage is a provider-neutral, availability-preserving view of
+// one raw provider usage object. RawSchema and Derivation make every mapped or
+// derived member auditable; nil always means unavailable, never zero.
+type NormalizedCacheUsage struct {
+	PromptTokens        *int
+	OutputTokens        *int
+	CacheReadTokens     *int
+	CacheWriteTokens    *int
+	CacheCreationTokens *int
+	UncachedInputTokens *int
+	RawSchema           string
+	Derivation          string
+	Diagnostic          string
+}
+
+// normalizeProviderUsage applies only documented complementary-field rules.
+// It is intentionally independent from pricing/capability selection so raw
+// payload fixtures can be verified before provider profiles are introduced.
+func normalizeProviderUsage(raw json.RawMessage, family, transport string) NormalizedCacheUsage {
+	family = strings.ToLower(strings.TrimSpace(family))
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	result := NormalizedCacheUsage{}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil {
+		result.RawSchema = "unknown"
+		result.Derivation = "unavailable"
+		result.Diagnostic = "usage must be a JSON object: " + err.Error()
+		return result
+	}
+	diagnostics := make([]string, 0, 2)
+	readInt := func(container map[string]json.RawMessage, key, path string) *int {
+		value, ok := container[key]
+		if !ok || string(value) == "null" {
+			return nil
+		}
+		var number json.Number
+		if err := json.Unmarshal(value, &number); err != nil {
+			diagnostics = append(diagnostics, path+" must be an integer")
+			return nil
+		}
+		parsed, err := number.Int64()
+		if err != nil || parsed < 0 || parsed > int64(^uint(0)>>1) {
+			diagnostics = append(diagnostics, path+" must be a non-negative integer")
+			return nil
+		}
+		converted := int(parsed)
+		return &converted
+	}
+
+	if family == "minimax" && strings.Contains(transport, "anthropic") {
+		result.RawSchema = "anthropic.usage"
+		uncached := readInt(object, "input_tokens", "usage.input_tokens")
+		output := readInt(object, "output_tokens", "usage.output_tokens")
+		creation := readInt(object, "cache_creation_input_tokens", "usage.cache_creation_input_tokens")
+		read := readInt(object, "cache_read_input_tokens", "usage.cache_read_input_tokens")
+		result.UncachedInputTokens = uncached
+		result.OutputTokens = output
+		result.CacheReadTokens = read
+		result.CacheCreationTokens = creation
+		result.CacheWriteTokens = cloneInt(creation)
+		if uncached != nil && creation != nil && read != nil {
+			total := *uncached + *creation + *read
+			result.PromptTokens = &total
+			result.Derivation = "prompt=uncached+creation+read"
+		} else {
+			result.Derivation = "partial-anthropic"
+		}
+	} else {
+		result.PromptTokens = readInt(object, "prompt_tokens", "usage.prompt_tokens")
+		result.OutputTokens = readInt(object, "completion_tokens", "usage.completion_tokens")
+		if family == "deepseek" {
+			result.RawSchema = "deepseek.prompt_cache"
+			result.CacheReadTokens = readInt(object, "prompt_cache_hit_tokens", "usage.prompt_cache_hit_tokens")
+			result.UncachedInputTokens = readInt(object, "prompt_cache_miss_tokens", "usage.prompt_cache_miss_tokens")
+			if result.CacheReadTokens != nil && result.UncachedInputTokens != nil {
+				result.Derivation = "direct-complementary"
+			} else if result.PromptTokens != nil || result.OutputTokens != nil {
+				result.Derivation = "partial-deepseek"
+			} else {
+				result.Derivation = "unavailable"
+			}
+		} else {
+			result.RawSchema = "openai.usage"
+			var details map[string]json.RawMessage
+			if encoded, ok := object["prompt_tokens_details"]; ok && string(encoded) != "null" {
+				if err := json.Unmarshal(encoded, &details); err != nil {
+					diagnostics = append(diagnostics, "usage.prompt_tokens_details must be an object")
+				} else {
+					result.CacheReadTokens = readInt(details, "cached_tokens", "usage.prompt_tokens_details.cached_tokens")
+					result.RawSchema = "openai.prompt_tokens_details"
+				}
+			}
+			if result.PromptTokens != nil && result.CacheReadTokens != nil {
+				if *result.CacheReadTokens <= *result.PromptTokens {
+					uncached := *result.PromptTokens - *result.CacheReadTokens
+					result.UncachedInputTokens = &uncached
+					result.Derivation = "uncached=prompt-cache_read"
+				} else {
+					diagnostics = append(diagnostics, "usage cache read exceeds prompt tokens")
+					result.Derivation = "contradictory"
+				}
+			} else if result.PromptTokens != nil || result.OutputTokens != nil {
+				result.Derivation = "direct-totals"
+			} else {
+				result.Derivation = "unavailable"
+			}
+		}
+	}
+	result.Diagnostic = strings.Join(diagnostics, "; ")
+	return result
+}
+
+func cloneInt(value *int) *int {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
 // UsageResponse is the parsed GET /v1/usage payload (contract usage-api.md §2).
 // Credits are in credits (1 credit = $0.01); window/spend figures are USD.
 type UsageResponse struct {

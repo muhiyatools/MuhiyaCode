@@ -1,0 +1,76 @@
+{
+  "schema_version": 1,
+  "suite": "feature-014-evidence-results",
+  "description": "Raw-result fixtures for deterministic evidence reducers. Raw payloads are synthetic and contain no credentials.",
+  "cases": [
+    {
+      "id": "go-test-success-verbose", "kind": "process", "adapter": "go", "command": ["go", "test", "./...", "-v"],
+      "status": "success", "exit_code": 0, "complete": true,
+      "raw_text": "=== RUN   TestAdd\n--- PASS: TestAdd (0.00s)\n=== RUN   TestSub\n--- PASS: TestSub (0.00s)\nPASS\nok  \texample.com/math\t0.018s\n",
+      "expect": { "status": "success", "facts": { "packages_passed": 1, "tests_passed": 2 }, "protected": ["TestAdd", "TestSub"], "max_tokens": 1000 }
+    },
+    {
+      "id": "go-test-failure", "kind": "process", "adapter": "go", "command": ["go", "test", "./..."],
+      "status": "failure", "exit_code": 1, "complete": true,
+      "raw_text": "--- FAIL: TestAverage (0.00s)\n    calc_test.go:42: got 2, want 3\nFAIL\nFAIL\texample.com/math/calc\t0.021s\n",
+      "expect": { "status": "failure", "protected": ["TestAverage", "calc_test.go:42", "got 2, want 3"], "max_tokens": 3000 }
+    },
+    {
+      "id": "npm-test-failure", "kind": "process", "adapter": "npm", "command": ["npm", "test"],
+      "status": "failure", "exit_code": 1, "complete": true,
+      "raw_text": "> app@1.0.0 test\n> vitest run\n\n FAIL  src/cart.test.ts > cart > totals discounted items\nAssertionError: expected 9 to be 10\n ❯ src/cart.test.ts:27:18\n Test Files  1 failed | 4 passed\n      Tests  1 failed | 18 passed\n",
+      "expect": { "status": "failure", "protected": ["cart > totals discounted items", "src/cart.test.ts:27:18", "1 failed", "18 passed"], "max_tokens": 3000 }
+    },
+    {
+      "id": "pytest-failure", "kind": "process", "adapter": "pytest", "command": ["pytest", "-q"],
+      "status": "failure", "exit_code": 1, "complete": true,
+      "raw_text": "FAILED tests/test_auth.py::test_expired_token - AssertionError: expected 401\n1 failed, 12 passed in 0.42s\n",
+      "expect": { "status": "failure", "protected": ["tests/test_auth.py::test_expired_token", "expected 401", "1 failed", "12 passed"], "max_tokens": 3000 }
+    },
+    {
+      "id": "generic-shell-timeout", "kind": "process", "adapter": "generic", "command": ["example", "--watch"],
+      "status": "partial", "exit_code": null, "complete": false, "timed_out": true,
+      "raw_text": "starting watcher\nprocessed 120 files\nwarning: retrying index\n",
+      "expect": { "status": "partial", "protected": ["timed out", "processed 120 files", "warning: retrying index"], "max_tokens": 2000 }
+    },
+    {
+      "id": "generic-shell-ansi-huge-line", "kind": "process", "adapter": "generic", "command": ["example", "check"],
+      "status": "failure", "exit_code": 2, "complete": true,
+      "raw_text": "\u001b[31mERROR\u001b[0m parser.go:91: invalid token followed by a deliberately repeated diagnostic tail xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\n",
+      "expect": { "status": "failure", "protected": ["ERROR", "parser.go:91", "invalid token"], "ansi_absent": true, "max_tokens": 2000 }
+    },
+    {
+      "id": "generic-shell-invalid-utf8", "kind": "process", "adapter": "generic", "encoding": "base64", "raw_base64": "b2sK/2Vycm9yOiBiYWQgYnl0ZQo=",
+      "status": "failure", "exit_code": 1, "complete": true,
+      "expect": { "status": "failure", "replacement_character_allowed": true, "artifact_round_trip": true, "max_tokens": 2000 }
+    },
+    {
+      "id": "diff-partial", "kind": "diff", "adapter": "unified", "status": "partial", "complete": false,
+      "raw_text": "diff --git a/a.go b/a.go\nindex 111..222 100644\n--- a/a.go\n+++ b/a.go\n@@ -1,2 +1,2 @@\n-package old\n+package current\n unchanged\n",
+      "metadata": { "changed_paths": ["a.go"], "applied": ["a.go"], "mismatched": ["b.go"] },
+      "expect": { "status": "partial", "protected": ["a.go", "b.go", "mismatched", "package current"], "max_tokens": 2000 }
+    },
+    {
+      "id": "file-read-range", "kind": "file_read", "adapter": "source", "status": "success", "complete": true,
+      "metadata": { "path": "internal/example.go", "start_line": 40, "end_line": 44, "total_lines": 120, "fingerprint": "sha256:fixture" },
+      "raw_text": "40: func Example() {\n41: \tvalue := compute()\n42: \tfmt.Println(value)\n43: }\n44: \n",
+      "expect": { "status": "success", "exact_subsequence": true, "protected": ["internal/example.go", "40", "44", "sha256:fixture"], "max_tokens": 1200 }
+    },
+    {
+      "id": "search-incomplete", "kind": "search", "adapter": "ripgrep", "status": "partial", "complete": false,
+      "metadata": { "query": "Token", "scope": "internal", "matches": 2, "skipped": ["internal/generated.bin"], "truncated": true },
+      "raw_text": "internal/a.go:10:type Token struct{}\ninternal/b.go:22:func NewToken() Token\n",
+      "expect": { "status": "partial", "protected": ["internal/a.go:10", "internal/b.go:22", "internal/generated.bin", "truncated"], "negative_result_forbidden": true, "max_tokens": 1800 }
+    },
+    {
+      "id": "mcp-json-result", "kind": "json", "adapter": "mcp", "status": "success", "complete": true,
+      "raw_json": { "items": [{ "id": 1, "name": "alpha", "enabled": true }, { "id": 2, "name": "beta", "enabled": false }], "next_cursor": null },
+      "expect": { "status": "success", "typed_scalars": true, "item_count": 2, "protected": ["alpha", "beta"], "max_tokens": 1200 }
+    },
+    {
+      "id": "malformed-json", "kind": "json", "adapter": "generic-json", "status": "partial", "complete": false,
+      "raw_text": "{\"items\":[{\"id\":1}],\"next\":",
+      "expect": { "status": "partial", "invalid_json": true, "artifact_round_trip": true, "success_claim_forbidden": true, "max_tokens": 2000 }
+    }
+  ]
+}

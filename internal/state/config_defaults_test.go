@@ -122,3 +122,48 @@ func TestFreshDefaultsRecognizeBareM3Name(t *testing.T) {
 		t.Fatalf("fresh default = %q, want the M3 entry", settings.Provider.ActiveModelID)
 	}
 }
+
+func TestTokenEconomyModeDefaultsToOff(t *testing.T) {
+	if got := DefaultSettings().TokenEconomyMode; got != "off" {
+		t.Fatalf("token economy mode=%q, want off", got)
+	}
+}
+
+func TestNormalizeTokenEconomyModeDeterministic(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+		ok    bool
+	}{
+		{"off", "off", true},
+		{" OBSERVE ", "observe", true},
+		{"Balanced", "balanced", true},
+		{"AGGRESSIVE", "aggressive", true},
+		{"", "off", true},
+		{"maximum", "", false},
+		{"on", "", false},
+	}
+	for _, test := range tests {
+		got, ok := normalizeTokenEconomyMode(test.input)
+		if got != test.want || ok != test.ok {
+			t.Fatalf("normalizeTokenEconomyMode(%q)=(%q,%v), want (%q,%v)", test.input, got, ok, test.want, test.ok)
+		}
+	}
+}
+
+func TestSetConfigTokenEconomyModeRejectsUnknown(t *testing.T) {
+	settings := DefaultSettings()
+	secrets := DefaultSecrets()
+	if err := SetConfig("tokenEconomyMode", "balanced", &settings, &secrets); err != nil {
+		t.Fatal(err)
+	}
+	if settings.TokenEconomyMode != "balanced" {
+		t.Fatalf("mode=%q", settings.TokenEconomyMode)
+	}
+	if err := SetConfig("tokenEconomyMode", "mystery", &settings, &secrets); err == nil {
+		t.Fatal("unknown mode was accepted")
+	}
+	if settings.TokenEconomyMode != "balanced" {
+		t.Fatalf("invalid update mutated mode to %q", settings.TokenEconomyMode)
+	}
+}

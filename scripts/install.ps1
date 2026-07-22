@@ -1,7 +1,7 @@
 param(
     [string]$Version = "latest",
     [string]$InstallDir = "$env:LOCALAPPDATA\Programs\MuhiyaCode\bin",
-    [string]$Repository = $(if ($env:MUHIYA_REPOSITORY) { $env:MUHIYA_REPOSITORY } else { "muhiya/muhiyacode" }),
+    [string]$Repository = $(if ($env:MUHIYA_REPOSITORY) { $env:MUHIYA_REPOSITORY } else { "muhiyatools/MuhiyaCode" }),
     [switch]$NoPathUpdate
 )
 
@@ -56,4 +56,3 @@ finally {
         }
     }
 }
-

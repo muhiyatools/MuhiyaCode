@@ -34,9 +34,11 @@ type InspectionSnapshot struct {
 }
 
 type InspectionEntry struct {
-	CallID string `json:"callId"`
-	Kind   string `json:"kind"`
-	Path   string `json:"path,omitempty"`
+	CallID         string `json:"callId"`
+	Kind           string `json:"kind"`
+	Path           string `json:"path,omitempty"`
+	EvidenceHandle string `json:"evidenceHandle,omitempty"`
+	EvidenceHash   string `json:"evidenceHash,omitempty"`
 
 	// Transitional fields from the first Go snapshot shape.
 	Tool      string `json:"tool,omitempty"`
@@ -63,13 +65,39 @@ type InspectionFingerprint struct {
 }
 
 type InspectionLedger struct {
-	mu         sync.Mutex
-	signatures map[string]InspectionEntry
-	coverage   map[string]InspectionCoverage
-	inspected  map[string]bool
-	fullReads  int
-	root       string
-	persist    func(InspectionSnapshot) error
+	mu             sync.Mutex
+	signatures     map[string]InspectionEntry
+	coverage       map[string]InspectionCoverage
+	inspected      map[string]bool
+	fullReads      int
+	root           string
+	persist        func(InspectionSnapshot) error
+	lastPersistErr error
+	evidenceIntact func(string, string) bool
+}
+
+func (l *InspectionLedger) SetEvidenceIntact(check func(string, string) bool) {
+	l.mu.Lock()
+	l.evidenceIntact = check
+	l.mu.Unlock()
+}
+
+func (l *InspectionLedger) RecordArtifact(call contract.ToolCall, handle, hash string) {
+	if !readonlyTools[call.ToolName()] || handle == "" || hash == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	key := callSignature(call)
+	if call.ToolName() == "read_file" {
+		if path := pathArgument(call); path != "" {
+			key = readSignature(call, l.pathKey(path))
+		}
+	}
+	entry := l.signatures[key]
+	entry.EvidenceHandle, entry.EvidenceHash = handle, hash
+	l.signatures[key] = entry
+	l.saveLocked()
 }
 
 func NewInspection(snapshot InspectionSnapshot, persist func(InspectionSnapshot) error, workspaceRoot ...string) *InspectionLedger {
@@ -121,7 +149,7 @@ func (l *InspectionLedger) Duplicate(call contract.ToolCall, intact func(string)
 		// search spans many files with no single freshness key, and the agent is the
 		// workspace's own mutator, so an external mid-session edit is out of scope.
 		entry, ok := l.signatures[callSignature(call)]
-		return entry, ok && intact(entry.CallID)
+		return entry, ok && l.entryIntact(entry, intact)
 	}
 	path := pathArgument(call)
 	if path == "" {
@@ -134,7 +162,7 @@ func (l *InspectionLedger) Duplicate(call contract.ToolCall, intact func(string)
 		l.saveLocked()
 		return InspectionEntry{}, false
 	}
-	if entry, ok := l.signatures[readSignature(call, key)]; ok && intact(entry.CallID) {
+	if entry, ok := l.signatures[readSignature(call, key)]; ok && l.entryIntact(entry, intact) {
 		return entry, true
 	}
 	coverage, ok := l.coverage[key]
@@ -155,6 +183,13 @@ func (l *InspectionLedger) Duplicate(call contract.ToolCall, intact func(string)
 		}
 	}
 	return InspectionEntry{CallID: segments[0].CallID, Kind: "read", Path: key}, true
+}
+
+func (l *InspectionLedger) entryIntact(entry InspectionEntry, historyIntact func(string) bool) bool {
+	if historyIntact(entry.CallID) {
+		return true
+	}
+	return entry.EvidenceHandle != "" && l.evidenceIntact != nil && l.evidenceIntact(entry.EvidenceHandle, entry.EvidenceHash)
 }
 
 // Record stores only evidence that is actually present in bounded history.
@@ -266,6 +301,15 @@ func (l *InspectionLedger) Snapshot() InspectionSnapshot {
 	return l.snapshotLocked()
 }
 
+func (l *InspectionLedger) RetryPersistence() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.lastPersistErr != nil {
+		l.saveLocked()
+	}
+	return l.lastPersistErr
+}
+
 func (l *InspectionLedger) snapshotLocked() InspectionSnapshot {
 	signatures := make(map[string]InspectionEntry, len(l.signatures))
 	for key, value := range l.signatures {
@@ -289,7 +333,7 @@ func (l *InspectionLedger) snapshotLocked() InspectionSnapshot {
 
 func (l *InspectionLedger) saveLocked() {
 	if l.persist != nil {
-		_ = l.persist(l.snapshotLocked())
+		l.lastPersistErr = l.persist(l.snapshotLocked())
 	}
 }
 

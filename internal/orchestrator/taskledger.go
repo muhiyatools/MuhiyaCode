@@ -27,8 +27,8 @@ func isMutation(name string) bool {
 // a max-effort task — which legitimately climbs the runway ladder further — is
 // not stopped by a bound calibrated for medium. It is the ONLY unconditional
 // turn bound in the loop: everything below it extends while real work lands.
-func (e *Engine) hardTurnCeiling() int {
-	return int(math.Ceil(hardTurnCeiling * Profile(e.effort()).AgentTurnScale))
+func hardTurnCeilingFor(profile EffortProfile) int {
+	return int(math.Ceil(hardTurnCeiling * profile.AgentTurnScale))
 }
 
 // noteChangedFiles records a successful mutation's targets on the task ledger.

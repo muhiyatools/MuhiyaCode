@@ -175,6 +175,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.notify(string(value))
 	case streamMsg:
 		m.appendStream(value)
+	case streamResetMsg:
+		m.resetStream()
 	case toolStartMsg:
 		tv := &toolView{name: value.name, target: contract.ToolTarget(value.name, value.input), state: "running", started: time.Now()}
 		m.items = append(m.items, item{kind: "tool", tool: tv})

@@ -7,8 +7,10 @@ package workspace
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
@@ -43,6 +45,26 @@ const (
 	ActionPatch  Action = "patch"
 	ActionShell  Action = "shell"
 )
+
+type RawResultStatus string
+
+const (
+	RawResultSuccess   RawResultStatus = "success"
+	RawResultFailure   RawResultStatus = "failure"
+	RawResultTimeout   RawResultStatus = "timeout"
+	RawResultCancelled RawResultStatus = "cancelled"
+)
+
+type RawToolResult struct {
+	Status            RawResultStatus
+	Complete          bool
+	Content           []byte
+	SourceFingerprint string
+	ExitCode          *int
+	TimedOut          bool
+	Cancelled         bool
+	Encoding          string
+}
 
 func (a Action) Mutates() bool {
 	return a == ActionEdit || a == ActionWrite || a == ActionPatch || a == ActionShell
@@ -153,8 +175,10 @@ type Match struct {
 }
 
 type SearchResult struct {
-	Matches   []Match
-	Truncated bool
+	Matches      []Match
+	Truncated    bool
+	SkippedFiles int
+	FirstSkipped string
 }
 
 type GlobOptions struct {
@@ -197,7 +221,57 @@ type WriteResult struct {
 
 type PatchResult struct {
 	Files   []string
+	Notes   []string
 	Summary string
+}
+
+func (r ReadResult) RawToolResult() RawToolResult {
+	return RawToolResult{
+		Status:   RawResultSuccess,
+		Complete: r.Remaining == 0,
+		Content:  []byte(strings.Join(r.Lines, "\n")),
+		Encoding: "utf-8",
+	}
+}
+
+func (s SearchResult) RawToolResult() RawToolResult {
+	return RawToolResult{
+		Status:   RawResultSuccess,
+		Complete: !s.Truncated,
+		Content:  []byte(fmt.Sprintf("%d matches", len(s.Matches))),
+		Encoding: "utf-8",
+	}
+}
+
+func (e EditResult) RawToolResult() RawToolResult {
+	status := RawResultSuccess
+	if !e.Changed && len(e.Skipped) > 0 {
+		status = RawResultFailure
+	}
+	return RawToolResult{
+		Status:   status,
+		Complete: true,
+		Content:  []byte(e.Diff),
+		Encoding: "utf-8",
+	}
+}
+
+func (w WriteResult) RawToolResult() RawToolResult {
+	return RawToolResult{
+		Status:   RawResultSuccess,
+		Complete: true,
+		Content:  []byte(w.Diff),
+		Encoding: "utf-8",
+	}
+}
+
+func (p PatchResult) RawToolResult() RawToolResult {
+	return RawToolResult{
+		Status:   RawResultSuccess,
+		Complete: true,
+		Content:  []byte(p.Summary),
+		Encoding: "utf-8",
+	}
 }
 
 type GitDiffOptions struct {

@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
@@ -63,6 +64,17 @@ func (r *Registry) RemovePrefix(prefix string) {
 }
 
 func (r *Registry) ReplacePrefix(prefix string, tools ...contract.Tool) {
+	valid := make([]contract.Tool, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		name := tool.Definition().Function.Name
+		if name != "" && strings.HasPrefix(name, prefix) {
+			valid = append(valid, tool)
+		}
+	}
+	tools = valid
 	r.mu.Lock()
 	next := r.order[:0]
 	for _, name := range r.order {
@@ -75,9 +87,6 @@ func (r *Registry) ReplacePrefix(prefix string, tools ...contract.Tool) {
 	r.order = next
 	sort.Slice(tools, func(i, j int) bool { return tools[i].Definition().Function.Name < tools[j].Definition().Function.Name })
 	for _, tool := range tools {
-		if tool == nil {
-			continue
-		}
 		name := tool.Definition().Function.Name
 		if name == "" || !strings.HasPrefix(name, prefix) {
 			continue
@@ -138,6 +147,17 @@ func (r *Registry) DeclaresReadOnly(name string) bool {
 	r.mu.RUnlock()
 	declaring, ok := tool.(contract.ReadOnlyDeclaring)
 	return ok && declaring.DeclaresReadOnly()
+}
+
+func (r *Registry) ToolIdentity(name string) (string, string) {
+	r.mu.RLock()
+	tool := r.tools[name]
+	r.mu.RUnlock()
+	declaring, ok := tool.(contract.ToolIdentityDeclaring)
+	if !ok {
+		return "", ""
+	}
+	return declaring.ToolServerFingerprint(), declaring.ToolAvailability()
 }
 
 func (r *Registry) Names() []string {
@@ -221,15 +241,32 @@ func CapToolOutput(output string, cap int) string {
 		return output
 	}
 	if marker := strings.Index(output, "\n--- diff ---\n"); marker >= 0 && marker < cap {
-		cut := strings.LastIndex(output[:cap], "\n")
+		prefix := validUTF8Prefix(output, cap)
+		cut := strings.LastIndex(prefix, "\n")
 		if cut <= marker {
-			cut = cap
+			cut = len(prefix)
 		}
 		return output[:cut] + fmt.Sprintf("\n... [diff truncated, %d chars omitted]", len(output)-cut)
 	}
-	head := output[:cap*7/10]
-	tail := output[len(output)-cap*2/10:]
+	head := validUTF8Prefix(output, cap*7/10)
+	tail := validUTF8Suffix(output, cap*2/10)
 	return head + fmt.Sprintf("\n... [%d %s (grep/offset/limit) if needed] ...\n", len(output)-len(head)-len(tail), OutputTruncatedMarker) + tail
+}
+
+func validUTF8Prefix(value string, limit int) string {
+	limit = min(max(limit, 0), len(value))
+	for limit > 0 && !utf8.ValidString(value[:limit]) {
+		limit--
+	}
+	return value[:limit]
+}
+
+func validUTF8Suffix(value string, limit int) string {
+	start := max(0, len(value)-max(0, limit))
+	for start < len(value) && !utf8.RuneStart(value[start]) {
+		start++
+	}
+	return value[start:]
 }
 
 func IsToolFailure(output string, err error) bool {

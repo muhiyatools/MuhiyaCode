@@ -36,9 +36,7 @@ func TestFullTokensHandlesNegatives(t *testing.T) {
 // The abbreviation FullTokens replaced hid real magnitude — this pins the
 // difference that motivated the change (FR-020).
 func TestFullTokensIsNotAbbreviated(t *testing.T) {
-	if got := FullTokens(1_249_999); got == HumanTokens(1_249_999) {
-		t.Fatal("FullTokens must not abbreviate")
-	} else if got != "1,249,999" {
+	if got := FullTokens(1_249_999); got != "1,249,999" {
 		t.Fatalf("got %q, want the exact count", got)
 	}
 }

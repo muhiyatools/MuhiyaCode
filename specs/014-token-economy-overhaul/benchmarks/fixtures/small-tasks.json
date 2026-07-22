@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "suite": "feature-014-small-tasks",
+  "description": "Twenty deterministic trivial/small tasks used for SC-001 through SC-005.",
+  "reset_scripts": {
+    "docs": {
+      "strategy": "copy",
+      "source": "specs/011-competitive-agent-audit/benchmarks/fixtures/workspaces/wsdocs"
+    },
+    "logic": {
+      "strategy": "copy",
+      "source": "specs/011-competitive-agent-audit/benchmarks/fixtures/workspaces/wslogic"
+    },
+    "css": {
+      "strategy": "materialize",
+      "files": {
+        "index.html": "<!doctype html><html><head><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><button class=\"primary\">Save</button><p class=\"notice\">Ready</p></main></body></html>\n",
+        "styles.css": ":root { --accent: #2563eb; }\nbody { font-family: sans-serif; }\n.primary { background: var(--accent); color: white; padding: 8px 12px; }\n.notice { color: #475569; }\n"
+      }
+    },
+    "bug": {
+      "strategy": "materialize",
+      "files": {
+        "go.mod": "module example.com/smallbug\n\ngo 1.26\n",
+        "counter.go": "package counter\n\nfunc Sum(values []int) int {\n\ttotal := 0\n\tfor i := 0; i < len(values)-1; i++ { total += values[i] }\n\treturn total\n}\n",
+        "counter_test.go": "package counter\n\nimport \"testing\"\n\nfunc TestSum(t *testing.T) { if got := Sum([]int{1,2,3}); got != 6 { t.Fatalf(\"got %d\", got) } }\n"
+      }
+    },
+    "ui": {
+      "strategy": "materialize",
+      "files": {
+        "index.html": "<!doctype html><html><head><link rel=\"stylesheet\" href=\"styles.css\"></head><body><main><h1>Tasks</h1><form id=\"task-form\"><input id=\"task-input\"><button>Add</button></form><ul id=\"tasks\"></ul></main><script src=\"app.js\"></script></body></html>\n",
+        "styles.css": "body { font-family: sans-serif; max-width: 40rem; margin: 2rem auto; }\n",
+        "app.js": "const form=document.querySelector('#task-form'); const input=document.querySelector('#task-input'); const list=document.querySelector('#tasks'); form.addEventListener('submit',e=>{e.preventDefault(); if(!input.value.trim()) return; const li=document.createElement('li'); li.textContent=input.value.trim(); list.append(li); input.value='';});\n"
+      }
+    }
+  },
+  "tasks": [
+    {
+      "id": "tiny-typo-01", "category": "typo", "task_class": "tiny", "reset": "docs",
+      "prompt": "Fix the typo in README.md: 'libary' should be 'library'.",
+      "rubric": { "checks": [{ "kind": "file_contains", "path": "README.md", "text": "library" }, { "kind": "file_not_contains", "path": "README.md", "text": "libary" }] }
+    },
+    {
+      "id": "tiny-typo-02", "category": "typo", "task_class": "tiny", "reset": "docs",
+      "prompt": "In README.md change the heading 'Instal' to 'Install' and make no other changes.",
+      "rubric": { "checks": [{ "kind": "file_contains", "path": "README.md", "text": "Install" }, { "kind": "max_changed_files", "value": 1 }] }
+    },
+    {
+      "id": "tiny-typo-03", "category": "typo", "task_class": "tiny", "reset": "docs",
+      "prompt": "Correct 'teh' to 'the' in README.md only.",
+      "rubric": { "checks": [{ "kind": "file_not_contains", "path": "README.md", "text": "teh" }, { "kind": "max_changed_files", "value": 1 }] }
+    },
+    {
+      "id": "tiny-typo-04", "category": "typo", "task_class": "tiny", "reset": "css",
+      "prompt": "Change the visible Save button label in index.html to Save changes.",
+      "rubric": { "checks": [{ "kind": "file_contains", "path": "index.html", "text": "Save changes" }, { "kind": "max_changed_files", "value": 1 }] }
+    },
+    {
+      "id": "tiny-comment-01", "category": "comment", "task_class": "tiny", "reset": "docs",
+      "prompt": "Fix the Reverse doc comment in stringutil.go so it says the function reverses a string.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["stringutil.go"], "pattern": "(?i)Reverse.*reverses.*string" }, { "kind": "command", "argv": ["go", "test", "./..."] }] }
+    },
+    {
+      "id": "tiny-comment-02", "category": "comment", "task_class": "tiny", "reset": "docs",
+      "prompt": "Add a package comment to stringutil.go without changing behavior.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["stringutil.go"], "pattern": "(?m)^// Package" }, { "kind": "command", "argv": ["go", "test", "./..."] }] }
+    },
+    {
+      "id": "tiny-comment-03", "category": "comment", "task_class": "tiny", "reset": "logic",
+      "prompt": "Clarify the Average doc comment in calc/calc.go to mention an empty input result; do not change code.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["calc/calc.go"], "pattern": "(?i)Average.*empty" }, { "kind": "command", "argv": ["go", "test", "./..."] }] }
+    },
+    {
+      "id": "tiny-css-01", "category": "named-file-css", "task_class": "tiny", "reset": "css",
+      "prompt": "In styles.css change only --accent to #7c3aed.",
+      "rubric": { "checks": [{ "kind": "file_contains", "path": "styles.css", "text": "--accent: #7c3aed" }, { "kind": "max_changed_files", "value": 1 }] }
+    },
+    {
+      "id": "tiny-css-02", "category": "named-file-css", "task_class": "tiny", "reset": "css",
+      "prompt": "In styles.css make .primary use a 10px border radius.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["styles.css"], "pattern": "(?s)\\.primary.*border-radius:\\s*10px" }, { "kind": "max_changed_files", "value": 1 }] }
+    },
+    {
+      "id": "tiny-css-03", "category": "named-file-css", "task_class": "tiny", "reset": "css",
+      "prompt": "In styles.css make .notice text use #334155.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["styles.css"], "pattern": "(?s)\\.notice.*#334155" }, { "kind": "max_changed_files", "value": 1 }] }
+    },
+    {
+      "id": "tiny-css-04", "category": "named-file-css", "task_class": "tiny", "reset": "css",
+      "prompt": "Add a visible focus outline for .primary in styles.css.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["styles.css"], "pattern": "(?s)\\.primary:(focus|focus-visible).*outline" }, { "kind": "max_changed_files", "value": 1 }] }
+    },
+    {
+      "id": "small-bug-01", "category": "one-file-bug", "task_class": "small", "reset": "bug",
+      "prompt": "Fix Sum in counter.go so it includes every input value. Run the existing test; do not add files.",
+      "rubric": { "checks": [{ "kind": "command", "argv": ["go", "test", "./..."] }, { "kind": "max_changed_files", "value": 1 }] }
+    },
+    {
+      "id": "small-bug-02", "category": "one-file-bug", "task_class": "small", "reset": "logic",
+      "prompt": "Fix the off-by-one divisor in Average in calc/calc.go and run existing tests.",
+      "rubric": { "checks": [{ "kind": "command", "argv": ["go", "test", "./..."] }, { "kind": "source_regex", "paths": ["calc/calc.go"], "pattern": "len\\(values\\)(?!\\s*\\+)" }] }
+    },
+    {
+      "id": "small-bug-03", "category": "one-file-bug", "task_class": "small", "reset": "logic",
+      "prompt": "In store/store.go fix Has so a present key is reported correctly. Limit the change to that file and verify it.",
+      "rubric": { "checks": [{ "kind": "command", "argv": ["go", "test", "./..."] }, { "kind": "max_changed_files", "value": 1 }] }
+    },
+    {
+      "id": "small-bug-04", "category": "one-file-bug", "task_class": "small", "reset": "docs",
+      "prompt": "Fix Truncate in truncate.go so maxLength zero returns an empty string. Add no dependencies and run tests.",
+      "rubric": { "checks": [{ "kind": "command", "argv": ["go", "test", "./..."] }, { "kind": "glob_absent", "globs": ["vendor/**"] }] }
+    },
+    {
+      "id": "small-ui-01", "category": "small-ui", "task_class": "small", "reset": "ui",
+      "prompt": "Add a compact empty-state message that is visible when the task list has no items and disappears after the first task is added.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["index.html", "app.js"], "pattern": "(?i)empty|no tasks" }, { "kind": "glob_absent", "globs": ["package.json", "node_modules/**"] }] }
+    },
+    {
+      "id": "small-ui-02", "category": "small-ui", "task_class": "small", "reset": "ui",
+      "prompt": "Add a delete button to every created task. Keep the app dependency-free and keyboard accessible.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["app.js"], "pattern": "(?i)(delete|remove).*button|button.*(delete|remove)" }, { "kind": "glob_absent", "globs": ["package.json", "node_modules/**"] }] }
+    },
+    {
+      "id": "small-ui-03", "category": "small-ui", "task_class": "small", "reset": "ui",
+      "prompt": "Add a task counter next to the Tasks heading and keep it updated after add and delete operations.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["index.html", "app.js"], "pattern": "(?i)(count|total).*task|task.*(count|total)" }, { "kind": "glob_absent", "globs": ["package.json", "node_modules/**"] }] }
+    },
+    {
+      "id": "small-ui-04", "category": "small-ui", "task_class": "small", "reset": "ui",
+      "prompt": "Style the task form as a responsive two-column row that stacks below 480px. Modify styles.css only.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["styles.css"], "pattern": "(?i)@media[^}]*480px" }, { "kind": "max_changed_files", "value": 1 }] }
+    },
+    {
+      "id": "small-ui-05", "category": "small-ui", "task_class": "small", "reset": "ui",
+      "prompt": "Add an aria-live status that announces when a task is added. Use the current HTML and JavaScript only.",
+      "rubric": { "checks": [{ "kind": "source_regex", "paths": ["index.html"], "pattern": "(?i)aria-live" }, { "kind": "source_regex", "paths": ["app.js"], "pattern": "(?i)(added|created)" }, { "kind": "glob_absent", "globs": ["package.json", "node_modules/**"] }] }
+    }
+  ],
+  "economy_limits": {
+    "trivial": { "median_main_requests": 3, "p95_main_requests": 4 },
+    "small": { "median_main_requests": 5, "p95_main_requests": 7 },
+    "retry_requests_excluded_when_linked": true
+  }
+}

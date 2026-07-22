@@ -177,7 +177,7 @@ func TestEngineMarksUnexplainedPromptShrinkAgentSuspect(t *testing.T) {
 	}
 }
 
-func TestModelSwitchRefreshesPromptAndRecordsBoundary(t *testing.T) {
+func TestModelSwitchIsRejectedAfterSessionStarts(t *testing.T) {
 	read, miss := 90, 10
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
 		{Content: "first", Usage: reportedUsage(100, 1, &read, &miss)},
@@ -192,22 +192,14 @@ func TestModelSwitchRefreshesPromptAndRecordsBoundary(t *testing.T) {
 	if _, _, err := engine.Run(context.Background(), "hi"); err != nil {
 		t.Fatal(err)
 	}
-	if err := engine.SwitchModel(context.Background(), "main", "next", "Next", "next addendum"); err != nil {
-		t.Fatal(err)
+	if err := engine.SwitchModel(context.Background(), "main", "next", "Next", "next addendum"); err == nil {
+		t.Fatal("established session allowed a model switch that would break cache continuity")
 	}
-	if settings.Provider.ActiveModelID != "next" || engine.prompt.Model != "Next" || engine.prompt.ModelAddendum != "next addendum" {
-		t.Fatalf("settings=%+v prompt=%+v", settings.Provider, engine.prompt)
+	if settings.Provider.ActiveModelID == "next" || engine.prompt.Model == "Next" {
+		t.Fatalf("rejected model switch mutated settings=%+v prompt=%+v", settings.Provider, engine.prompt)
 	}
-	if _, _, err := engine.Run(context.Background(), "again"); err != nil {
-		t.Fatal(err)
-	}
-	records := engine.UsageRecords()
-	if len(records) != 2 || records[1].Attribution != contract.CacheAttributionAgent {
-		t.Fatalf("records=%+v", records)
-	}
-	events := engine.InvalidationEvents()
-	if len(events) != 1 || events[0].Cause != contract.InvalidationModelSwitch || events[0].RequestSeq != 2 {
-		t.Fatalf("events=%+v", events)
+	if events := engine.InvalidationEvents(); len(events) != 0 {
+		t.Fatalf("rejected model switch recorded an invalidation: %+v", events)
 	}
 }
 

@@ -33,8 +33,8 @@ func Execute(ctx context.Context, args []string) error {
 }
 
 func NewRootCommand() *cobra.Command {
-	var printPrompt, cwd string
-	var simple, fresh, noMCP bool
+	var printPrompt, cwd, economyMode string
+	var simple, fresh, noMCP, leanPrefix bool
 	root := &cobra.Command{
 		Use:           "muhiyacode [prompt...]",
 		Short:         "MuhiyaCode terminal coding agent",
@@ -44,10 +44,13 @@ func NewRootCommand() *cobra.Command {
 		Version:       buildinfo.Version,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prompt := strings.TrimSpace(strings.Join(args, " "))
-			if printPrompt != "" {
-				return runOneShot(cmd, cwd, printPrompt, fresh, noMCP)
+			if leanPrefix && economyMode == "" {
+				economyMode = "balanced"
 			}
-			return runInteractive(cmd, interactiveOptions{Workspace: cwd, Prompt: prompt, Fresh: fresh, NoMCP: noMCP, Simple: simple})
+			if printPrompt != "" {
+				return runOneShot(cmd, cwd, printPrompt, fresh, noMCP, economyMode)
+			}
+			return runInteractive(cmd, interactiveOptions{Workspace: cwd, Prompt: prompt, Fresh: fresh, NoMCP: noMCP, Simple: simple, EconomyMode: economyMode})
 		},
 	}
 	// Commit/Date are set by the release build's ldflags (.goreleaser.yaml);
@@ -61,6 +64,8 @@ func NewRootCommand() *cobra.Command {
 	root.Flags().BoolVar(&simple, "simple", false, "use the line interface instead of the full TUI")
 	root.Flags().BoolVar(&fresh, "new", false, "start a new session instead of reopening the latest workspace session")
 	root.Flags().BoolVar(&noMCP, "no-mcp", false, "start without connecting MCP servers")
+	root.Flags().StringVar(&economyMode, "economy", "", "override token economy mode (off, observe, balanced, aggressive)")
+	root.Flags().BoolVar(&leanPrefix, "lean-prefix", false, "enable lean fixed prefix mode (alias for --economy=balanced)")
 	root.AddCommand(newLoginCommand(), newLogoutCommand(), newResumeCommand(), newSessionsCommand(), newConfigCommand(), newMCPCommand(), newDoctorCommand())
 	return root
 }
@@ -68,6 +73,7 @@ func NewRootCommand() *cobra.Command {
 type interactiveOptions struct {
 	Workspace, SessionID, Prompt string
 	Fresh, NoMCP, Simple         bool
+	EconomyMode                  string
 }
 
 func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
@@ -77,6 +83,7 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 	app, err := openApplicationCore(ApplicationOptions{
 		Context: cmd.Context(), Workspace: options.Workspace, SessionID: options.SessionID,
 		NewSession: options.Fresh, Title: promptTitle(options.Prompt), Callbacks: bridge.Callbacks(), DisableMCP: options.NoMCP,
+		TokenEconomyMode: options.EconomyMode,
 	})
 	if err != nil {
 		return err
@@ -115,9 +122,9 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 	})
 }
 
-func runOneShot(cmd *cobra.Command, cwd, prompt string, fresh, noMCP bool) error {
+func runOneShot(cmd *cobra.Command, cwd, prompt string, fresh, noMCP bool, economyMode string) error {
 	callbacks := newConsoleCallbacks(cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
-	app, err := OpenApplication(ApplicationOptions{Context: cmd.Context(), Workspace: cwd, NewSession: fresh, Title: promptTitle(prompt), Callbacks: callbacks, DisableMCP: noMCP})
+	app, err := OpenApplication(ApplicationOptions{Context: cmd.Context(), Workspace: cwd, NewSession: fresh, Title: promptTitle(prompt), Callbacks: callbacks, DisableMCP: noMCP, TokenEconomyMode: economyMode})
 	if err != nil {
 		return err
 	}

@@ -3,6 +3,7 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
@@ -17,6 +18,20 @@ func (e *Engine) recordMainUsage(ctx context.Context, observation mainUsageObser
 	newTail := estimatedNewTail(previous, observation.usage)
 	attribution := e.mainCacheAttribution(cacheMissContext{previous: previous, usage: observation.usage, newTail: newTail, previousMessageCount: e.lastSentMessageCount, currentMessageCount: observation.messageCount}, observation.changeReasons)
 	record := usageRecord(usageRecordInput{model: observation.model, stream: contract.UsageStreamMain, pin: ":main", usage: observation.usage, reasons: observation.changeReasons, attribution: attribution, durationMS: observation.durationMS})
+	record.HistoryRewriteVersion = observation.rewriteVersion
+	record.ManifestHash = observation.manifestHash
+	record.FinishReason = observation.finishReason
+	record.Transport = optionalStringPointer(observation.transport)
+	record.TaskEpochID = cloneStringPointer(observation.taskEpochID)
+	record.Phase = cloneStringPointer(observation.phase)
+	record.RetryOf = cloneIntPointer(observation.retryOf)
+	record.BudgetDecision = observation.budgetDecision
+	record.ReasoningTier = optionalStringPointer(string(observation.reasoningTier))
+	if observation.outputCap > 0 {
+		record.OutputCap = intPointer(observation.outputCap)
+	}
+	record.TruncationEscalated = observation.truncationEscalated
+	record.OutputBudgetOverride = optionalStringPointer(observation.outputBudgetOverride)
 	if previous != nil && (observation.usage.PromptTokensAvailable || observation.usage.PromptTokens != 0) {
 		record.NewTailTokens = intPointer(newTail)
 	}
@@ -43,6 +58,7 @@ func (e *Engine) recordMainUsage(ctx context.Context, observation mainUsageObser
 	if observation.usage.PromptTokensAvailable || observation.usage.PromptTokens != 0 {
 		e.latestPromptTokens = observation.usage.PromptTokens
 		e.latestPromptAvailable = true
+		e.latestPromptRewriteVersion = observation.rewriteVersion
 	}
 	// C6: a resumed session's cold miss on a large prefix is flagged here (under
 	// taskMu) and surfaced once by the request-loop caller, outside the lock.
@@ -74,11 +90,44 @@ func (e *Engine) mainCacheAttribution(missContext cacheMissContext, changeReason
 	return contract.CacheAttributionProvider
 }
 
+type auxUsageObservation struct {
+	model        string
+	pin          string
+	usage        contract.Usage
+	durationMS   *int64
+	phase        contract.ExecutionPhase
+	decisionCode string
+}
+
 func (e *Engine) recordAuxUsage(ctx context.Context, model, pin string, usage contract.Usage, durationMS *int64) error {
+	return e.recordAttributedAuxUsage(ctx, auxUsageObservation{model: model, pin: pin, usage: usage, durationMS: durationMS})
+}
+
+func (e *Engine) recordAttributedAuxUsage(ctx context.Context, observation auxUsageObservation) error {
 	e.usageWriteMu.Lock()
 	defer e.usageWriteMu.Unlock()
-	record := usageRecord(usageRecordInput{model: model, stream: contract.UsageStreamAux, pin: pin, usage: usage, attribution: contract.CacheAttributionNA, durationMS: durationMS})
-	return e.appendUsage(ctx, &record)
+	record := usageRecord(usageRecordInput{model: observation.model, stream: contract.UsageStreamAux, pin: observation.pin, usage: observation.usage, attribution: contract.CacheAttributionNA, durationMS: observation.durationMS})
+	record.Phase = optionalStringPointer(string(observation.phase))
+	if e.settings != nil {
+		record.Transport = optionalStringPointer(e.settings.Provider.Type)
+	}
+	record.BudgetDecision = observation.decisionCode
+	if err := e.appendUsage(ctx, &record); err != nil {
+		return err
+	}
+	// Compaction is auxiliary work for accounting but deliberately rides the
+	// main affinity route. If fallback routing moves it, adopt that upstream so
+	// the next main turn does not keep pinning the stale provider.
+	if strings.HasPrefix(observation.pin, ":main") && observation.usage.Upstream != "" {
+		e.taskMu.Lock()
+		if notice := e.noteUpstreamFlip(observation.usage.Upstream); notice != "" {
+			e.warmPrefix = nil
+			e.pendingUpstreamNotice = notice
+			e.prefixShapeSaved = false
+		}
+		e.taskMu.Unlock()
+	}
+	return nil
 }
 
 // elapsedMS returns the whole milliseconds since start as a nullable pointer —
@@ -164,26 +213,31 @@ func usageRecord(input usageRecordInput) contract.UsageRecord {
 	read := cloneIntPointer(input.usage.CacheReadTokens)
 	miss := cloneIntPointer(input.usage.CacheMissTokens)
 	return contract.UsageRecord{
-		At:                 time.Now().UTC(),
-		Model:              input.model,
-		Stream:             input.stream,
-		Pin:                input.pin,
-		PromptTokens:       prompt,
-		CompletionTokens:   completion,
-		CacheReadTokens:    read,
-		CacheMissTokens:    miss,
-		MissDerived:        input.usage.MissDerived,
-		HitRate:            contract.HitRate(read, miss),
-		PrefixChanged:      len(input.reasons) > 0,
-		ChangeReasons:      append([]string{}, input.reasons...),
-		Attribution:        input.attribution,
-		UsageContradictory: input.usage.Contradictory,
-		Diagnostic:         input.usage.Diagnostic,
-		CostUSD:            cloneFloatPointer(input.usage.CostUSD),
-		CostEstimated:      input.usage.CostEstimated,
-		LogID:              input.usage.CostLogID,
-		Upstream:           input.usage.Upstream,
-		DurationMS:         input.durationMS,
+		At:                   time.Now().UTC(),
+		Model:                input.model,
+		Stream:               input.stream,
+		Pin:                  input.pin,
+		PromptTokens:         prompt,
+		CompletionTokens:     completion,
+		CacheReadTokens:      read,
+		CacheMissTokens:      miss,
+		CacheWriteTokens:     cloneIntPointer(input.usage.CacheWriteTokens),
+		CacheCreationTokens:  cloneIntPointer(input.usage.CacheCreationTokens),
+		UncachedInputTokens:  cloneIntPointer(input.usage.UncachedInputTokens),
+		CacheUsageSchema:     input.usage.CacheUsageSchema,
+		CacheUsageDerivation: input.usage.CacheUsageDerivation,
+		MissDerived:          input.usage.MissDerived,
+		HitRate:              contract.HitRate(read, miss),
+		PrefixChanged:        len(input.reasons) > 0,
+		ChangeReasons:        append([]string{}, input.reasons...),
+		Attribution:          input.attribution,
+		UsageContradictory:   input.usage.Contradictory,
+		Diagnostic:           input.usage.Diagnostic,
+		CostUSD:              cloneFloatPointer(input.usage.CostUSD),
+		CostEstimated:        input.usage.CostEstimated,
+		LogID:                input.usage.CostLogID,
+		Upstream:             input.usage.Upstream,
+		DurationMS:           input.durationMS,
 	}
 }
 
@@ -278,6 +332,15 @@ func usageFromAggregate(aggregate contract.SessionUsageAggregate) contract.Usage
 		PromptTokensAvailable:     aggregate.PromptAvailable > 0,
 		CompletionTokensAvailable: aggregate.CompletionAvailable > 0,
 	}
+	if aggregate.CacheWriteAvailable > 0 {
+		usage.CacheWriteTokens = cloneIntPointer(&aggregate.SumCacheWrite)
+	}
+	if aggregate.CacheCreateAvailable > 0 {
+		usage.CacheCreationTokens = cloneIntPointer(&aggregate.SumCacheCreation)
+	}
+	if aggregate.UncachedAvailable > 0 {
+		usage.UncachedInputTokens = cloneIntPointer(&aggregate.SumUncachedInput)
+	}
 	if aggregate.CacheAvailable > 0 {
 		// Paired sums, not the one-sided display sums: sessionUsage feeds rate
 		// arithmetic (the per-task delta divided by the TUI summary), and a rate
@@ -293,7 +356,23 @@ func cloneUsageAggregate(value contract.SessionUsageAggregate) contract.SessionU
 	value.SessionHitRate = cloneFloatPointer(value.SessionHitRate)
 	value.SteadyStateHitRate = cloneFloatPointer(value.SteadyStateHitRate)
 	value.PrefixStabilityRate = cloneFloatPointer(value.PrefixStabilityRate)
+	value.MaxMainPromptTokens = cloneIntPointer(value.MaxMainPromptTokens)
+	value.ReplayAmplification = cloneFloatPointer(value.ReplayAmplification)
+	value.MaxOutputCap = cloneIntPointer(value.MaxOutputCap)
+	value.RequestsByPhase = cloneStringIntMap(value.RequestsByPhase)
+	value.RequestsByReasoning = cloneStringIntMap(value.RequestsByReasoning)
 	return value
+}
+
+func cloneStringIntMap(value map[string]int) map[string]int {
+	if value == nil {
+		return nil
+	}
+	result := make(map[string]int, len(value))
+	for key, count := range value {
+		result[key] = count
+	}
+	return result
 }
 
 func cloneFloatPointer(value *float64) *float64 {
@@ -312,16 +391,78 @@ func cloneUsageRecords(records []contract.UsageRecord) []contract.UsageRecord {
 	return result
 }
 
+func economyStatsFromRecords(records []contract.UsageRecord) contract.TaskEconomyStats {
+	stats := contract.TaskEconomyStats{
+		Aggregate: contract.AggregateUsage(records), RequestsByPhase: map[string]int{}, RequestsByTransport: map[string]int{},
+	}
+	for _, record := range records {
+		phase := "unavailable"
+		if record.Phase != nil && strings.TrimSpace(*record.Phase) != "" {
+			phase = *record.Phase
+		}
+		stats.RequestsByPhase[phase]++
+		transport := "unavailable"
+		if record.Transport != nil && strings.TrimSpace(*record.Transport) != "" {
+			transport = *record.Transport
+		}
+		stats.RequestsByTransport[transport]++
+		if record.RetryOf != nil {
+			stats.Retries = append(stats.Retries, contract.RetryUsageRow{Seq: record.Seq, RetryOf: *record.RetryOf, Phase: phase, Transport: transport})
+		}
+		row := contract.PhasePlanUsageRow{Seq: record.Seq, Phase: phase, Decision: record.BudgetDecision}
+		if record.ReasoningTier != nil {
+			row.Reasoning = *record.ReasoningTier
+		}
+		if record.OutputCap != nil {
+			row.OutputCap = *record.OutputCap
+		}
+		stats.PhasePlans = append(stats.PhasePlans, row)
+		if record.TruncationEscalated {
+			stats.TruncationEscalations++
+		}
+		if record.OutputBudgetOverride != nil {
+			stats.OutputBudgetOverrides = append(stats.OutputBudgetOverrides, *record.OutputBudgetOverride)
+		}
+	}
+	return stats
+}
+
 func cloneUsageRecord(record contract.UsageRecord) contract.UsageRecord {
 	record.PromptTokens = cloneIntPointer(record.PromptTokens)
 	record.CompletionTokens = cloneIntPointer(record.CompletionTokens)
 	record.CacheReadTokens = cloneIntPointer(record.CacheReadTokens)
 	record.CacheMissTokens = cloneIntPointer(record.CacheMissTokens)
+	record.CacheWriteTokens = cloneIntPointer(record.CacheWriteTokens)
+	record.CacheCreationTokens = cloneIntPointer(record.CacheCreationTokens)
+	record.UncachedInputTokens = cloneIntPointer(record.UncachedInputTokens)
 	record.NewTailTokens = cloneIntPointer(record.NewTailTokens)
+	record.TaskEpochID = cloneStringPointer(record.TaskEpochID)
+	record.Phase = cloneStringPointer(record.Phase)
+	record.Transport = cloneStringPointer(record.Transport)
+	record.RetryOf = cloneIntPointer(record.RetryOf)
+	record.ReasoningTier = cloneStringPointer(record.ReasoningTier)
+	record.OutputCap = cloneIntPointer(record.OutputCap)
+	record.OutputBudgetOverride = cloneStringPointer(record.OutputBudgetOverride)
 	record.HitRate = cloneFloatPointer(record.HitRate)
 	record.CostUSD = cloneFloatPointer(record.CostUSD)
 	record.ChangeReasons = append([]string{}, record.ChangeReasons...)
 	return record
+}
+
+func optionalStringPointer(value string) *string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	copy := value
+	return &copy
+}
+
+func cloneStringPointer(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
 }
 
 func subtractUsage(total, before contract.Usage) contract.Usage {
@@ -343,6 +484,27 @@ func subtractUsage(total, before contract.Usage) contract.Usage {
 			value -= *before.CacheMissTokens
 		}
 		result.CacheMissTokens = &value
+	}
+	if total.CacheWriteTokens != nil {
+		value := *total.CacheWriteTokens
+		if before.CacheWriteTokens != nil {
+			value -= *before.CacheWriteTokens
+		}
+		result.CacheWriteTokens = &value
+	}
+	if total.CacheCreationTokens != nil {
+		value := *total.CacheCreationTokens
+		if before.CacheCreationTokens != nil {
+			value -= *before.CacheCreationTokens
+		}
+		result.CacheCreationTokens = &value
+	}
+	if total.UncachedInputTokens != nil {
+		value := *total.UncachedInputTokens
+		if before.UncachedInputTokens != nil {
+			value -= *before.UncachedInputTokens
+		}
+		result.UncachedInputTokens = &value
 	}
 	return result
 }

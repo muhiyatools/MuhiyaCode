@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,36 +67,6 @@ type turnResult struct {
 	// (case-insensitive). Nil ExpectMet means the prompt carried no check.
 	Expect    string `json:"expect,omitempty"`
 	ExpectMet *bool  `json:"expect_met,omitempty"`
-}
-
-// workloadTurn is one scripted prompt plus its optional completion check.
-type workloadTurn struct {
-	Prompt string
-	Expect string
-}
-
-type runResult struct {
-	Scenario            string                         `json:"scenario"`
-	Build               string                         `json:"build"`
-	GitCommit           string                         `json:"git_commit"`
-	RunIndex            int                            `json:"run_index"`
-	Model               string                         `json:"model"`
-	Effort              contract.EffortLevel           `json:"effort"`
-	StartedAt           time.Time                      `json:"started_at"`
-	WallClockMS         int64                          `json:"wall_clock_ms"`
-	CompletedTurns      int                            `json:"completed_turns"`
-	Turns               []turnResult                   `json:"turns"`
-	UsageRecords        []contract.UsageRecord         `json:"usage_records"`
-	Aggregate           contract.SessionUsageAggregate `json:"aggregate"`
-	DerivedCost         *float64                       `json:"derived_cost"`
-	PriceSource         string                         `json:"price_source"`
-	UnattributedMisses  int                            `json:"unattributed_misses"`
-	InvalidationEvents  []contract.InvalidationEvent   `json:"invalidation_events"`
-	InvalidationByCause map[string]int                 `json:"invalidation_by_cause"`
-	RawProviderLog      string                         `json:"raw_provider_log"`
-	// WorkloadChecks/WorkloadCheckFailures count per-prompt completion checks.
-	WorkloadChecks        int `json:"workload_checks"`
-	WorkloadCheckFailures int `json:"workload_check_failures"`
 }
 
 type comparison struct {
@@ -637,6 +606,17 @@ func compareScenario(name string, baseline, improved []runResult) (scenarioCompa
 	if len(baseline) == 0 || len(improved) == 0 {
 		return scenarioCompare{}, fmt.Errorf("scenario %q is missing an arm", name)
 	}
+	baselineConfig, err := validateComparisonEvidence(name, "baseline", baseline)
+	if err != nil {
+		return scenarioCompare{}, err
+	}
+	improvedConfig, err := validateComparisonEvidence(name, "improved", improved)
+	if err != nil {
+		return scenarioCompare{}, err
+	}
+	if baselineConfig != improvedConfig {
+		return scenarioCompare{}, fmt.Errorf("scenario %q configuration drifted between arms: baseline=%s improved=%s", name, baselineConfig, improvedConfig)
+	}
 	if baseline[0].Model != improved[0].Model || baseline[0].Effort != improved[0].Effort {
 		return scenarioCompare{}, fmt.Errorf("scenario %q model/effort changed between arms", name)
 	}
@@ -653,6 +633,41 @@ func compareScenario(name string, baseline, improved []runResult) (scenarioCompa
 	baselineMeetsTarget := everyRateAtLeast(entry.BaselinePrefixStabilityRates, len(baseline), 0.99)
 	entry.MeetsSC005 = entry.MeetsSteadyStateTarget && !baselineMeetsTarget && entry.ImprovedVariancePP != nil && *entry.ImprovedVariancePP <= 1.0
 	return entry, nil
+}
+
+func validateComparisonEvidence(scenario, arm string, runs []runResult) (string, error) {
+	configurationHash := ""
+	for _, run := range runs {
+		label := fmt.Sprintf("scenario %q %s run %d", scenario, arm, run.RunIndex)
+		if run.Validity == nil {
+			return "", fmt.Errorf("%s has no validity record", label)
+		}
+		if !run.Validity.UsageAvailable {
+			return "", fmt.Errorf("%s is missing required provider usage", label)
+		}
+		if !run.Validity.RubricAvailable {
+			return "", fmt.Errorf("%s is missing correctness rubric output", label)
+		}
+		if !run.Validity.Valid {
+			reasons := strings.Join(run.Validity.InvalidReasons, "; ")
+			if reasons == "" {
+				reasons = "unspecified validity failure"
+			}
+			return "", fmt.Errorf("%s is invalid: %s", label, reasons)
+		}
+		hash := strings.TrimSpace(run.Validity.ConfigurationHash)
+		if hash == "" {
+			return "", fmt.Errorf("%s is missing its configuration hash", label)
+		}
+		if configurationHash == "" {
+			configurationHash = hash
+			continue
+		}
+		if configurationHash != hash {
+			return "", fmt.Errorf("scenario %q configuration drifted within the %s arm: %s != %s", scenario, arm, configurationHash, hash)
+		}
+	}
+	return configurationHash, nil
 }
 
 func scenarioRates(baseline, improved []runResult) scenarioCompare {
@@ -774,18 +789,4 @@ func formatFloat(value *float64) string {
 		return "unavailable"
 	}
 	return fmt.Sprintf("%.6f", *value)
-}
-
-func writeJSON(path string, value any) error {
-	data, err := json.MarshalIndent(value, "", "  ")
-	if err != nil {
-		return err
-	}
-	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o644)
-}
-
-func envFloat(name string) float64 {
-	value, _ := strconv.ParseFloat(strings.TrimSpace(os.Getenv(name)), 64)
-	return value
 }

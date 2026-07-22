@@ -97,7 +97,16 @@ type dispatchScope struct {
 }
 
 func (e *Engine) executeCall(ctx context.Context, call contract.ToolCall, definitions []contract.ToolDefinition, effort EffortProfile) toolOutcome {
-	return e.gatedExecute(ctx, call, definitions, effort, e.mainScope(definitions))
+	if call.ToolName() == "invoke_tool" {
+		resolved, full, err := e.resolveBrokerCall(call)
+		if err == nil {
+			return e.virtualizeToolOutcome(e.gatedExecute(ctx, resolved, full, effort, e.mainScope(full)))
+		}
+		scope := e.mainScope(definitions)
+		scope.dispatch = func(context.Context, contract.ToolCall) (string, error) { return "", err }
+		return e.virtualizeToolOutcome(e.gatedExecute(ctx, call, definitions, effort, scope))
+	}
+	return e.virtualizeToolOutcome(e.gatedExecute(ctx, call, definitions, effort, e.mainScope(definitions)))
 }
 
 // mainScope is the session's dispatch scope: per-task counters, ToolStart/
@@ -112,7 +121,7 @@ func (e *Engine) mainScope(definitions []contract.ToolDefinition) dispatchScope 
 			}
 		},
 		onEnd:    func(call contract.ToolCall, output string) { e.endTool(call.ToolName(), output) },
-		escalate: func(notice string) { e.history.Append(contract.Message{Role: contract.RoleUser, Content: notice}) },
+		escalate: func(notice string) { e.setTaskControl("failure.repeat", notice) },
 		dispatch: func(c context.Context, call contract.ToolCall) (string, error) {
 			return e.executeOne(c, call, definitions)
 		},

@@ -2,6 +2,13 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
+## 1.1.1 – Token-Economy Overhaul (Feature 014)
+
+- **Lean fixed prefix (≤10,000 bytes / ≤2,500 estimated tokens):** Core system prompt and core tool definitions wire footprint reduced by >60% on zero-MCP baseline.
+- **ToolBroker & Deferred Tool Hydration:** Non-core built-in tools and MCP tool schemas are handled via a deferred hydration broker, preventing prefix bloat and cache invalidation when configuring MCP servers.
+- **Security & Permission Parity:** Brokered tool calls strictly preserve workspace containment, OS sandbox, secret redaction, and approval confirmation gates.
+- **CLI & Config Control:** Added `--lean-prefix` and `--economy [off|observe|balanced|aggressive]` CLI flags alongside the `tokenEconomyMode` config setting.
+
 ## 1.1.0
 
 The agent stops being a workflow you drive and starts being an agent you talk to: no modes, no approval pauses, no model management. Ask for something and it does it.

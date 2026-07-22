@@ -32,12 +32,13 @@ func serverForTool(toolName string) string {
 // PinnedTools loads the deterministic cached surface before the session's
 // first request. Live handshakes do not mutate this surface for known servers.
 func (m *Manager) PinnedTools() ([]contract.Tool, error) {
-	definitions, known, err := m.cachedDefinitions()
+	definitions, known, identities, err := m.cachedDefinitions()
 	if err != nil {
 		return nil, err
 	}
 	m.mu.Lock()
 	m.pinned = definitions
+	m.pinnedIdentity = identities
 	m.applied = cloneDefinitionsByName(definitions)
 	m.knownAtStart = known
 	tools := m.forwardingToolsLocked()
@@ -65,12 +66,14 @@ func (m *Manager) TakeBoundaryChange() (BoundaryChange, bool, error) {
 		return BoundaryChange{}, false, nil
 	}
 	var desired map[string]contract.ToolDefinition
+	var desiredIdentity map[string]string
 	if force {
-		loaded, _, err := m.cachedDefinitions()
+		loaded, _, identities, err := m.cachedDefinitions()
 		if err != nil {
 			return BoundaryChange{}, false, err
 		}
 		desired = loaded
+		desiredIdentity = identities
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -79,6 +82,7 @@ func (m *Manager) TakeBoundaryChange() (BoundaryChange, bool, error) {
 	}
 	if desired != nil {
 		m.pinned = desired
+		m.pinnedIdentity = desiredIdentity
 	}
 	changed := !definitionsEqual(m.applied, m.pinned)
 	scope := strings.Join(uniqueStrings(m.pendingScopes), "; ")
@@ -93,7 +97,7 @@ func (m *Manager) TakeBoundaryChange() (BoundaryChange, bool, error) {
 	return BoundaryChange{Tools: m.forwardingToolsLocked(), Scope: scope}, true, nil
 }
 
-func (m *Manager) cachedDefinitions() (map[string]contract.ToolDefinition, map[string]bool, error) {
+func (m *Manager) cachedDefinitions() (map[string]contract.ToolDefinition, map[string]bool, map[string]string, error) {
 	return m.surfaceForCurrent(true)
 }
 
@@ -101,36 +105,41 @@ func (m *Manager) cachedDefinitions() (map[string]contract.ToolDefinition, map[s
 // optionally limiting the work to the "known" servers (those already on disk
 // from past sessions). knownOnly=false prefills the `known` map with every
 // enabled server — useful so M5 can decide whether the lazy path is safe.
-func (m *Manager) surfaceForCurrent(knownOnly bool) (map[string]contract.ToolDefinition, map[string]bool, error) {
+func (m *Manager) surfaceForCurrent(knownOnly bool) (map[string]contract.ToolDefinition, map[string]bool, map[string]string, error) {
 	config, err := state.LoadMCPConfig(m.paths)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	secrets, err := state.LoadMCPSecrets(m.paths)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	definitions := make(map[string]contract.ToolDefinition)
 	known := make(map[string]bool)
+	identities := make(map[string]string)
 	if m.surfaceStore == nil {
-		return definitions, known, nil
+		return definitions, known, identities, nil
 	}
 	for _, server := range config.Servers {
 		if !server.Enabled {
 			continue
 		}
-		fingerprint := state.MCPServerFingerprint(server, secrets.Env[server.Name])
+		fingerprint := state.MCPServerFingerprint(server, secrets.Env[server.Name], secrets.OAuth[server.Name])
 		snapshot, ok := m.surfaceStore.Get(fingerprint)
-		if knownOnly {
-			known[fingerprint] = ok
-		} else if !ok {
+		// Always report whether this configured server has a usable snapshot.
+		// The previous knownOnly=false branch never populated known, so
+		// AllConfiguredServersHaveSurface always returned false and every boot
+		// performed the eager refresh it was designed to avoid.
+		known[fingerprint] = ok
+		if !ok {
 			continue
 		}
 		for _, definition := range snapshot.Tools {
 			definitions[definition.Function.Name] = canonicalDefinition(definition)
+			identities[definition.Function.Name] = fingerprint
 		}
 	}
-	return definitions, known, nil
+	return definitions, known, identities, nil
 }
 
 // AllConfiguredServersHaveSurface (M5) reports whether every enabled MCP
@@ -139,7 +148,7 @@ func (m *Manager) surfaceForCurrent(knownOnly bool) (map[string]contract.ToolDef
 // returns true. Unknown auth state or store errors fall back to "no" to avoid
 // suppressing the warm-up round.
 func (m *Manager) AllConfiguredServersHaveSurface() bool {
-	_, known, err := m.surfaceForCurrent(false)
+	_, known, _, err := m.surfaceForCurrent(false)
 	if err != nil || len(known) == 0 {
 		return false
 	}
@@ -159,7 +168,7 @@ func (m *Manager) forwardingToolsLocked() []contract.Tool {
 	sort.Strings(names)
 	tools := make([]contract.Tool, 0, len(names))
 	for _, name := range names {
-		tools = append(tools, &forwardingTool{manager: m, definition: canonicalDefinition(m.pinned[name])})
+		tools = append(tools, &forwardingTool{manager: m, definition: canonicalDefinition(m.pinned[name]), fingerprint: m.pinnedIdentity[name]})
 	}
 	return tools
 }

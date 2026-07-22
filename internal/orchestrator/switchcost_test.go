@@ -135,13 +135,13 @@ func TestRewritingHistoryRetiresWarmth(t *testing.T) {
 		t.Fatalf("the warm list survived a compaction: %v", warm)
 	}
 	engine.latestPromptTokens, engine.latestPromptAvailable = 50_000, true
-	if engine.switchCost("deepseek-v4-pro").Affordable {
-		t.Fatal("a 50k switch was priced as affordable against a dead cache")
+	if !engine.switchCost("deepseek-v4-pro").Affordable {
+		t.Fatal("a stale pre-rewrite prompt measurement should not price the compacted context")
 	}
 }
 
-// The advisor must be TOLD the cost, or it optimizes capability in a vacuum.
-func TestAdvisorPromptCarriesSwitchEconomics(t *testing.T) {
+// The selector must be told that its choice is session-wide and irreversible.
+func TestAdvisorPromptCarriesSessionCacheContract(t *testing.T) {
 	settings := advisorSettings()
 	engine, provider := advisorEngine(t, &settings,
 		contract.ChatResponse{Content: `{"keep":true}`},
@@ -153,7 +153,7 @@ func TestAdvisorPromptCarriesSwitchEconomics(t *testing.T) {
 	}
 	var advisorPrompt string
 	for _, request := range provider.requests {
-		if strings.Contains(request.SessionID, ":sub:advisor") {
+		if strings.Contains(request.SessionID, "model-selector") {
 			for _, message := range request.Messages {
 				if message.Role == contract.RoleUser {
 					advisorPrompt = message.Content
@@ -164,7 +164,7 @@ func TestAdvisorPromptCarriesSwitchEconomics(t *testing.T) {
 	if advisorPrompt == "" {
 		t.Fatal("the advisor never ran")
 	}
-	for _, want := range []string{"SWITCH COST", "uncached", "Already warm"} {
+	for _, want := range []string{"CACHE CONTRACT", "entire new session", "cannot change"} {
 		if !strings.Contains(advisorPrompt, want) {
 			t.Fatalf("advisor prompt missing %q:\n%s", want, advisorPrompt)
 		}

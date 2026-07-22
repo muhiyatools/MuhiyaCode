@@ -1,0 +1,99 @@
+MuhiyaCode feature 014 baseline provenance
+Captured: 2026-07-22 (Africa/Cairo)
+Branch: feature/native-agent-v1.1.0
+Git HEAD: 42cbe2c675d93d0032405868e145fce1559be4dc
+Go: go version go1.26.5 windows/amd64
+Build command: go build -trimpath -o bin/muhiyacode-baseline-014.exe ./cmd/muhiyacode
+Binary checksum format: lowercase SHA-256 hex (64 characters)
+Binary checksum: 6498e57e6f34c47011254b32166e39d63565f87d9f90e6da318c780f94e80021
+Binary size: 28835328 bytes
+
+Dirty manifest command:
+  git status --porcelain=v1 --untracked-files=all | Sort-Object
+
+Dirty manifest SHA-256 (UTF-8, LF-joined, no final newline):
+  7ff009be4ae267b3392c2647b28e42b8a87046a61efd14d82d67b09a5cec158b
+
+Dirty manifest at capture (82 entries):
+ D coverage
+ D internal/contract/truncate_middle_test.go
+ D internal/instructions/examples.go
+ M .github/workflows/ci.yml
+ M .gitignore
+ M go.mod
+ M internal/contract/cache.go
+ M internal/contract/format.go
+ M internal/contract/fulltokens_test.go
+ M internal/contract/types.go
+ M internal/gateway/model.go
+ M internal/gateway/output_budget_test.go
+ M internal/gateway/provider.go
+ M internal/gateway/resilience_test.go
+ M internal/gateway/upstream_pin_test.go
+ M internal/instructions/audit_test.go
+ M internal/instructions/prompt.go
+ M internal/instructions/readonlyshell.go
+ M internal/instructions/shell_guidance_test.go
+ M internal/instructions/testdata/instructions_dump.golden
+ M internal/instructions/testdata/prefix_bytes.golden
+ M internal/mcpclient/manager.go
+ M internal/mcpclient/manager_test.go
+ M internal/mcpclient/surface.go
+ M internal/orchestrator/advisor.go
+ M internal/orchestrator/advisor_test.go
+ M internal/orchestrator/cacheresilience.go
+ M internal/orchestrator/classify.go
+ M internal/orchestrator/contextreport.go
+ M internal/orchestrator/engine.go
+ M internal/orchestrator/history.go
+ M internal/orchestrator/inspection.go
+ M internal/orchestrator/knowledge.go
+ M internal/orchestrator/maintenance.go
+ M internal/orchestrator/maintenance_test.go
+ M internal/orchestrator/prefixshape.go
+ M internal/orchestrator/prefixshape_test.go
+ M internal/orchestrator/prompt.go
+ M internal/orchestrator/registry.go
+ M internal/orchestrator/reviewgate.go
+ M internal/orchestrator/reviewgate_test.go
+ M internal/orchestrator/switchcost.go
+ M internal/orchestrator/switchcost_test.go
+ M internal/orchestrator/taskledger.go
+ M internal/orchestrator/testdata/prefix_bytes_wire.golden
+ M internal/orchestrator/turnhelpers.go
+ M internal/orchestrator/turnloop.go
+ M internal/orchestrator/usage.go
+ M internal/orchestrator/usage_record_test.go
+ M internal/state/toolcache.go
+ M internal/state/toolcache_test.go
+ M internal/tui/bridge.go
+ M internal/tui/ingest.go
+ M internal/tui/update.go
+ M internal/workspace/checkpoint.go
+ M internal/workspace/files.go
+ M internal/workspace/patch.go
+ M internal/workspace/permissions.go
+ M internal/workspace/registry.go
+ M internal/workspace/shell.go
+ M internal/workspace/types.go
+ M internal/workspace/workspace_test.go
+ M scripts/check.ps1
+ M scripts/install.ps1
+ M scripts/install.sh
+ M specs/010-ultimate-consolidation/wiring-inventory-data.md
+?? FULL_AGENT_SYSTEM_AUDIT_AND_OVERHAUL_PLAN.md
+?? internal/arch/release_hygiene_test.go
+?? internal/orchestrator/context_budget_test.go
+?? internal/orchestrator/persistence_integrity_test.go
+?? internal/orchestrator/registry_integrity_test.go
+?? internal/workspace/patch_integrity_test.go
+?? specs/014-token-economy-overhaul/contracts/context-compiler.md
+?? specs/014-token-economy-overhaul/contracts/evidence-store.md
+?? specs/014-token-economy-overhaul/contracts/provider-cache.md
+?? specs/014-token-economy-overhaul/contracts/token-economy.md
+?? specs/014-token-economy-overhaul/data-model.md
+?? specs/014-token-economy-overhaul/plan.md
+?? specs/014-token-economy-overhaul/quickstart.md
+?? specs/014-token-economy-overhaul/research.md
+?? specs/014-token-economy-overhaul/spec.md
+?? specs/014-token-economy-overhaul/tasks.md

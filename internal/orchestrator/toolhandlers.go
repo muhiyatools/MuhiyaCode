@@ -34,6 +34,10 @@ func (e *Engine) executeOne(ctx context.Context, call contract.ToolCall, definit
 		// catalog-bounded, so no approval gate; skills_tool.go owns the resolution,
 		// the size bound, and the already-provided dedupe.
 		return e.readSkillTool(ctx, json.RawMessage(call.ArgumentsJSON()))
+	case "discover_tools":
+		return e.discoverTools(json.RawMessage(call.ArgumentsJSON()))
+	case "invoke_tool":
+		return "", errors.New("invoke_tool must resolve through the canonical dispatch gate")
 	default:
 		allowed := make(map[string]bool)
 		for _, definition := range definitions {

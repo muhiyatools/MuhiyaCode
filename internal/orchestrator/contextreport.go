@@ -1,10 +1,6 @@
 package orchestrator
 
-import (
-	"encoding/json"
-
-	"github.com/muhiya/muhiyacode/internal/contract"
-)
+import "github.com/muhiya/muhiyacode/internal/contract"
 
 type ContextReport struct {
 	// PerPairing (feature 011 D8/T033): per-(model, pin) cache health rows for
@@ -65,6 +61,7 @@ func (e *Engine) ContextReport() ContextReport {
 	history := e.history.EstimatedTokens()
 	limit := e.contextLimit()
 	pressure := e.contextPressure()
+	rewriteVersion := e.history.RewriteVersion()
 	e.taskMu.Lock()
 	// Context-in-use is REQUEST-based, matching the live footer (emitContext) and
 	// the compaction trigger (contextPressure): the last request's prompt tokens
@@ -72,7 +69,7 @@ func (e *Engine) ContextReport() ContextReport {
 	// omits, so opening /context no longer drops the figure below the footer (E-2).
 	// The history estimate is the fallback before any provider figure exists.
 	inUse := history
-	if e.latestPromptAvailable {
+	if e.latestPromptAvailable && e.latestPromptRewriteVersion == rewriteVersion {
 		inUse = max(history, e.latestPromptTokens)
 	}
 	latched := e.maintenanceLatched
@@ -119,11 +116,7 @@ func (e *Engine) ContextReport() ContextReport {
 // (feature 008 T025) so contextCategories can estimate the window split without
 // recomputing prompts or re-marshaling tool schemas on the read side. Called once
 // per task at assembly; values are session-stable between tool-boundary changes.
-func (e *Engine) recordAssemblySizes(promptText string, promptContext PromptContext, definitions []contract.ToolDefinition) {
-	toolChars := 0
-	if raw, err := json.Marshal(definitions); err == nil {
-		toolChars = len(raw)
-	}
+func (e *Engine) recordAssemblySizes(promptText string, promptContext PromptContext, toolChars int) {
 	projectChars := len(promptContext.ProjectContextBlock) + len(renderSkillsSection(promptContext.Skills))
 	e.taskMu.Lock()
 	e.assemblyPromptChars = len(promptText)

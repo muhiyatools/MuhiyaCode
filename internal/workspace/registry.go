@@ -23,6 +23,7 @@ func (t functionTool) Execute(ctx context.Context, input json.RawMessage) (strin
 
 func (w *Workspace) Tools() []contract.Tool {
 	return []contract.Tool{
+		w.inspectTool(),
 		w.tool("list_files", instructions.ToolListFilesDescription, object(map[string]any{"path": stringProp("Directory, default ."), "recursive": boolProp(), "maxEntries": intProp(1, 2000)}, nil), w.execList),
 		w.tool("read_file", instructions.ToolReadFileDescription, object(map[string]any{"path": stringProp("Workspace-relative path"), "offset": intProp(1, 0), "limit": intProp(1, MaxReadLines)}, []string{"path"}), w.execRead),
 		w.tool("grep", instructions.ToolGrepDescription, object(map[string]any{"pattern": stringProp("Regex or literal"), "path": stringProp("File/directory, default ."), "glob": stringProp("Optional file glob"), "ignoreCase": boolProp(), "literal": boolProp(), "maxResults": intProp(1, 500)}, []string{"pattern"}), w.execGrep),
@@ -132,6 +133,9 @@ func (w *Workspace) formatSearch(ctx context.Context, input GrepOptions) (string
 	}
 	if result.Truncated {
 		lines = append(lines, "... matches truncated; narrow the query ...")
+	}
+	if result.SkippedFiles > 0 {
+		lines = append(lines, fmt.Sprintf("Warning: search skipped %d unreadable, binary, or oversized file(s); a negative result is incomplete. First skipped: %s", result.SkippedFiles, result.FirstSkipped))
 	}
 	return strings.Join(lines, "\n"), nil
 }
@@ -262,7 +266,7 @@ func (w *Workspace) execPatch(ctx context.Context, raw json.RawMessage) (string,
 		return "", fmt.Errorf("patch is required")
 	}
 	result, err := w.ApplyPatch(ctx, input.Patch)
-	return result.Summary, err
+	return strings.Join(append([]string{result.Summary}, result.Notes...), "\n"), err
 }
 
 func (w *Workspace) execShell(ctx context.Context, raw json.RawMessage) (string, error) {

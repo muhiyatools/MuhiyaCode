@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"github.com/muhiya/muhiyacode/internal/gateway"
 )
 
 // The economics of changing models mid-session.
@@ -101,8 +100,12 @@ func (e *Engine) switchCost(candidate string) switchEconomics {
 // falls back to the local estimate before the first response lands.
 func (e *Engine) inUseContextTokens() int {
 	estimate := e.history.EstimatedTokens()
-	if e.latestPromptAvailable && e.latestPromptTokens > estimate {
-		return e.latestPromptTokens
+	rewriteVersion := e.history.RewriteVersion()
+	e.taskMu.Lock()
+	reported, available, measuredVersion := e.latestPromptTokens, e.latestPromptAvailable, e.latestPromptRewriteVersion
+	e.taskMu.Unlock()
+	if available && measuredVersion == rewriteVersion && reported > estimate {
+		return reported
 	}
 	return estimate
 }
@@ -113,24 +116,15 @@ func (e *Engine) inUseContextTokens() int {
 // the oldest messages at assembly time; switchCost is about whether it is worth
 // paying for.
 func (e *Engine) historyFitsModel(modelID string) bool {
-	limit := 0
-	for _, model := range e.settings.Provider.Models {
-		if model.ID == modelID {
-			limit = model.ContextLimit
-			break
-		}
-	}
-	profile := gateway.ResolveModelProfile(modelID + " " + e.catalogModelName(modelID))
-	if limit <= 0 {
-		limit = profile.DefaultContextWindow
-	}
-	if limit <= 0 {
+	toolTokens := e.history.TokensForChars(e.assemblyToolDefChars)
+	budget := e.contextBudgetFor(modelID, toolTokens)
+	if budget.Limit <= 0 {
 		return false // an unknown window is not one to gamble a conversation on
 	}
-	// 30% headroom for this task's growth, plus the output the model must be
-	// able to produce.
-	needed := e.inUseContextTokens()*13/10 + profile.OutputBudget(0)
-	return needed <= limit-outputReserveTokens
+	// Reserve 30% headroom for this task's growth. Output/tool/protocol space is
+	// already accounted for exactly once by contextBudgetFor.
+	needed := e.inUseContextTokens() * 13 / 10
+	return needed <= budget.UsableInput
 }
 
 // routedWindowFloorTokens is where a conversation stops being safe to route

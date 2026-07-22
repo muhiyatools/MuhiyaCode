@@ -83,7 +83,16 @@ func TestManagerStdioDiscoveryExecutionAndRefresh(t *testing.T) {
 	if confirmations != 1 {
 		t.Fatalf("confirmations = %d", confirmations)
 	}
-	manager.Refresh(context.Background(), 10*time.Second)
+	previous := manager.connectionForTest("stdio")
+	refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	manager.RefreshBlocking(refreshCtx)
+	cancel()
+	if previous == nil || previous == manager.connectionForTest("stdio") {
+		t.Fatal("full refresh did not replace the live connection")
+	}
+	if _, err := previous.session.CallTool(context.Background(), &mcp.CallToolParams{Name: "greet", Arguments: map[string]any{"name": "closed"}}); err == nil {
+		t.Fatal("retired MCP session remained callable after full refresh")
+	}
 	if tools := manager.Tools(); len(tools) != 1 {
 		t.Fatalf("refresh accumulated tools: %d", len(tools))
 	}
@@ -186,6 +195,13 @@ func TestPinnedSurfaceAppearsAtBoundaryThenLoadsBeforeHandshake(t *testing.T) {
 	pinned, err := second.PinnedTools()
 	if err != nil || len(pinned) != 1 || pinned[0].Definition().Function.Name != "mcp__pinned__greet" {
 		t.Fatalf("cached pinned tools=%v err=%v", pinned, err)
+	}
+	if !second.AllConfiguredServersHaveSurface() {
+		t.Fatal("a fully cached MCP configuration should skip the eager startup refresh")
+	}
+	identity, ok := pinned[0].(contract.ToolIdentityDeclaring)
+	if !ok || identity.ToolServerFingerprint() == "" || identity.ToolAvailability() != "ready" {
+		t.Fatalf("pinned tool identity unavailable: ok=%v tool=%T", ok, pinned[0])
 	}
 	// M5: the forwarding tool now lazy-connects on first Execute. Calling
 	// it WITHOUT a fresh session-level Refresh still succeeds because the

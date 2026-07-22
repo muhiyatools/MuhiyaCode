@@ -56,3 +56,68 @@ func TestOnboardingUsageLandsInsideTaskDelta(t *testing.T) {
 		t.Fatalf("no :sub:onboarding pairing row: %+v", stats.PerPairing)
 	}
 }
+
+func TestEconomyOnboardingSuppressesClearLowComplexityTasks(t *testing.T) {
+	tests := []string{
+		"hello",
+		"Fix the typo in README.md: change teh to the",
+		"In web/styles.css change the submit button color to green",
+		"In internal/user.go return ErrNotFound when lookup misses",
+	}
+	for _, prompt := range tests {
+		decision := DecideOnboarding(prompt, Classify(prompt, ""))
+		if decision.Action != OnboardingSuppressed || decision.UseAuxiliaryModel {
+			t.Fatalf("prompt %q admitted onboarding: %+v", prompt, decision)
+		}
+	}
+}
+
+func TestEconomyOnboardingUsesDirectQuestionForExplicitMaterialAmbiguity(t *testing.T) {
+	prompt := "Update login to use either passkeys or OAuth; I have not chosen which authentication method."
+	decision := DecideOnboarding(prompt, Classify(prompt, ""))
+	if decision.Action != OnboardingAskDirect || decision.UseAuxiliaryModel {
+		t.Fatalf("decision=%+v, want direct ask_user without an auxiliary model", decision)
+	}
+	if len(decision.Questions) != 1 || !strings.Contains(strings.ToLower(decision.Questions[0].Question), "authentication") {
+		t.Fatalf("direct material question missing: %+v", decision.Questions)
+	}
+}
+
+func TestEconomyOnboardingAdmissionDoesNotSpendAuxiliaryRequest(t *testing.T) {
+	tests := []struct {
+		name     string
+		prompt   string
+		wantAsks int
+	}{
+		{name: "clear named-file task", prompt: "Fix the typo in README.md: change teh to the"},
+		{name: "explicit material choice", prompt: "Update login to use either passkeys or OAuth; I have not chosen which authentication method.", wantAsks: 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := &scriptedProvider{responses: []contract.ChatResponse{{Content: "done", Usage: guardUsage(0, 20)}}}
+			settings := engineSettings()
+			settings.Effort = contract.EffortMedium
+			askQuestions := 0
+			engine, err := NewEngine(EngineConfig{
+				Settings: &settings, Session: contract.Session{ID: "admission", WorkspacePath: t.TempDir()},
+				Provider: provider, Registry: NewRegistry(), Prompt: PromptContext{Model: "Test"},
+				Callbacks: contract.Callbacks{Ask: func(context.Context, []contract.Question) ([]contract.Answer, error) {
+					askQuestions++
+					return nil, nil
+				}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := engine.Run(context.Background(), test.prompt); err != nil {
+				t.Fatal(err)
+			}
+			if len(provider.requests) != 1 {
+				t.Fatalf("provider requests=%d, want one main request", len(provider.requests))
+			}
+			if askQuestions != test.wantAsks {
+				t.Fatalf("direct asks=%d, want %d", askQuestions, test.wantAsks)
+			}
+		})
+	}
+}

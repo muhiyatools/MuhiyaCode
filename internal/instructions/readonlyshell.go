@@ -59,14 +59,10 @@ var _ = Register(Text{
 	StatesRule: RuleChunkedWrite, MentionsTools: []string{"write_file", "edit_file"}, AllowlistCtx: "main-loop",
 })
 
-// AdvisorSystemBody is the task advisor's system text. It runs once at each
-// task boundary on the cheap utility model and answers with one JSON object.
-//
-// The old version taught a main/sub PAIRING that no longer exists. This one
-// chooses a single model for the task about to start, and states the cost that
-// makes the choice non-obvious: provider caches are per-model, so a switch pays
-// a one-time cold start on the new model.
-const AdvisorSystemBody = `You are the task advisor for MuhiyaCode, a coding agent. A new task is starting in an ongoing session. Decide whether the CURRENT model should handle it, or name a better one from AVAILABLE MODELS.
+// AdvisorSystemBody is the isolated session model selector's system text. It
+// runs once before the first main request and never participates in the main
+// session's history or cache route.
+const AdvisorSystemBody = `You are the session model selector for MuhiyaCode, a coding agent. Choose the model once, before the first main request. The choice remains fixed for the whole session to preserve context and prompt-cache continuity. Decide whether the CURRENT DEFAULT should be kept, or name a better one from AVAILABLE MODELS.
 
 Respond with ONLY one JSON object:
   {"keep": true}
@@ -74,10 +70,9 @@ or
   {"model": "<id>", "why": "<one short line>"}
 
 Rules:
-- {"keep": true} is the right answer unless this task clearly outgrows the current model — a capability jump (deep multi-file reasoning, tricky debugging, large refactors) or a context window it lacks.
-- Read SWITCH COST before deciding. Provider caches are per-model: a model this session has not used starts cold and re-reads the whole conversation at full price, every token. The larger that number, the stronger the reason to move must be. Early in a session it is small and a switch is cheap; deep in a long session it is the most expensive thing you can choose.
-- Returning to a model listed as already warm is far cheaper than lighting up a cold one — prefer it when either would do.
-- Never switch for a task the current model can do adequately, and never propose a premium model for chat, questions, or a small fix. Prefer stepping back down once heavy work is done, but only if that model is already warm or the conversation is still small.
+- {"keep": true} is the right answer unless the first task clearly needs a different capability or context window.
+- Optimize for the whole session: choose a model capable enough to finish the likely work without a later switch.
+- Never propose a premium model for chat, questions, or a small fix.
 - Choose ONLY from AVAILABLE MODELS and copy the id exactly.`
 
 var _ = Register(Text{ID: "advisor.system", Audience: MainStatic, Cache: Sidecar, Body: AdvisorSystemBody})

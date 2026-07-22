@@ -69,12 +69,11 @@ func TestAdvisorAppliesThroughEngineRun(t *testing.T) {
 // TestAdvisorRunsAtEveryTaskBoundary: the model is chosen per task, not frozen
 // for the session. The first task keeps the configured model; the second, told
 // the work is heavier, moves — which the session-scoped advisor could never do.
-func TestAdvisorRunsAtEveryTaskBoundary(t *testing.T) {
+func TestAdvisorSelectsOncePerSession(t *testing.T) {
 	settings := advisorSettings()
 	engine, _ := advisorEngine(t, &settings,
 		contract.ChatResponse{Content: `{"keep":true}`}, // task 1 advisor
 		contract.ChatResponse{Content: "first done"},
-		contract.ChatResponse{Content: `{"model":"deepseek-v4-pro","why":"multi-file refactor"}`}, // task 2 advisor
 		contract.ChatResponse{Content: "second done"},
 	)
 	if _, _, err := engine.Run(context.Background(), "rename one local variable"); err != nil {
@@ -86,8 +85,30 @@ func TestAdvisorRunsAtEveryTaskBoundary(t *testing.T) {
 	if _, _, err := engine.Run(context.Background(), "refactor the loader across the package"); err != nil {
 		t.Fatal(err)
 	}
-	if settings.Provider.ActiveModelID != "deepseek-v4-pro" {
-		t.Fatalf("the second task's advisor never ran or never applied: %q", settings.Provider.ActiveModelID)
+	if settings.Provider.ActiveModelID != "minimax-m3" {
+		t.Fatalf("the established session changed model on its second task: %q", settings.Provider.ActiveModelID)
+	}
+}
+
+func TestAuxiliaryUsageDoesNotPrematurelyLockSessionModel(t *testing.T) {
+	settings := advisorSettings()
+	promptTokens := 10
+	engine, err := NewEngine(EngineConfig{
+		Settings: &settings,
+		Provider: &scriptedProvider{},
+		Registry: NewRegistry(),
+		InitialUsageRecords: []contract.UsageRecord{{
+			Seq: 1, Stream: contract.UsageStreamAux, Pin: ":sub:onboarding", PromptTokens: &promptTokens,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !engine.shouldRunAdvisor() {
+		t.Fatal("an isolated auxiliary request must not establish the main model chain")
+	}
+	if err := engine.SwitchModel(context.Background(), "main", "deepseek-v4-pro", "DeepSeek V4 Pro", ""); err != nil {
+		t.Fatalf("pre-main model selection was rejected: %v", err)
 	}
 }
 
@@ -258,5 +279,23 @@ func TestAdvisorCatalogDescribesWhatMatters(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("advisor catalog missing %q:\n%s", want, rendered)
 		}
+	}
+}
+
+func TestAdvisorUsageCarriesEconomyAttribution(t *testing.T) {
+	settings := advisorSettings()
+	engine, _ := advisorEngine(t, &settings,
+		contract.ChatResponse{Content: `{"keep":true}`, Usage: guardUsage(0, 20)},
+		contract.ChatResponse{Content: "done", Usage: guardUsage(10, 20)},
+	)
+	if _, _, err := engine.Run(context.Background(), "please update the widget configuration"); err != nil {
+		t.Fatal(err)
+	}
+	records := engine.UsageRecords()
+	if len(records) < 2 || records[0].BudgetDecision != "aux.admitted.model_advisor" {
+		t.Fatalf("advisor attribution missing: %+v", records)
+	}
+	if records[0].Phase == nil || *records[0].Phase != string(contract.ExecutionPhaseOrient) {
+		t.Fatalf("advisor phase missing: %+v", records[0])
 	}
 }

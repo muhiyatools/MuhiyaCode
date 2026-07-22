@@ -43,12 +43,18 @@ func TestDiedStreamIsRetriedOnce(t *testing.T) {
 	defer server.Close()
 
 	var retries int
+	visible := ""
+	resets := 0
 	provider := NewOpenAICompatible(Config{
 		Settings: testSettings(server.URL), APIKey: "sk-test", MaxRetries: 1,
 		IdleTimeout: 2 * time.Second, RequestLifetime: 5 * time.Second,
 		StreamRetryObserver: func(error) { retries++ },
 	})
-	response, err := provider.Chat(context.Background(), contract.ChatRequest{Messages: []contract.Message{{Role: contract.RoleUser, Content: "hi"}}})
+	response, err := provider.Chat(context.Background(), contract.ChatRequest{
+		Messages:      []contract.Message{{Role: contract.RoleUser, Content: "hi"}},
+		OnToken:       func(chunk string) { visible += chunk },
+		OnStreamReset: func() { visible = ""; resets++ },
+	})
 	if err != nil {
 		t.Fatalf("a died stream must be retried, not surfaced as a dead task: %v", err)
 	}
@@ -57,6 +63,9 @@ func TestDiedStreamIsRetriedOnce(t *testing.T) {
 	}
 	if retries != 1 {
 		t.Fatalf("stream retries = %d, want exactly 1 (telemetered, not silent)", retries)
+	}
+	if resets != 1 || visible != "complete" {
+		t.Fatalf("visible stream after retry = %q with %d reset(s), want one clean replacement", visible, resets)
 	}
 	if got := attempts.Load(); got != 2 {
 		t.Fatalf("upstream attempts = %d, want 2", got)

@@ -35,6 +35,7 @@ var allowedInternalImports = map[string][]string{
 	// no internal imports, so tui may render its verdict with no cycle risk.
 	"updatecheck":  {},
 	"contract":     {},
+	"evidence":     {},
 	"instructions": {"contract"},
 	// shellsafe is a foundation leaf (stdlib only): the shared command tokenizer
 	// used by both destructive-command gates (workspace.ClassifyShell and
@@ -44,7 +45,7 @@ var allowedInternalImports = map[string][]string{
 	"workspace":    {"contract", "instructions", "shellsafe"},
 	"state":        {"contract"},
 	"mcpclient":    {"contract", "state"},
-	"orchestrator": {"contract", "gateway", "instructions", "shellsafe"},
+	"orchestrator": {"contract", "evidence", "gateway", "instructions", "shellsafe"},
 	// app is the frontend-neutral core seam: it holds the types and prompt
 	// assembly every frontend shares, so it may reach the orchestrator but must
 	// NEVER import a frontend (tui). That one-way edge is what lets the planned

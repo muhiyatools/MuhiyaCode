@@ -3,6 +3,7 @@ package state
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"slices"
 	"sort"
 	"strconv"
@@ -20,6 +21,7 @@ func DefaultSettings() contract.Settings {
 	settings.Provider.Models = []contract.Model{}
 	settings.PermissionMode = contract.PermissionNormal
 	settings.Effort = contract.EffortHigh
+	settings.TokenEconomyMode = "off"
 	settings.Theme = "muhiya-dark"
 	settings.Shell.Preferred = "auto"
 	settings.Shell.TimeoutMS = 120_000
@@ -58,6 +60,13 @@ func LoadSettings(paths ...Paths) (contract.Settings, error) {
 		settings.Provider.Models = append(settings.Provider.Models, contract.Model{ID: StableModelID(legacy.Provider.Model), Name: legacy.Provider.Model, Source: "manual", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
 	}
 	normalizeSettings(&settings)
+	if environmentMode := strings.TrimSpace(os.Getenv("MUHIYA_TOKEN_ECONOMY_MODE")); environmentMode != "" {
+		mode, ok := normalizeTokenEconomyMode(environmentMode)
+		if !ok {
+			return contract.Settings{}, fmt.Errorf("invalid MUHIYA_TOKEN_ECONOMY_MODE %q", environmentMode)
+		}
+		settings.TokenEconomyMode = mode
+	}
 	if err := ValidateSettings(settings); err != nil {
 		return contract.Settings{}, fmt.Errorf("invalid settings.json: %w", err)
 	}
@@ -104,6 +113,9 @@ func ValidateSettings(settings contract.Settings) error {
 	}
 	if _, ok := normalizeEffort(string(settings.Effort)); !ok {
 		return fmt.Errorf("effort must be low, medium, high, or max")
+	}
+	if _, ok := normalizeTokenEconomyMode(settings.TokenEconomyMode); !ok {
+		return fmt.Errorf("tokenEconomyMode must be off, observe, balanced, or aggressive")
 	}
 	if !slices.Contains([]string{"auto", "pwsh", "powershell", "cmd", "sh"}, settings.Shell.Preferred) {
 		return fmt.Errorf("shell.preferred is invalid")
@@ -257,6 +269,12 @@ func SetConfig(key, value string, settings *contract.Settings, secrets *contract
 			return fmt.Errorf("reasoning effort must be low, medium, high, or max")
 		}
 		settings.Effort = effort
+	case "tokenEconomyMode":
+		mode, ok := normalizeTokenEconomyMode(value)
+		if !ok {
+			return fmt.Errorf("tokenEconomyMode must be off, observe, balanced, or aggressive")
+		}
+		settings.TokenEconomyMode = mode
 	case "reviewGating":
 		normalized := strings.TrimSpace(strings.ToLower(value))
 		switch normalized {
@@ -327,6 +345,13 @@ func normalizeSettings(settings *contract.Settings) {
 	if effort, ok := normalizeEffort(string(settings.Effort)); ok {
 		settings.Effort = effort
 	}
+	if mode, ok := normalizeTokenEconomyMode(settings.TokenEconomyMode); ok {
+		settings.TokenEconomyMode = mode
+	} else {
+		// Tolerate values written by a future/experimental build. Conservative
+		// off preserves compatibility and guarantees no request-side behavior.
+		settings.TokenEconomyMode = "off"
+	}
 	if settings.Provider.Models == nil {
 		settings.Provider.Models = []contract.Model{}
 	}
@@ -348,6 +373,21 @@ func normalizeEffort(value string) (contract.EffortLevel, bool) {
 		return contract.EffortHigh, true
 	case "max", "ultra", "xhigh":
 		return contract.EffortMax, true
+	default:
+		return "", false
+	}
+}
+
+func normalizeTokenEconomyMode(value string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "off":
+		return "off", true
+	case "observe":
+		return "observe", true
+	case "balanced":
+		return "balanced", true
+	case "aggressive":
+		return "aggressive", true
 	default:
 		return "", false
 	}

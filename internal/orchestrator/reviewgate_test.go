@@ -4,8 +4,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-
-	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
 // Conformance tests for contracts/review-gating.md §2 (hard rules), §3 (tier
@@ -244,27 +242,5 @@ func TestLegacyModeRestoresSingleSignalLarge(t *testing.T) {
 	current := Classify("audit the project files for problems", "")
 	if current.Class == ClassLarge {
 		t.Fatalf("current single-signal class = %s, must NOT be large (D2 corroboration)", current.Class)
-	}
-}
-
-// T022/D6: post-outcome stamping — ceiling-hit detection from the subagent
-// status and the lenient Coverage-line parse.
-func TestUpdateTaskReviewOutcome(t *testing.T) {
-	settings := engineSettings()
-	engine, err := NewEngine(EngineConfig{
-		Settings: &settings, Session: contract.Session{ID: "cov", WorkspacePath: t.TempDir()},
-		Provider: &scriptedProvider{}, Registry: NewRegistry(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	engine.setTaskReviewDecision(ReviewDecision{Tier: ReviewTierFocused, Rationale: "r"})
-	engine.updateTaskReviewOutcome("Subagent \"review\" report [status: partial (token ceiling)] (2 turns...)\nFindings: none.\nCoverage: covered=a.go, b.go; skipped=none")
-	d := engine.takeTaskReviewDecision()
-	if d == nil || !d.CeilingHit {
-		t.Fatalf("ceiling hit not stamped: %+v", d)
-	}
-	if d.Coverage != "covered=a.go, b.go; skipped=none" {
-		t.Fatalf("coverage = %q", d.Coverage)
 	}
 }

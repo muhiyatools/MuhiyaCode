@@ -29,6 +29,27 @@ type ShellResult struct {
 	Duration       time.Duration
 }
 
+func (s ShellResult) RawToolResult() RawToolResult {
+	status := RawResultSuccess
+	if s.TimedOut {
+		status = RawResultTimeout
+	} else if s.Cancelled {
+		status = RawResultCancelled
+	} else if s.ExitCode != 0 {
+		status = RawResultFailure
+	}
+	return RawToolResult{
+		Status:            status,
+		Complete:          !s.Truncated,
+		Content:           []byte(s.Output),
+		SourceFingerprint: fmt.Sprintf("exit-%d", s.ExitCode),
+		ExitCode:          &s.ExitCode,
+		TimedOut:          s.TimedOut,
+		Cancelled:         s.Cancelled,
+		Encoding:          "utf-8",
+	}
+}
+
 // shellKillGrace bounds how long Run waits for a process's inherited output
 // pipes to close after the process exits or after a kill is issued. A detached
 // grandchild (e.g. a server launched via Start-Process) can hold those pipes
@@ -204,14 +225,11 @@ type boundedWriter struct {
 }
 
 func (w *boundedWriter) Write(value []byte) (int, error) {
-	if w.onOutput != nil {
-		w.onOutput(string(value))
-	}
 	w.mu.Lock()
-	defer w.mu.Unlock()
 	remaining := w.limit - w.buffer.Len()
 	if remaining <= 0 {
 		w.truncated = true
+		w.mu.Unlock()
 		return len(value), nil
 	}
 	toWrite := value
@@ -220,6 +238,11 @@ func (w *boundedWriter) Write(value []byte) (int, error) {
 		w.truncated = true
 	}
 	_, _ = io.Copy(&w.buffer, bytes.NewReader(toWrite))
+	chunk := string(append([]byte(nil), toWrite...))
+	w.mu.Unlock()
+	if w.onOutput != nil && chunk != "" {
+		w.onOutput(chunk)
+	}
 	return len(value), nil
 }
 

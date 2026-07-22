@@ -8,11 +8,17 @@ import (
 	"sync"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/evidence"
 	"github.com/muhiya/muhiyacode/internal/gateway"
 )
 
 const (
-	outputReserveTokens = 12_000
+	// protocolMarginTokens covers provider framing/tokenizer variance. The actual
+	// output budget is added separately only for shared-window model families.
+	protocolMarginTokens = 1_024
+	// Separate-output families still need stable room for conversation growth
+	// before the next maintenance boundary; this is not output reservation.
+	separateWindowGrowthMarginTokens = 12_000
 	// hardTurnCeiling is the liveness backstop at MEDIUM effort; the effective
 	// bound scales with the effort profile (see Engine.hardTurnCeiling). Tests
 	// that assert against this constant run at medium, where the two are equal.
@@ -48,6 +54,8 @@ type Persistence struct {
 	// so the next resume can attribute a skills/tools/model change vs a silent cold
 	// start. Optional: a nil hook leaves resume attribution dormant.
 	WritePrefixShape func(context.Context, contract.PrefixShapeSnapshot) error
+	WriteTaskEpochs  func(context.Context, TaskEpochLedgerSnapshot) error
+	WriteCapsule     func(context.Context, TaskCapsule) error
 }
 
 type RescueFunc func(string, []string) ([]contract.ToolCall, string)
@@ -96,26 +104,37 @@ type EngineConfig struct {
 	// read_skill is then not advertised at all. LoadSkill reads one skill's body
 	// (bounded); it is injected because the file layer lives in a package the
 	// orchestrator must not import.
-	SkillCatalog []SkillListing
-	LoadSkill    SkillLoader
+	SkillCatalog      []SkillListing
+	LoadSkill         SkillLoader
+	EvidenceStore     *evidence.Store
+	WorkspaceID       string
+	InitialTaskEpochs TaskEpochLedgerSnapshot
+	InitialCapsules   []TaskCapsule
 }
 
 type Engine struct {
-	settings      *contract.Settings
-	secrets       contract.Secrets
-	session       contract.Session
-	memoryDir     string
-	provider      contract.Provider
-	registry      *Registry
-	history       *History
-	inspection    *InspectionLedger
-	knowledge     *Knowledge
-	callbacks     contract.Callbacks
-	persistence   Persistence
-	prompt        PromptContext
-	rescue        RescueFunc
-	redactFn      func(string) string
-	boundaryTools BoundaryToolSource
+	settings          *contract.Settings
+	secrets           contract.Secrets
+	session           contract.Session
+	memoryDir         string
+	provider          contract.Provider
+	registry          *Registry
+	history           *History
+	inspection        *InspectionLedger
+	knowledge         *Knowledge
+	callbacks         contract.Callbacks
+	persistence       Persistence
+	prompt            PromptContext
+	rescue            RescueFunc
+	redactFn          func(string) string
+	boundaryTools     BoundaryToolSource
+	artifactStore     *evidence.Store
+	workspaceID       string
+	taskEpochs        TaskEpochLedgerSnapshot
+	capsules          []TaskCapsule
+	epochHysteresis   RelatednessHysteresis
+	lastEpochTask     *EpochTaskResult
+	epochObservations []EpochTransitionObservation
 	// skills is the session-frozen skill catalog behind read_skill and
 	// run_subagent's skills argument (013 US1). Built from the same listing that
 	// renders the SKILLS prefix section, so name resolution can never disagree
@@ -164,6 +183,7 @@ type Engine struct {
 	sessionUsage         contract.Usage
 	usageRecords         []contract.UsageRecord
 	usageAggregate       contract.SessionUsageAggregate
+	contextManifests     []ContextManifest
 	requestSeq           int
 	firstAfterStart      bool
 	lastShape            *PrefixShape
@@ -172,15 +192,16 @@ type Engine struct {
 	// priorSessionShape is the prefix shape the PREVIOUS session persisted
 	// (prefix_shape.json), restored on resume so the first request can attribute a
 	// skills/tools/model change instead of cold-starting silently (C3, fixes DC1/DC2).
-	priorSessionShape     *PrefixShape
-	prefixShapeSaved      bool   // C3: the current shape has been persisted this session
-	lastResumeCause       string // C3→C6: why a resumed turn cold-started ("" once consumed / server-side)
-	coldStartPending      bool   // C6: recordMainUsage flagged a resume cold miss to notice
-	coldStartTokens       int    // C6: prompt tokens billed uncached on that miss
-	resumePruneDone       bool   // C7: the stale-resume prune ran (once per engine)
-	invalidations         *InvalidationLedger
-	latestPromptTokens    int
-	latestPromptAvailable bool
+	priorSessionShape          *PrefixShape
+	prefixShapeSaved           bool   // C3: the current shape has been persisted this session
+	lastResumeCause            string // C3→C6: why a resumed turn cold-started ("" once consumed / server-side)
+	coldStartPending           bool   // C6: recordMainUsage flagged a resume cold miss to notice
+	coldStartTokens            int    // C6: prompt tokens billed uncached on that miss
+	resumePruneDone            bool   // C7: the stale-resume prune ran (once per engine)
+	invalidations              *InvalidationLedger
+	latestPromptTokens         int
+	latestPromptAvailable      bool
+	latestPromptRewriteVersion int
 	// warmPrefix maps a model id to the history revision it last saw on the main
 	// stream — the warm-model ledger the task advisor prices switches against
 	// (switchcost.go). In-memory by design: a resumed session cannot know what a
@@ -225,6 +246,9 @@ type Engine struct {
 	// taskFilesChanged is the scope-agnostic tally of files this task changed —
 	// the execution agent's writes count exactly like the main loop's would.
 	taskFilesChanged map[string]bool
+	// taskControlWireStarted prevents rewriting a control checkpoint after any
+	// request could have cached it. Later state codes append once and deduplicate.
+	taskControlWireStarted bool
 	// freshSessionAdvised bounds the "start a new session" advisory to once per
 	// session — it is guidance, not nagging.
 	freshSessionAdvised bool
@@ -279,7 +303,18 @@ type mainUsageObservation struct {
 	// what makes the warm-model ledger honest: a model is only warm for the
 	// conversation shape it actually saw, so a compaction or a trim retires
 	// every model's warmth instead of leaving a stale claim behind (switchcost.go).
-	rewriteVersion int
+	rewriteVersion       int
+	manifestHash         string
+	finishReason         string
+	transport            string
+	taskEpochID          *string
+	phase                *string
+	retryOf              *int
+	budgetDecision       string
+	reasoningTier        contract.ReasoningTier
+	outputCap            int
+	truncationEscalated  bool
+	outputBudgetOverride string
 }
 
 type usageRecordInput struct {
@@ -319,38 +354,50 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 	latestPromptTokens, latestPromptAvailable := 0, false
 	for _, record := range usageRecords {
 		requestSeq = max(requestSeq, record.Seq)
-		if record.PromptTokens != nil {
+		mainStream := record.Stream == "" || record.Stream == contract.UsageStreamMain
+		if mainStream && record.PromptTokens != nil && record.HistoryRewriteVersion == config.History.RewriteVersion() {
 			latestPromptTokens, latestPromptAvailable = *record.PromptTokens, true
 		}
 	}
 	ledger := NewInvalidationLedger(config.InitialInvalidations, config.Persistence.AppendInvalidation)
 	engine := &Engine{
-		settings:              config.Settings,
-		secrets:               config.Secrets,
-		session:               config.Session,
-		memoryDir:             config.MemoryDir,
-		provider:              config.Provider,
-		registry:              config.Registry,
-		history:               config.History,
-		inspection:            config.Inspection,
-		knowledge:             config.Knowledge,
-		callbacks:             config.Callbacks,
-		persistence:           config.Persistence,
-		prompt:                config.Prompt,
-		rescue:                config.Rescue,
-		redactFn:              config.Redact,
-		boundaryTools:         config.BoundaryTools,
-		skills:                NewSkillCatalog(config.SkillCatalog),
-		skillLoader:           config.LoadSkill,
-		sessionUsage:          usageFromAggregate(aggregate),
-		usageRecords:          usageRecords,
-		usageAggregate:        aggregate,
-		requestSeq:            requestSeq,
-		firstAfterStart:       true,
-		invalidations:         ledger,
-		latestPromptTokens:    latestPromptTokens,
-		latestPromptAvailable: latestPromptAvailable,
-		projectContextProbe:   config.ProjectContextProbe,
+		settings:                   config.Settings,
+		secrets:                    config.Secrets,
+		session:                    config.Session,
+		memoryDir:                  config.MemoryDir,
+		provider:                   config.Provider,
+		registry:                   config.Registry,
+		history:                    config.History,
+		inspection:                 config.Inspection,
+		knowledge:                  config.Knowledge,
+		callbacks:                  config.Callbacks,
+		persistence:                config.Persistence,
+		prompt:                     config.Prompt,
+		rescue:                     config.Rescue,
+		redactFn:                   config.Redact,
+		boundaryTools:              config.BoundaryTools,
+		artifactStore:              config.EvidenceStore,
+		workspaceID:                config.WorkspaceID,
+		taskEpochs:                 cloneTaskEpochLedger(config.InitialTaskEpochs),
+		capsules:                   append([]TaskCapsule(nil), config.InitialCapsules...),
+		skills:                     NewSkillCatalog(config.SkillCatalog),
+		skillLoader:                config.LoadSkill,
+		sessionUsage:               usageFromAggregate(aggregate),
+		usageRecords:               usageRecords,
+		usageAggregate:             aggregate,
+		requestSeq:                 requestSeq,
+		firstAfterStart:            true,
+		invalidations:              ledger,
+		latestPromptTokens:         latestPromptTokens,
+		latestPromptAvailable:      latestPromptAvailable,
+		latestPromptRewriteVersion: config.History.RewriteVersion(),
+		projectContextProbe:        config.ProjectContextProbe,
+	}
+	if engine.artifactStore != nil {
+		engine.inspection.SetEvidenceIntact(func(handle, hash string) bool {
+			metadata, err := engine.artifactStore.Metadata(handle)
+			return err == nil && metadata.ContentHash == hash
+		})
 	}
 	// 005 US3: restore the project-context boot snapshot and applied cursors so a
 	// resumed session never re-emits a <memory-update> for events it already
@@ -395,6 +442,7 @@ func (e *Engine) resetTaskState(budget Budget) {
 	e.taskDuplicates, e.taskOverBudget = 0, 0
 	e.taskReviewDecision, e.taskTerminalReads = nil, 0
 	e.taskFilesChanged = nil
+	e.taskControlWireStarted = false
 	e.taskPeakContext = 0
 	e.taskCounters = newCallCounters()
 	e.taskFailures = nil // H5: reset the per-task failure window
@@ -411,7 +459,9 @@ func (e *Engine) IsBusy() bool {
 	return busy
 }
 
-// SetEffort updates the live effort ceiling safely between model turns.
+// SetEffort updates the setting for the next task. Active tasks keep the
+// immutable profile they started with, so reasoning, maintenance, review, and
+// stats cannot disagree about which effort governed the request sequence.
 func (e *Engine) SetEffort(level contract.EffortLevel) {
 	e.liveSettingsMu.Lock()
 	e.settings.Effort = level
@@ -444,6 +494,9 @@ func (e *Engine) SwitchModel(ctx context.Context, role, id, name, addendum strin
 	e.mu.Unlock()
 	if busy {
 		return errors.New("cannot switch models while a task is running")
+	}
+	if e.UsageAggregate().MainRequests > 0 {
+		return errors.New("cannot switch models after a session has started; create a new session so context and prompt caching stay intact")
 	}
 	return e.applyModelSwitch(ctx, role, id, name, addendum)
 }
@@ -535,6 +588,51 @@ func (e *Engine) outputBudget(modelID string) int {
 	return gateway.ResolveModelProfile(modelID + " " + e.catalogModelName(modelID)).OutputBudget(catalog)
 }
 
+func (e *Engine) phaseOutputBudget(modelID string, phase contract.ExecutionPhase, requested, toolTokens int) int {
+	profile := gateway.ResolveModelProfile(modelID + " " + e.catalogModelName(modelID))
+	allowance := int(^uint(0) >> 1)
+	if profile.OutputSharesContext {
+		allowance = max(1, e.contextLimitFor(modelID)-protocolMarginTokens-max(0, toolTokens))
+	}
+	value := profile.PhaseOutputBudget(phase, requested, allowance)
+	for _, model := range e.settings.Provider.Models {
+		if model.ID == modelID && model.MaxOutput > 0 {
+			value = min(value, model.MaxOutput)
+			break
+		}
+	}
+	return max(1, value)
+}
+
+type contextBudget struct {
+	Limit          int
+	Output         int
+	ToolTokens     int
+	ReservedTokens int
+	UsableInput    int
+}
+
+// contextBudgetFor is the only context-window arithmetic used by assembly,
+// maintenance, model-fit checks, and reporting. It resolves the exact output
+// cap before the prompt is built, preventing the previous 12k-reserve/384k-send
+// disagreement.
+func (e *Engine) contextBudgetFor(modelID string, toolTokens int) contextBudget {
+	return e.contextBudgetForOutput(modelID, toolTokens, e.outputBudget(modelID))
+}
+
+func (e *Engine) contextBudgetForOutput(modelID string, toolTokens, output int) contextBudget {
+	limit := e.contextLimitFor(modelID)
+	profile := gateway.ResolveModelProfile(modelID + " " + e.catalogModelName(modelID))
+	output, _ = profile.ClampOutputTokens(max(1, output))
+	reserved := protocolMarginTokens + max(0, toolTokens)
+	if profile.OutputSharesContext {
+		reserved += output
+	} else {
+		reserved += separateWindowGrowthMarginTokens
+	}
+	return contextBudget{Limit: limit, Output: output, ToolTokens: max(0, toolTokens), ReservedTokens: reserved, UsableInput: max(0, limit-reserved)}
+}
+
 // RouteShellOutput streams a run_shell output chunk to the transcript's
 // run_shell row. It stays a method (rather than the app calling ToolOutput
 // directly) because the shell writer is wired once at workspace construction
@@ -602,9 +700,26 @@ func (e *Engine) nextRequestSeq() int {
 }
 
 func (e *Engine) contextLimit() int {
+	return e.contextLimitFor(e.settings.Provider.ActiveModelID)
+}
+
+func (e *Engine) ensureStatePersisted() error {
+	if err := e.history.RetryPersistence(); err != nil {
+		return fmt.Errorf("persist session history: %w", err)
+	}
+	if err := e.inspection.RetryPersistence(); err != nil {
+		return fmt.Errorf("persist inspection state: %w", err)
+	}
+	if err := e.knowledge.RetryPersistence(); err != nil {
+		return fmt.Errorf("persist knowledge state: %w", err)
+	}
+	return nil
+}
+
+func (e *Engine) contextLimitFor(modelID string) int {
 	limit := 128000
 	for _, model := range e.settings.Provider.Models {
-		if model.ID == e.settings.Provider.ActiveModelID && model.ContextLimit > 0 {
+		if model.ID == modelID && model.ContextLimit > 0 {
 			limit = model.ContextLimit
 			break
 		}
@@ -613,7 +728,7 @@ func (e *Engine) contextLimit() int {
 	// never exceed the provider's documented context window, or the pipeline could
 	// build an over-limit request. A no-op for the default 128k; a guard against a
 	// misconfigured ContextLimit.
-	if ceiling := gateway.ResolveModelProfile(e.settings.Provider.ActiveModelID).ContextWindowLimit; ceiling > 0 && limit > ceiling {
+	if ceiling := gateway.ResolveModelProfile(modelID + " " + e.catalogModelName(modelID)).ContextWindowLimit; ceiling > 0 && limit > ceiling {
 		limit = ceiling
 	}
 	return limit

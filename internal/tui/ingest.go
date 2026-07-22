@@ -30,6 +30,19 @@ func (m *Model) appendStream(stream streamMsg) {
 	m.items[len(m.items)-1].content = m.draft.String()
 }
 
+func (m *Model) resetStream() {
+	for index := len(m.items) - 1; index >= 0; index-- {
+		if m.items[index].kind == "assistant_draft" {
+			m.items = append(m.items[:index], m.items[index+1:]...)
+			break
+		}
+		if m.items[index].kind == "user" {
+			break
+		}
+	}
+	m.draft.Reset()
+}
+
 func (m *Model) finishAssistant(answer string) {
 	for index := len(m.items) - 1; index >= 0; index-- {
 		if m.items[index].kind == "assistant_draft" {

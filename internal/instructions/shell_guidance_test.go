@@ -16,8 +16,9 @@ func TestShellCommandGuidanceIsConcreteAndShellSpecific(t *testing.T) {
 			t.Fatalf("PowerShell guidance must mention %q: %q", want, ps)
 		}
 	}
-	if ShellCommandGuidance("pwsh") != ps {
-		t.Fatal("pwsh and powershell must share the PowerShell guidance")
+	pwsh := ShellCommandGuidance("pwsh")
+	if !strings.Contains(pwsh, "&&") || !strings.Contains(pwsh, "PowerShell 7") {
+		t.Fatalf("pwsh guidance must describe PowerShell 7 operators: %q", pwsh)
 	}
 	if c := ShellCommandGuidance("cmd"); !strings.Contains(c, "cmd.exe") {
 		t.Fatalf("cmd guidance must name cmd.exe: %q", c)

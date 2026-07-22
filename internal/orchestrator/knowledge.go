@@ -33,11 +33,12 @@ type KnowledgeSnapshot struct {
 }
 
 type Knowledge struct {
-	mu      sync.Mutex
-	facts   []KnowledgeFact
-	files   map[string]string
-	epoch   int
-	persist func(KnowledgeSnapshot) error
+	mu             sync.Mutex
+	facts          []KnowledgeFact
+	files          map[string]string
+	epoch          int
+	persist        func(KnowledgeSnapshot) error
+	lastPersistErr error
 }
 
 func NewKnowledge(snapshot KnowledgeSnapshot, persist func(KnowledgeSnapshot) error) *Knowledge {
@@ -269,6 +270,15 @@ func (k *Knowledge) Snapshot() KnowledgeSnapshot {
 	return k.snapshotLocked()
 }
 
+func (k *Knowledge) RetryPersistence() error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.lastPersistErr != nil {
+		k.saveLocked()
+	}
+	return k.lastPersistErr
+}
+
 func (k *Knowledge) snapshotLocked() KnowledgeSnapshot {
 	files := make(map[string]string, len(k.files))
 	for key, value := range k.files {
@@ -279,7 +289,7 @@ func (k *Knowledge) snapshotLocked() KnowledgeSnapshot {
 
 func (k *Knowledge) saveLocked() {
 	if k.persist != nil {
-		_ = k.persist(k.snapshotLocked())
+		k.lastPersistErr = k.persist(k.snapshotLocked())
 	}
 }
 

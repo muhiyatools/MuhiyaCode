@@ -1,7 +1,8 @@
 /bin/*
 !/bin/muhiyacode.js
 /dist/
-/coverage.out
+/coverage
+/coverage.*
 /*.exe
 *.test
 *.out

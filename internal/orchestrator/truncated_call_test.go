@@ -126,3 +126,50 @@ func TestSanitizeReplacesOnlyTruncatedArguments(t *testing.T) {
 		t.Fatal("sanitizing must preserve the call's identity so pairing still works")
 	}
 }
+
+func TestTruncationControllerDoublesOnceLinksRetryAndStopsSecondCut(t *testing.T) {
+	controller := NewTruncationController()
+	first := controller.Record(TruncationObservation{LogicalStepID: "change:7", RequestSeq: 7, CurrentCap: 1200, MaximumCap: 8000, FinishReason: "length"})
+	if !first.Retry || first.Stop || first.NextCap != 2400 || first.RetryOf != 7 || first.Code != "recover.output_truncated" {
+		t.Fatalf("first truncation=%+v", first)
+	}
+	second := controller.Record(TruncationObservation{LogicalStepID: "change:7", RequestSeq: 8, CurrentCap: first.NextCap, MaximumCap: 8000, FinishReason: "length"})
+	if second.Retry || !second.Stop || second.Code != "stop.output_truncated_twice" {
+		t.Fatalf("second truncation=%+v", second)
+	}
+	complete := controller.Record(TruncationObservation{LogicalStepID: "verify:9", RequestSeq: 9, CurrentCap: 1200, MaximumCap: 8000, FinishReason: "stop"})
+	if complete.Retry || complete.Stop {
+		t.Fatalf("complete response triggered recovery: %+v", complete)
+	}
+}
+
+func TestBalancedTruncationRetryIsBoundedAndUsageLinked(t *testing.T) {
+	settings := engineSettings()
+	settings.TokenEconomyMode = "balanced"
+	provider := &scriptedProvider{responses: []contract.ChatResponse{
+		{Content: "partial", FinishReason: "length"},
+		{Content: "complete", FinishReason: "stop"},
+	}}
+	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "truncation-retry", WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(), Prompt: PromptContext{Model: "Test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	answer, _, err := engine.Run(context.Background(), "explain this?")
+	if err != nil || answer != "complete" {
+		t.Fatalf("answer=%q err=%v", answer, err)
+	}
+	if len(provider.requests) != 2 || provider.requests[0].MaxTokens != 512 || provider.requests[1].MaxTokens != 1024 {
+		t.Fatalf("request caps=%v", []int{provider.requests[0].MaxTokens, provider.requests[1].MaxTokens})
+	}
+	records := engine.UsageRecords()
+	if len(records) != 2 || records[1].RetryOf == nil || *records[1].RetryOf != records[0].Seq || !strings.Contains(records[1].BudgetDecision, "recover.output_truncated") {
+		t.Fatalf("retry usage not linked: %+v", records)
+	}
+	if records[1].ReasoningTier == nil || records[1].OutputCap == nil || *records[1].OutputCap != 1024 || !records[1].TruncationEscalated || records[1].OutputBudgetOverride == nil {
+		t.Fatalf("adaptive output reporting missing: %+v", records[1])
+	}
+	aggregate := engine.UsageAggregate()
+	if aggregate.TruncationEscalations != 1 || aggregate.OutputBudgetOverrides != 1 || aggregate.MaxOutputCap == nil || *aggregate.MaxOutputCap != 1024 || aggregate.RequestsByReasoning[string(contract.ReasoningLow)] != 2 {
+		t.Fatalf("session adaptive aggregate=%+v", aggregate)
+	}
+}

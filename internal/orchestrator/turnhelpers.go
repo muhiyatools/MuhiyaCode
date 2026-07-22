@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -33,6 +34,17 @@ func (e *Engine) hasSteering() bool {
 	has := len(e.steering) > 0
 	e.mu.Unlock()
 	return has
+}
+
+func (e *Engine) setTaskControl(code, instruction string) {
+	e.taskMu.Lock()
+	wireStarted := e.taskControlWireStarted
+	e.taskMu.Unlock()
+	if wireStarted {
+		e.history.AppendTaskControl(code, instruction)
+	} else {
+		e.history.UpsertTaskControl(code, instruction)
+	}
 }
 
 // turnRecoveryDelay paces the single in-loop retry of a failed provider call.
@@ -109,7 +121,7 @@ func (e *Engine) persistAssistant(ctx context.Context, content string) error {
 		return err
 	}
 	e.history.Append(contract.Message{Role: contract.RoleAssistant, Content: content})
-	return nil
+	return e.ensureStatePersisted()
 }
 
 func (e *Engine) finalize(ctx context.Context, content string) string {
@@ -161,20 +173,24 @@ func (e *Engine) redact(value string) string {
 // instruction/memory hashes into the project-context sidecar, preserving the boot
 // snapshot's RenderedBootContext and other fields. It writes only when a hash
 // actually changed, off the hot path under writeMu like the goal sidecar.
-func (e *Engine) persistProjectCursor(ctx context.Context) {
+func (e *Engine) persistProjectCursor(ctx context.Context) error {
 	if e.persistence.WriteProjectContext == nil || e.projectContext == nil {
-		return
+		return nil
 	}
 	if e.projectContext.AppliedMemoryHash == e.appliedMemoryHash && e.projectContext.AppliedInstructionHash == e.appliedInstructionsHash {
-		return
+		return nil
 	}
 	snapshot := *e.projectContext
 	snapshot.AppliedMemoryHash = e.appliedMemoryHash
 	snapshot.AppliedInstructionHash = e.appliedInstructionsHash
 	e.writeMu.Lock()
-	_ = e.persistence.WriteProjectContext(ctx, snapshot)
+	err := e.persistence.WriteProjectContext(ctx, snapshot)
 	e.writeMu.Unlock()
+	if err != nil {
+		return fmt.Errorf("persist project context cursor: %w", err)
+	}
 	e.projectContext = &snapshot
+	return nil
 }
 
 // recordTaskFailure (H5) appends the current turn to the per-task failure
@@ -240,6 +256,78 @@ func fallbackAnswer(content string, changed map[string]bool) string {
 		return fmt.Sprintf("Work completed with %d changed file(s).", len(changed))
 	}
 	return "Done."
+}
+
+func deterministicOutcomeFinal(outcomes []toolOutcome, assistantText string, changed map[string]bool) (string, bool) {
+	mutationComplete, verificationComplete := false, false
+	for _, outcome := range outcomes {
+		if outcome.Failed {
+			return "", false
+		}
+		mutationComplete = mutationComplete || isMutation(outcome.Call.ToolName())
+		verificationComplete = verificationComplete || isCheckCall(outcome.Call)
+	}
+	if !mutationComplete || !verificationComplete {
+		return "", false
+	}
+	if final := strings.TrimSpace(assistantText); final != "" && !trailingIntent(final) {
+		return final, true
+	}
+	paths := make([]string, 0, len(changed))
+	for path := range changed {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	if len(paths) > 0 {
+		return "Updated " + strings.Join(paths, ", ") + ". Verification passed.", true
+	}
+	return "The requested change was applied and its proving check passed.", true
+}
+
+func budgetBoundaryFinal(changed map[string]bool, checksRun int, decisionCode string) string {
+	status := "The token-economy hard limit was reached (" + decisionCode + ")."
+	if len(changed) == 0 {
+		return status + " No files were changed."
+	}
+	if checksRun == 0 {
+		return status + fmt.Sprintf(" %d file(s) changed, but verification could not be completed within the allowed request budget.", len(changed))
+	}
+	return status + fmt.Sprintf(" %d file(s) changed and the recorded verification completed.", len(changed))
+}
+
+func toolProductivityOutcome(outcomes []toolOutcome) RequestProductivityOutcome {
+	var result RequestProductivityOutcome
+	for _, outcome := range outcomes {
+		if outcome.Failed {
+			continue
+		}
+		name := outcome.Call.ToolName()
+		switch {
+		case isCheckCall(outcome.Call):
+			result.Verification = true
+		case name == "ask_user":
+			result.RequiredUserDecision = true
+		case name == "run_shell" && readOnlyShellCall(outcome.Call):
+			payload := name + "\x00" + outcome.Call.ArgumentsJSON() + "\x00" + outcome.Output
+			result.EvidenceCodes = append(result.EvidenceCodes, fingerprintBytes([]byte(payload)))
+		case isMutation(name):
+			result.Mutation = true
+		default:
+			payload := name + "\x00" + outcome.Call.ArgumentsJSON() + "\x00" + outcome.Output
+			result.EvidenceCodes = append(result.EvidenceCodes, fingerprintBytes([]byte(payload)))
+		}
+	}
+	return result
+}
+
+func readOnlyShellCall(call contract.ToolCall) bool {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if json.Unmarshal([]byte(call.ArgumentsJSON()), &args) != nil {
+		return false
+	}
+	return IsReadOnlyShell(args.Command)
 }
 
 func trackChanged(outcome toolOutcome, files map[string]bool) {

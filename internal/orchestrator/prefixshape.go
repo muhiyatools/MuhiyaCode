@@ -27,18 +27,6 @@ type PrefixShape struct {
 	ModelID        string `json:"model_id"`
 }
 
-// NewPrefixShape hashes exactly the serialized system message and canonical
-// tools bytes that will be sent. json.Marshal is deterministic for Go maps and
-// preserves the caller-controlled tool slice order. The caller must therefore
-// pass the tools in their actual wire order; sorting here would mask a real
-// prefix change.
-func NewPrefixShape(system string, tools []contract.ToolDefinition, rewriteVersion int, modelID string) (PrefixShape, error) {
-	return NewWirePrefixShape(contract.ChatRequest{
-		Messages: []contract.Message{{Role: contract.RoleSystem, Content: system}},
-		Tools:    tools, ToolChoice: "auto", ModelID: modelID,
-	}, 1, rewriteVersion)
-}
-
 // NewWirePrefixShape hashes the stable regions as they are represented on the
 // request wire. settledCount is the number of messages transmitted by the
 // preceding request; hashing that slice separately makes an in-place rewrite

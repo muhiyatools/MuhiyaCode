@@ -9,7 +9,7 @@ import (
 )
 
 func TestMiniMaxReplayPreservesReasoningDetailsIncludingToolTurns(t *testing.T) {
-	details := json.RawMessage(`[{"type":"text","text":"inspect first"}]`)
+	details := json.RawMessage(`[{"type":"thinking","text":"inspect first","signature":"sig-123"}]`)
 	reasoning := "fallback reasoning"
 	messages := []contract.Message{
 		{Role: contract.RoleAssistant, Content: "", ToolCalls: []contract.ToolCall{contract.NewToolCall("call-1", "read_file", `{"path":"a.go"}`)}, ReasoningContent: &reasoning, ReasoningDetails: details},
@@ -21,6 +21,18 @@ func TestMiniMaxReplayPreservesReasoningDetailsIncludingToolTurns(t *testing.T) 
 	}
 	if len(replayed[1].ReasoningDetails) != 0 || replayed[1].ReasoningContent != nil {
 		t.Fatalf("reasoning leaked to tool result: %+v", replayed[1])
+	}
+}
+
+func TestMiniMaxReplayPreservesVisibleContentThinkingSignatureAndToolUse(t *testing.T) {
+	details := json.RawMessage(`[{"type":"thinking","text":"bounded thought","signature":"signed"}]`)
+	messages := []contract.Message{
+		{Role: contract.RoleAssistant, Content: "I will inspect.", ReasoningDetails: details, ToolCalls: []contract.ToolCall{contract.NewToolCall("r1", "read_file", `{"path":"a.go"}`)}},
+		{Role: contract.RoleTool, ToolCallID: "r1", Content: "package a"},
+	}
+	replayed := replayMessages(messages, ResolveModelProfile("minimax-m3"), contract.ReasoningLow)
+	if replayed[0].Content != messages[0].Content || string(replayed[0].ReasoningDetails) != string(details) || len(replayed[0].ToolCalls) != 1 || replayed[1].ToolCallID != "r1" {
+		t.Fatalf("MiniMax active tool chain changed: %+v", replayed)
 	}
 }
 

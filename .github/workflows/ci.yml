@@ -23,6 +23,10 @@ jobs:
         run: make check-fmt
       - name: Vet
         run: go vet ./...
+      - name: Static analysis
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.7.0 ./...
+      - name: Vulnerability scan
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
       - name: Race tests
         env:
           CGO_ENABLED: "1"

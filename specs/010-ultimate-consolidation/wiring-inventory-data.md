@@ -159,6 +159,7 @@ was removed in this feature (WI-5) — see the "removed" row below and
 | Settings Field | provider.advisor | Session-start model advisor: auto (default) or off | internal/state/config.go (SetConfig advisor) | wired |
 | Settings Field | permissionMode | normal (confirm mutations) or auto-accept | internal/tui/keys_test.go:101 (TestShiftTabCyclesPermissionMode) + slash_alias_test.go:44 (TestModeAliasMatchesCanonicalCommand) | wired |
 | Settings Field | effort | Reasoning effort: low/medium/high/max | internal/tui/slash_alias_test.go:22 (TestEffortAliasMatchesCanonicalCommand) + internal/state/config_defaults_test.go:10 (TestDefaultEffortIsHigh) | wired |
+| Settings Field | tokenEconomyMode | Token-economy rollout mode: off/observe/balanced/aggressive; behavior changes remain mode-gated | internal/state/config_defaults_test.go + internal/orchestrator/request_assembly_test.go (byte equality and adaptive-mode tests) | wired |
 | Settings Field | reviewGating | Review-gate mode (feature 011): off/conservative/default; explicit review requests always run | internal/orchestrator/reviewgate_test.go:202 (TestNormalizeReviewGating) + reviewgate_test.go:26 (TestDecideHardRules) | wired |
 | Settings Field | contextLinking | Subagent context-linking mode (feature 012 FR-017) | — | removed |
 | Settings Field | theme | The color theme name | internal/tui/theme_test.go:38 (TestThemePaletteIsSingleSource) | wired |
@@ -195,7 +196,7 @@ TUI itself never reads.
 |---|---|---|---|---|
 | AgentEvent Field | Handoff | The rendered subagent launch contract, for delegation-benchmark auditing only (the TUI does not render it) | benchmarks/delegationbench/audit.go:133 (handoffCompliant(event.Handoff)) + specs/010-ultimate-consolidation/removal-ledger.md RL-021 | wired |
 
-## Callbacks members (15)
+## Callbacks members (16)
 
 `contract.Callbacks`; producers in `internal/orchestrator`, consumed by
 `internal/tui/bridge.go`'s `Callbacks()` (interactive) or
@@ -208,6 +209,7 @@ conditional surfaces to name).
 | Callbacks Member | Status | One-line status text (e.g. "Thinking...") | internal/orchestrator/turnloop.go:413 (producer) + internal/command/root.go's newConsoleCallbacks Status (--simple interface) | wired |
 | Callbacks Member | Notice | A transient user-facing announcement that outlives the next status update | internal/orchestrator/pipeline.go:90,109,145,318 (producer) + internal/tui/bridge.go's Notice->noticeMsg | wired |
 | Callbacks Member | Token | Streamed assistant answer tokens | internal/tui/bridge_test.go:7 (TestBridgeCoalescesAssistantChunks) | wired |
+| Callbacks Member | StreamReset | Discard the visible draft from a failed streaming attempt before its replacement retry starts | internal/gateway/resilience_test.go (TestDiedStreamIsRetriedOnce) + internal/tui/bridge.go resetStream | wired |
 | Callbacks Member | ReasoningToken | Streamed reasoning/thinking tokens | internal/tui/bridge_test.go:7 (TestBridgeCoalescesAssistantChunks, cb.ReasoningToken) | wired |
 | Callbacks Member | ToolStart | A tool call is starting (name + raw arguments) | internal/orchestrator/dispatch.go:100,182 (producer) + internal/tui/bridge_test.go:56 (TestBridgeFlushClearsBuffers) | wired |
 | Callbacks Member | ToolOutput | Streaming tool/shell output chunks | internal/tui/bridge_test.go:28 (TestBridgeCoalescesToolOutputPerTool) | wired |
@@ -226,7 +228,7 @@ conditional surfaces to name).
 - Row count: 92 (91 `wired` + 1 `removed`), matching WI-1's enumerated
   surface exactly (12 registry + 6 synthetic + 1 conditional + 1 dynamic
   tools = 20; 17 canonical + 4 alias slash commands = 21; 13 keybindings; 16
-  Settings fields; 6 AgentEvent kinds; 1 AgentEvent field; 15 Callbacks
+  Settings fields; 6 AgentEvent kinds; 1 AgentEvent field; 16 Callbacks
   members).
 - Zero unresolved entries: every row has a non-empty Verified-by and a
   Status of exactly `wired` or `removed` (WI-2), checked mechanically by

@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/evidence"
 	"github.com/muhiya/muhiyacode/internal/gateway"
 	"github.com/muhiya/muhiyacode/internal/mcpclient"
 	"github.com/muhiya/muhiyacode/internal/orchestrator"
@@ -30,6 +32,7 @@ type ApplicationOptions struct {
 	DisableMCP       bool
 	MCPDeadline      time.Duration
 	RawUsageObserver gateway.RawUsageObserver
+	TokenEconomyMode string
 }
 
 // Application is the composition root for one CLI process. Packages below it
@@ -81,6 +84,9 @@ func openApplicationCore(options ApplicationOptions) (*Application, error) {
 	settings, err := state.LoadSettings(paths)
 	if err != nil {
 		return nil, err
+	}
+	if options.TokenEconomyMode != "" {
+		settings.TokenEconomyMode = options.TokenEconomyMode
 	}
 	secrets, err := state.LoadSecrets(paths)
 	if err != nil {
@@ -432,6 +438,34 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 
 	active, _ := state.ActiveModel(*a.settings)
 	profile := gateway.ResolveModelProfile(active.ID + " " + active.Name)
+	var taskEpochs orchestrator.TaskEpochLedgerSnapshot
+	epochFound, epochErr := a.sessions.ReadTaskEpochLedger(session.ID, &taskEpochs)
+	if epochErr != nil {
+		return runtimeBundle{}, fmt.Errorf("load task epochs: %w", epochErr)
+	}
+	if !epochFound && len(historySnapshot.Messages) > 0 {
+		legacy := orchestrator.LegacyTaskEpoch(session.ID, active.ID, session.ID+":main")
+		taskEpochs = orchestrator.TaskEpochLedgerSnapshot{Version: 1, ActiveID: legacy.ID, Records: []orchestrator.TaskEpoch{legacy}}
+	}
+	if historySnapshot.TaskEpochID != "" {
+		for _, epoch := range taskEpochs.Records {
+			if epoch.ID == historySnapshot.TaskEpochID {
+				taskEpochs.ActiveID = epoch.ID
+				break
+			}
+		}
+	}
+	rawCapsules, capsuleErr := a.sessions.ReadCapsules(session.ID)
+	if capsuleErr != nil {
+		return runtimeBundle{}, fmt.Errorf("load task capsules: %w", capsuleErr)
+	}
+	capsules := make([]orchestrator.TaskCapsule, 0, len(rawCapsules))
+	for _, raw := range rawCapsules {
+		var capsule orchestrator.TaskCapsule
+		if json.Unmarshal(raw, &capsule) == nil {
+			capsules = append(capsules, capsule)
+		}
+	}
 	shell, _ := workspace.ChooseShell(a.settings.Shell.Preferred)
 	// 005 US3: compose (new session) or restore (resume) the project-context boot
 	// snapshot BEFORE NewEngine, which sends no provider request — so the boot
@@ -439,6 +473,16 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	// RenderedBootContext is reused verbatim; it is never recompiled from live
 	// workspace state, or the cached prefix (SystemHash) would diverge mid-session.
 	workspaceKey, _ := workspace.WorkspaceKey(session.WorkspacePath)
+	artifactSettings := state.LoadArtifactSettings(filepath.Join(sessionDir, "artifact-settings.json"))
+	artifactStore, artifactErr := evidence.NewStore(filepath.Join(sessionDir, "artifacts"), artifactSettings.PerSessionQuota)
+	if artifactErr != nil {
+		return runtimeBundle{}, fmt.Errorf("initialize evidence store: %w", artifactErr)
+	}
+	artifactFetcher, artifactErr := orchestrator.NewArtifactFetcher(artifactStore, session.ID, workspaceKey)
+	if artifactErr != nil {
+		return runtimeBundle{}, fmt.Errorf("initialize artifact broker: %w", artifactErr)
+	}
+	registry.Add(artifactFetcher)
 	// Experience Overhaul B1: project memory lives in the per-project store, not the
 	// repo. One-time copy of a legacy workspace MEMORY.md into the store (copy-only —
 	// the original is never touched), and the user-level ~/.muhiya/MUHIYA.md that
@@ -495,16 +539,18 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		priorPrefixShape = &shape
 	}
 	engine, err := orchestrator.NewEngine(orchestrator.EngineConfig{
-		Settings:   a.settings,
-		Secrets:    a.secrets,
-		Session:    session,
-		MemoryDir:  memoryDir,
-		Provider:   a.provider,
-		Registry:   registry,
-		History:    history,
-		Inspection: inspection,
-		Knowledge:  knowledge,
-		Callbacks:  a.callbacks,
+		Settings:      a.settings,
+		Secrets:       a.secrets,
+		Session:       session,
+		MemoryDir:     memoryDir,
+		Provider:      a.provider,
+		Registry:      registry,
+		History:       history,
+		Inspection:    inspection,
+		Knowledge:     knowledge,
+		EvidenceStore: artifactStore,
+		WorkspaceID:   workspaceKey,
+		Callbacks:     a.callbacks,
 		Persistence: orchestrator.Persistence{
 			AddEvent: func(ctx context.Context, role, kind, content, target string) error {
 				return a.db.AddEvent(ctx, session.ID, role, kind, content, target)
@@ -523,6 +569,12 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			},
 			WritePrefixShape: func(_ context.Context, snapshot contract.PrefixShapeSnapshot) error {
 				return a.sessions.WritePrefixShape(session.ID, snapshot)
+			},
+			WriteTaskEpochs: func(_ context.Context, snapshot orchestrator.TaskEpochLedgerSnapshot) error {
+				return a.sessions.WriteTaskEpochLedger(session.ID, snapshot)
+			},
+			WriteCapsule: func(_ context.Context, capsule orchestrator.TaskCapsule) error {
+				return a.sessions.WriteCapsule(session.ID, capsule.ID, capsule)
 			},
 		},
 		Prompt: orchestrator.PromptContext{
@@ -554,6 +606,8 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		},
 		InitialUsageRecords:  usageRecords,
 		InitialInvalidations: invalidationEvents,
+		InitialTaskEpochs:    taskEpochs,
+		InitialCapsules:      capsules,
 		BoundaryTools: func() (orchestrator.BoundaryToolChange, bool, error) {
 			if manager == nil {
 				return orchestrator.BoundaryToolChange{}, false, nil

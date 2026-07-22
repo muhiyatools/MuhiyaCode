@@ -96,29 +96,39 @@ func (e *Engine) emitUpstreamNoticeIfPending(ctx context.Context) {
 // notice can name the reason. History is NOT compared here: it legitimately grows,
 // and its replay determinism is guarded separately by the per-turn lastShape guard.
 // Runs at most once per engine (priorSessionShape is consumed).
-func (e *Engine) checkResumeDrift(ctx context.Context, shape PrefixShape) {
+func (e *Engine) checkResumeDrift(ctx context.Context, shape PrefixShape) error {
 	if e.priorSessionShape == nil {
-		return
+		return nil
 	}
 	prior := *e.priorSessionShape
 	e.priorSessionShape = nil
 	var changed []string
 	if prior.SystemHash != shape.SystemHash {
 		changed = append(changed, "the system prompt")
-		_ = e.recordInvalidation(ctx, contract.InvalidationEvent{
+		if err := e.recordInvalidation(ctx, contract.InvalidationEvent{
 			Cause: contract.InvalidationPromptRebuild, Trigger: contract.InvalidationConfigChange,
 			Scope: "system prompt changed since the last session (workspace skills, model, or project context)", RequestSeq: e.nextRequestSeq(),
-		})
+		}); err != nil {
+			return err
+		}
 	}
 	if prior.ToolsHash != shape.ToolsHash {
 		changed = append(changed, "the tool set")
-		_ = e.recordInvalidation(ctx, contract.InvalidationEvent{
+		if err := e.recordInvalidation(ctx, contract.InvalidationEvent{
 			Cause: contract.InvalidationToolsetChange, Trigger: contract.InvalidationBoundary,
 			Scope: "tool set changed since the last session (MCP servers or installed skills)", RequestSeq: e.nextRequestSeq(),
-		})
+		}); err != nil {
+			return err
+		}
 	}
-	if prior.ModelID != shape.ModelID && len(changed) == 0 {
+	if prior.ModelID != shape.ModelID {
 		changed = append(changed, "the model")
+		if err := e.recordInvalidation(ctx, contract.InvalidationEvent{
+			Cause: contract.InvalidationModelSwitch, Trigger: contract.InvalidationConfigChange,
+			Scope: "model changed since the last session", RequestSeq: e.nextRequestSeq(),
+		}); err != nil {
+			return err
+		}
 	}
 	e.taskMu.Lock()
 	if len(changed) > 0 {
@@ -127,6 +137,7 @@ func (e *Engine) checkResumeDrift(ctx context.Context, shape PrefixShape) {
 		e.lastResumeCause = "the provider cache expired while the session was idle"
 	}
 	e.taskMu.Unlock()
+	return nil
 }
 
 // lastRequestTime returns the timestamp of the newest usage record (the last
@@ -188,16 +199,19 @@ func (e *Engine) staleResumePruneIfNeeded(ctx context.Context, profile EffortPro
 // compare against. It re-arms whenever the model switches (SwitchModel resets the
 // flag) or the routing layer moves us to a different upstream, so the sidecar
 // always reflects the shape a resume would actually be resuming onto.
-func (e *Engine) persistPrefixShapeOnce(ctx context.Context, shape PrefixShape) {
+func (e *Engine) persistPrefixShapeOnce(ctx context.Context, shape PrefixShape) error {
 	if e.prefixShapeSaved || e.persistence.WritePrefixShape == nil {
-		return
+		return nil
 	}
-	e.prefixShapeSaved = true
-	_ = e.persistence.WritePrefixShape(ctx, contract.PrefixShapeSnapshot{
+	if err := e.persistence.WritePrefixShape(ctx, contract.PrefixShapeSnapshot{
 		Version:    contract.PrefixShapeSnapshotVersion,
 		SystemHash: shape.SystemHash,
 		ToolsHash:  shape.ToolsHash,
 		ModelID:    shape.ModelID,
 		Upstream:   e.upstreamPin(),
-	})
+	}); err != nil {
+		return fmt.Errorf("persist prefix shape: %w", err)
+	}
+	e.prefixShapeSaved = true
+	return nil
 }

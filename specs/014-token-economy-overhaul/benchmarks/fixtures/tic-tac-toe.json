@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "suite": "feature-014-tic-tac-toe",
+  "description": "Frozen greenfield reproduction for the user-supplied token-consumption scenario.",
+  "tasks": [
+    {
+      "id": "ttt-greenfield-vanilla",
+      "category": "small-ui",
+      "task_class": "small",
+      "risk": "low",
+      "prompt": "Build a polished, responsive tic-tac-toe game in this empty workspace using plain HTML, CSS, and JavaScript. It must support alternating legal turns, prevent occupied-cell reuse, detect every win line and draws, show the result accessibly, and provide a reset control. Do not add a package manager, framework, server, or unrelated files.",
+      "workspace": {
+        "reset": { "strategy": "empty" },
+        "allowed_globs": ["index.html", "style.css", "styles.css", "script.js", "app.js"],
+        "forbidden_globs": ["package.json", "node_modules/**", "vendor/**"]
+      },
+      "rubric": {
+        "required": true,
+        "checks": [
+          { "id": "entrypoint", "kind": "file_exists_any", "paths": ["index.html"] },
+          { "id": "nine-cells", "kind": "html_selector_count", "path": "index.html", "selector": "[data-cell], .cell, button", "minimum": 9 },
+          { "id": "alternating-turns", "kind": "source_regex", "paths": ["script.js", "app.js", "index.html"], "pattern": "(?i)(currentPlayer|currentTurn|player).*([XO]|x|o)" },
+          { "id": "occupied-guard", "kind": "source_regex", "paths": ["script.js", "app.js", "index.html"], "pattern": "(?i)(textContent|value|dataset).*return|return.*(textContent|value|dataset)|occupied|disabled" },
+          { "id": "all-win-lines", "kind": "source_regex", "paths": ["script.js", "app.js", "index.html"], "pattern": "0\\s*,\\s*1\\s*,\\s*2[\\s\\S]*6\\s*,\\s*7\\s*,\\s*8[\\s\\S]*0\\s*,\\s*4\\s*,\\s*8[\\s\\S]*2\\s*,\\s*4\\s*,\\s*6" },
+          { "id": "draw", "kind": "source_regex", "paths": ["script.js", "app.js", "index.html"], "pattern": "(?i)draw|tie" },
+          { "id": "reset", "kind": "source_regex", "paths": ["script.js", "app.js", "index.html"], "pattern": "(?i)reset|new game|play again" },
+          { "id": "accessible-status", "kind": "source_regex", "paths": ["index.html"], "pattern": "(?i)aria-live|role=.?status|role=.?alert" },
+          { "id": "no-unrequested-runtime", "kind": "glob_absent", "globs": ["package.json", "node_modules/**", "Dockerfile", "vite.config.*"] }
+        ]
+      },
+      "economy_limits": {
+        "main_requests": 6,
+        "provider_input_tokens": 120000,
+        "provider_output_tokens": 6000,
+        "credits": 2.0,
+        "replay_amplification": 6.0
+      }
+    },
+    {
+      "id": "ttt-existing-page",
+      "category": "small-ui",
+      "task_class": "small",
+      "risk": "low",
+      "prompt": "Add a playable tic-tac-toe board to the existing page while preserving its current header and theme. Use the existing files and dependencies only. Include legal alternating turns, win/draw detection, an accessible result, and reset.",
+      "workspace": {
+        "reset": { "strategy": "copy", "source": "workspaces/tic-tac-toe-existing" },
+        "must_preserve": ["header.site-header", "meta[name=theme-color]"]
+      },
+      "rubric": {
+        "required": true,
+        "checks": [
+          { "id": "preserve-header", "kind": "html_selector_count", "path": "index.html", "selector": "header.site-header", "minimum": 1 },
+          { "id": "board", "kind": "html_selector_count", "path": "index.html", "selector": "[data-cell], .cell", "minimum": 9 },
+          { "id": "behavior", "kind": "source_regex", "paths": ["script.js", "app.js", "index.html"], "pattern": "(?i)(win|winner)[\\s\\S]*(draw|tie)[\\s\\S]*(reset|new game|play again)" },
+          { "id": "no-new-runtime", "kind": "glob_absent", "globs": ["node_modules/**", "Dockerfile", "vite.config.*"] }
+        ]
+      },
+      "economy_limits": {
+        "main_requests": 6,
+        "provider_input_tokens": 120000,
+        "provider_output_tokens": 6000,
+        "replay_amplification": 6.0
+      }
+    }
+  ]
+}

@@ -13,33 +13,24 @@ import (
 	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
-// The task advisor. When a prompt arrives, a cheap utility call decides which
-// model should run THIS task; that model is then fixed until the task ends.
-// Every request inside a task therefore goes to one model, which is what makes
-// the provider's implicit prefix cache work at all.
-//
-// Its expected answer is "keep". A switch is a real cost — the new model has
-// never seen this conversation, so the whole prefix is re-billed as uncached
-// input on its first request — and the advisor is told that cost in tokens
-// before it answers (see switchcost.go). Two hard gates back that up: the
-// conversation must FIT the candidate's window, and the cold start must be
-// affordable. Keeping a merely-adequate warm model beats a marginally better
-// cold one on nearly every task.
+// The model selector runs on an isolated routing stream before the first main
+// request. Its choice is fixed for the session, keeping the main request chain
+// on one model and preserving context and provider prefix-cache identity.
 
 // advisorMaxTokens keeps the aux call trivially cheap; the answer is one small
 // JSON object.
 const advisorMaxTokens = 200
 
-// advisorDecision is the utility model's answer: keep the current model, or
-// name the one this task should run on.
+// advisorDecision is the selector's answer: keep the default, or name the model
+// this session should use.
 type advisorDecision struct {
 	Keep  bool   `json:"keep"`
 	Model string `json:"model"`
 	Why   string `json:"why"`
 }
 
-// utilityModelID resolves the cheap model used for auxiliary calls (the task
-// advisor, onboarding questions). These are one-shot, low-token, and off the
+// utilityModelID resolves the cheap model used for auxiliary calls (the session
+// selector and onboarding questions). These are one-shot, low-token, and off the
 // session's cached stream, so the cheapest capable model is the right one.
 //
 // Preference order: a Flash-class model, then the smallest-window catalog entry
@@ -66,22 +57,18 @@ func (e *Engine) utilityModelID() string {
 	return e.settings.Provider.ActiveModelID
 }
 
-// shouldRunAdvisor reports whether the advisor may choose a model for the task
-// about to start. It runs at EVERY task boundary — the only moment a switch is
-// safe, because no request has been made yet — and the model it picks is then
-// fixed for that whole task.
-//
-// It used to run only on a session's first task, freezing the pairing forever,
-// because a mid-session switch cold-started the prefix AND broke the execution
-// chain's continuation. The execution chain is gone with the subagents, and the
-// remaining cost (a one-time cold start on the new model) is a price the
-// advisor is explicitly told to weigh rather than a reason to forbid the choice.
+// shouldRunAdvisor reports whether the selector may choose the session model.
+// Auxiliary selector/onboarding requests do not establish the main chain; once
+// one main request exists, the choice is immutable.
 func (e *Engine) shouldRunAdvisor() bool {
 	if strings.EqualFold(strings.TrimSpace(e.settings.Provider.Advisor), "off") {
 		return false
 	}
 	// A user-pinned model is never overridden.
 	if e.settings.Provider.RolesPinned {
+		return false
+	}
+	if e.UsageAggregate().MainRequests > 0 {
 		return false
 	}
 	// Nothing to choose between.
@@ -123,7 +110,7 @@ func advisorCatalog(models []contract.Model) string {
 // it runs before RolesPinned and before any cached bytes exist. Silent when the
 // catalog is fine, which is the overwhelmingly common case.
 func (e *Engine) reconcileCatalog() {
-	if len(e.settings.Provider.Models) == 0 || e.UsageAggregate().Requests > 0 {
+	if len(e.settings.Provider.Models) == 0 || e.UsageAggregate().MainRequests > 0 {
 		return // nothing to check against, or too late to change anything
 	}
 	known := make(map[string]bool, len(e.settings.Provider.Models))
@@ -168,8 +155,8 @@ func (e *Engine) substituteFor() contract.Model {
 	return models[0]
 }
 
-// runTaskAdvisor consults the utility model at a task boundary and applies its
-// choice for that task. Every failure mode — disabled, pinned, no catalog,
+// runTaskAdvisor consults the utility model before the first main request and
+// applies its session-wide choice. Every failure mode — disabled, pinned, no catalog,
 // timeout, malformed answer, unknown id, a window that will not fit, an apply
 // error — keeps the current model silently. The advisor must never be a point
 // of failure: a task that runs is worth more than a marginally better model.
@@ -177,28 +164,31 @@ func (e *Engine) runTaskAdvisor(ctx context.Context, prompt string, workspaceSig
 	if !e.shouldRunAdvisor() {
 		return
 	}
+	assessment := Classify(prompt, "")
+	admission := EvaluateAuxiliaryAdmission(AuxiliaryAdmissionInput{
+		Kind: AuxiliaryModelAdvisor, MaterialDecision: len(e.settings.Provider.Models) > 1,
+		ExpectedTokenCost: 600, ExpectedMainSavings: 1_200,
+		RemainingRequests: e.remainingAuxiliaryRequests(assessment, contract.ExecutionPhaseOrient), Isolated: true,
+	})
+	if !admission.Allowed {
+		return
+	}
 	modelID := e.utilityModelID()
 	if strings.TrimSpace(modelID) == "" {
 		return
 	}
 	current := e.settings.Provider.ActiveModelID
-	// Tell the advisor what a switch would COST, not just what is available.
-	// Without this it optimizes capability in a vacuum and proposes moves that
-	// re-send an entire conversation uncached to win a marginally better model.
-	coldStart := e.inUseContextTokens()
-	warm := "none yet"
-	if models := e.warmModelsThisSession(); len(models) > 0 {
-		warm = strings.Join(models, ", ")
-	}
-	user := fmt.Sprintf("CURRENT\n%s\n\nAVAILABLE MODELS\n%s\n\nSWITCH COST\nMoving to a model this session has not used re-sends about %s tokens of conversation uncached. Already warm this session: %s.\n\nWORKSPACE\n%s\n\nTASK\n%s",
-		current, advisorCatalog(e.settings.Provider.Models), contract.FullTokens(coldStart), warm, workspaceSignal, contract.TruncateEllipsis(prompt, 2000))
+	// The selector is isolated from the main session route. It sees only bounded
+	// first-task/workspace signals, never accumulated conversation history.
+	user := fmt.Sprintf("CURRENT DEFAULT\n%s\n\nAVAILABLE MODELS\n%s\n\nCACHE CONTRACT\nChoose once for the entire new session. The choice cannot change after the first main request.\n\nWORKSPACE\n%s\n\nFIRST TASK\n%s",
+		current, advisorCatalog(e.settings.Provider.Models), workspaceSignal, contract.TruncateEllipsis(prompt, 2000))
 
 	callCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	started := time.Now()
 	// A deliberately cold, one-shot isolated stream on its own pin — the same
 	// shape as the onboarding call, so it coexists with the prefix-shape guard.
 	response, err := e.provider.Chat(callCtx, contract.ChatRequest{
-		SessionID: e.session.ID + ":sub:advisor", ModelID: modelID,
+		SessionID: "muhiya:model-selector", ModelID: modelID,
 		Reasoning: contract.ReasoningLow, MaxTokens: advisorMaxTokens,
 		Messages: []contract.Message{
 			{Role: contract.RoleSystem, Content: instructions.AdvisorSystemBody},
@@ -207,7 +197,10 @@ func (e *Engine) runTaskAdvisor(ctx context.Context, prompt string, workspaceSig
 	})
 	cancel()
 	_ = e.recordUsageAndEmit(func() error {
-		return e.recordAuxUsage(ctx, modelID, ":sub:advisor", response.Usage, elapsedMS(started))
+		return e.recordAttributedAuxUsage(ctx, auxUsageObservation{
+			model: modelID, pin: ":router:model-selector", usage: response.Usage, durationMS: elapsedMS(started),
+			phase: contract.ExecutionPhaseOrient, decisionCode: admission.Code,
+		})
 	})
 	if err != nil {
 		e.recordHarnessEvent(ctx, contract.HarnessRecovery, "advisor-unavailable", "keeping the current model")
@@ -246,9 +239,9 @@ func (e *Engine) runTaskAdvisor(ctx context.Context, prompt string, workspaceSig
 	}
 	reason := strings.TrimSpace(decision.Why)
 	if reason == "" {
-		reason = "better fit for this task"
+		reason = "best fit for the session"
 	}
-	e.callbacks.EmitNotice("Switched to " + e.catalogModelName(chosen) + " for this task — " + reason)
+	e.callbacks.EmitNotice("Selected " + e.catalogModelName(chosen) + " for this session — " + reason)
 }
 
 // historyFitsModel and the switch-cost helpers live in switchcost.go.

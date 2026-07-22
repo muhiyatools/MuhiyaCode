@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -31,9 +32,11 @@ type checkpointFile struct {
 }
 
 type snapshotFile struct {
-	Path    string `json:"path"`
-	Existed bool   `json:"existed"`
-	Content string `json:"content"`
+	Path          string `json:"path"`
+	Existed       bool   `json:"existed"`
+	Content       string `json:"content,omitempty"` // legacy v1 text snapshots
+	ContentBase64 string `json:"contentBase64,omitempty"`
+	Mode          uint32 `json:"mode,omitempty"`
 }
 
 func (s *CheckpointStore) Create(ctx context.Context, description string, files []string) (string, error) {
@@ -67,7 +70,11 @@ func (s *CheckpointStore) Create(ctx context.Context, description string, files 
 		if int64(len(data)) > MaxSnapshotBytes {
 			continue
 		}
-		checkpoint.Files = append(checkpoint.Files, snapshotFile{Path: canonical, Existed: true, Content: string(data)})
+		info, statErr := os.Stat(canonical)
+		if statErr != nil {
+			return "", statErr
+		}
+		checkpoint.Files = append(checkpoint.Files, snapshotFile{Path: canonical, Existed: true, ContentBase64: base64.StdEncoding.EncodeToString(data), Mode: uint32(info.Mode().Perm())})
 	}
 	dir := filepath.Join(s.SessionDir, "checkpoints")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -114,7 +121,19 @@ func (s *CheckpointStore) RestoreLatest(ctx context.Context) (string, error) {
 			if err := os.MkdirAll(filepath.Dir(snapshot.Path), 0o755); err != nil {
 				return "", err
 			}
-			if err := writeAtomic(snapshot.Path, []byte(snapshot.Content), 0o644); err != nil {
+			content := []byte(snapshot.Content)
+			if snapshot.ContentBase64 != "" {
+				decoded, decodeErr := base64.StdEncoding.DecodeString(snapshot.ContentBase64)
+				if decodeErr != nil {
+					return "", fmt.Errorf("decode checkpoint content for %s: %w", snapshot.Path, decodeErr)
+				}
+				content = decoded
+			}
+			mode := os.FileMode(snapshot.Mode)
+			if mode == 0 {
+				mode = 0o644
+			}
+			if err := writeAtomic(snapshot.Path, content, mode); err != nil {
 				return "", err
 			}
 		} else if err := os.Remove(snapshot.Path); err != nil && !os.IsNotExist(err) {

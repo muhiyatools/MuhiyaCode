@@ -7,6 +7,13 @@ import (
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
+func NewPrefixShape(system string, tools []contract.ToolDefinition, rewriteVersion int, modelID string) (PrefixShape, error) {
+	return NewWirePrefixShape(contract.ChatRequest{
+		Messages: []contract.Message{{Role: contract.RoleSystem, Content: system}},
+		Tools:    tools, ToolChoice: "auto", ModelID: modelID,
+	}, 1, rewriteVersion)
+}
+
 func TestPrefixShapeDeterministicAndRegionAware(t *testing.T) {
 	tools := []contract.ToolDefinition{{Type: "function", Function: contract.FunctionDefinition{Name: "one", Parameters: map[string]any{"type": "object", "properties": map[string]any{"z": map[string]any{"type": "string"}, "a": map[string]any{"type": "integer"}}}}}}
 	first, err := NewPrefixShape("system", tools, 1, "model")
@@ -116,5 +123,33 @@ func TestPrefixShapeCanonicalMapOrderIsStable(t *testing.T) {
 	}
 	if reasons := CompareShape(left, right); len(reasons) != 0 {
 		t.Fatalf("map insertion order changed shape: %v", reasons)
+	}
+}
+
+func TestTaskEpochChangesOnlyDeclaredMessageRegion(t *testing.T) {
+	tools := []contract.ToolDefinition{{Type: "function", Function: contract.FunctionDefinition{Name: "read", Parameters: map[string]any{"type": "object"}}}}
+	base := contract.ChatRequest{ModelID: "session-model", ToolChoice: "auto", Tools: tools,
+		Messages: []contract.Message{{Role: contract.RoleSystem, Content: "stable system"}, {Role: contract.RoleUser, Content: "old task"}}}
+	before, err := NewWirePrefixShape(base, len(base.Messages), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterRequest := base
+	afterRequest.Messages = []contract.Message{{Role: contract.RoleSystem, Content: "stable system"},
+		{Role: contract.RoleUser, Content: "[relevant prior task capsules]\n[]"},
+		{Role: contract.RoleUser, Content: "new task"}}
+	after, err := NewWirePrefixShape(afterRequest, 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.SystemHash != after.SystemHash || before.ToolsHash != after.ToolsHash || before.ModelID != after.ModelID {
+		t.Fatalf("epoch changed stable identity: before=%+v after=%+v", before, after)
+	}
+	if before.HistoryHash == after.HistoryHash {
+		t.Fatal("epoch did not change declared history region")
+	}
+	epoch := LegacyTaskEpoch("session", "session-model", "session:main")
+	if err := epoch.ValidateIdentity(after.ModelID, "session:main"); err != nil {
+		t.Fatal(err)
 	}
 }

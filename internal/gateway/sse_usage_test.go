@@ -21,6 +21,7 @@ func TestUsageParsingGoldenProviderShapes(t *testing.T) {
 			want: contract.Usage{
 				PromptTokens: 120, CompletionTokens: 11, TotalTokens: 131, CachedTokens: 100,
 				CacheReadTokens: intPointer(100), CacheMissTokens: intPointer(20),
+				UncachedInputTokens: intPointer(20), CacheUsageSchema: "deepseek.prompt_cache", CacheUsageDerivation: "direct-complementary",
 				PromptTokensAvailable: true, CompletionTokensAvailable: true,
 			},
 		},
@@ -30,6 +31,7 @@ func TestUsageParsingGoldenProviderShapes(t *testing.T) {
 			want: contract.Usage{
 				PromptTokens: 120, CompletionTokens: 11, TotalTokens: 131, CachedTokens: 100,
 				CacheReadTokens: intPointer(100), CacheMissTokens: intPointer(20), MissDerived: true,
+				UncachedInputTokens: intPointer(20), CacheUsageSchema: "openai.prompt_tokens_details", CacheUsageDerivation: "uncached=prompt-cache_read",
 				PromptTokensAvailable: true, CompletionTokensAvailable: true,
 			},
 		},
@@ -39,6 +41,7 @@ func TestUsageParsingGoldenProviderShapes(t *testing.T) {
 			want: contract.Usage{
 				PromptTokens: 100, CachedTokens: 0,
 				CacheReadTokens: intPointer(0), CacheMissTokens: intPointer(100),
+				UncachedInputTokens: intPointer(100), CacheUsageSchema: "deepseek.prompt_cache", CacheUsageDerivation: "direct-complementary",
 				PromptTokensAvailable: true, CompletionTokensAvailable: true,
 			},
 		},
@@ -48,6 +51,7 @@ func TestUsageParsingGoldenProviderShapes(t *testing.T) {
 			want: contract.Usage{
 				PromptTokens: 100, CachedTokens: 90,
 				CacheReadTokens: intPointer(90), CacheMissTokens: intPointer(7),
+				UncachedInputTokens: intPointer(7), CacheUsageSchema: "mixed.cache-members", CacheUsageDerivation: "direct-members",
 				PromptTokensAvailable: true,
 			},
 		},
@@ -57,6 +61,7 @@ func TestUsageParsingGoldenProviderShapes(t *testing.T) {
 			want: contract.Usage{
 				PromptTokens: 100, CachedTokens: 80,
 				CacheReadTokens: intPointer(80), CacheMissTokens: intPointer(20), MissDerived: true,
+				UncachedInputTokens: intPointer(20), CacheUsageSchema: "mixed.deepseek-read+derived", CacheUsageDerivation: "uncached=prompt-cache_read",
 				PromptTokensAvailable: true,
 			},
 		},
@@ -66,6 +71,7 @@ func TestUsageParsingGoldenProviderShapes(t *testing.T) {
 			want: contract.Usage{
 				PromptTokens: 100, CachedTokens: 80,
 				CacheReadTokens: intPointer(80), CacheMissTokens: intPointer(20), MissDerived: true,
+				UncachedInputTokens: intPointer(20), CacheUsageSchema: "openai.prompt_tokens_details", CacheUsageDerivation: "uncached=prompt-cache_read",
 				PromptTokensAvailable: true,
 			},
 		},

@@ -2,6 +2,7 @@ package workspace
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -18,6 +19,7 @@ type unifiedPatch struct {
 
 type patchHunk struct {
 	oldStart int
+	newStart int
 	lines    []string
 	// newFinalNewline records whether the NEW-side content this hunk produces
 	// ends with a newline. It is false only when a "\ No newline at end of file"
@@ -45,6 +47,7 @@ func (w *Workspace) ApplyPatch(ctx context.Context, text string) (PatchResult, e
 		path          string
 		before, after string
 		existed, drop bool
+		mode          os.FileMode
 	}
 	changes := make([]change, 0, len(patches))
 	for _, patch := range patches {
@@ -65,6 +68,14 @@ func (w *Workspace) ApplyPatch(ctx context.Context, text string) (PatchResult, e
 		if existed && !w.canOverwrite(target) {
 			return PatchResult{}, fmt.Errorf("%w: %s", ErrUnreadOverwrite, name)
 		}
+		mode := os.FileMode(0o644)
+		if existed {
+			info, statErr := os.Stat(target)
+			if statErr != nil {
+				return PatchResult{}, statErr
+			}
+			mode = info.Mode().Perm()
+		}
 		before := strings.ReplaceAll(string(data), "\r\n", "\n")
 		after, err := applyHunks(before, patch.hunks)
 		if err != nil {
@@ -75,7 +86,7 @@ func (w *Workspace) ApplyPatch(ctx context.Context, text string) (PatchResult, e
 		if dominantCRLF(string(data)) {
 			after = strings.ReplaceAll(after, "\n", "\r\n")
 		}
-		changes = append(changes, change{path: target, before: string(data), after: after, existed: existed, drop: patch.newName == "/dev/null"})
+		changes = append(changes, change{path: target, before: string(data), after: after, existed: existed, drop: patch.newName == "/dev/null", mode: mode})
 	}
 	paths := make([]string, len(changes))
 	for i := range changes {
@@ -85,30 +96,39 @@ func (w *Workspace) ApplyPatch(ctx context.Context, text string) (PatchResult, e
 		return PatchResult{}, err
 	}
 	var committed []change
-	rollback := func() {
+	rollback := func() error {
+		var rollbackErrors []error
 		for i := len(committed) - 1; i >= 0; i-- {
 			entry := committed[i]
 			if entry.existed {
-				_ = writeAtomic(entry.path, []byte(entry.before), 0o644)
+				if err := writeAtomic(entry.path, []byte(entry.before), entry.mode); err != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("restore %s: %w", entry.path, err))
+				}
 			} else {
-				_ = os.Remove(entry.path)
+				if err := os.Remove(entry.path); err != nil && !os.IsNotExist(err) {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("remove %s: %w", entry.path, err))
+				}
 			}
 		}
+		return errors.Join(rollbackErrors...)
+	}
+	fail := func(operationErr error) (PatchResult, error) {
+		if rollbackErr := rollback(); rollbackErr != nil {
+			return PatchResult{}, errors.Join(operationErr, fmt.Errorf("patch rollback incomplete: %w", rollbackErr))
+		}
+		return PatchResult{}, operationErr
 	}
 	for _, entry := range changes {
 		if entry.drop {
 			if err := os.Remove(entry.path); err != nil && !os.IsNotExist(err) {
-				rollback()
-				return PatchResult{}, err
+				return fail(err)
 			}
 		} else {
 			if err := os.MkdirAll(filepath.Dir(entry.path), 0o755); err != nil {
-				rollback()
-				return PatchResult{}, err
+				return fail(err)
 			}
-			if err := writeAtomic(entry.path, []byte(entry.after), 0o644); err != nil {
-				rollback()
-				return PatchResult{}, err
+			if err := writeAtomic(entry.path, []byte(entry.after), entry.mode); err != nil {
+				return fail(err)
 			}
 		}
 		committed = append(committed, entry)
@@ -117,6 +137,11 @@ func (w *Workspace) ApplyPatch(ctx context.Context, text string) (PatchResult, e
 	result := PatchResult{Files: make([]string, 0, len(changes))}
 	for _, entry := range changes {
 		result.Files = append(result.Files, relativeSlash(w.root, entry.path))
+		if entry.existed {
+			if warning := oversizeChangeWarning(int64(len(entry.before)), false); warning != "" {
+				result.Notes = append(result.Notes, warning)
+			}
+		}
 	}
 	result.Summary = fmt.Sprintf("Applied patch to %d file(s): %s.", len(result.Files), strings.Join(result.Files, ", "))
 	return result, nil
@@ -142,9 +167,10 @@ func parseUnifiedPatch(text string) ([]unifiedPatch, error) {
 				continue
 			}
 			start, _ := strconv.Atoi(match[1])
+			newStart, _ := strconv.Atoi(match[3])
 			oldRemaining := hunkLineCount(match[2])
 			newRemaining := hunkLineCount(match[4])
-			hunk := patchHunk{oldStart: start, newFinalNewline: true}
+			hunk := patchHunk{oldStart: start, newStart: newStart, newFinalNewline: true}
 			i++
 			// Consume exactly the counted body lines. Bounding by the header's line
 			// counts — not by the first "--- "/"@@ " prefix — is what lets a deleted
@@ -197,7 +223,13 @@ func parseUnifiedPatch(text string) ([]unifiedPatch, error) {
 				}
 				i++
 			}
+			if oldRemaining != 0 || newRemaining != 0 {
+				return nil, fmt.Errorf("hunk at old line %d/new line %d ended before declared counts were satisfied (old remaining %d, new remaining %d)", start, newStart, oldRemaining, newRemaining)
+			}
 			patch.hunks = append(patch.hunks, hunk)
+		}
+		if len(patch.hunks) == 0 {
+			return nil, fmt.Errorf("patch for %q contains no hunks", patch.newName)
 		}
 		result = append(result, patch)
 	}

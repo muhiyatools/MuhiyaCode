@@ -1,12 +1,17 @@
 package orchestrator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/gateway"
 )
 
 // erroringProvider always fails Chat, simulating a streamed interruption that
@@ -26,6 +31,90 @@ var errTestProvider = errTest("provider stream interrupted")
 type errTest string
 
 func (e errTest) Error() string { return string(e) }
+
+// TestTokenEconomyObservePreservesProviderRequestBytes (014/T028) exercises the
+// complete orchestrator -> gateway serializer path. Observe mode may attach
+// hashes and accounting callbacks, but it must not alter the HTTP request body.
+func TestTokenEconomyObservePreservesProviderRequestBytes(t *testing.T) {
+	var bodies [][]byte
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		body, err := io.ReadAll(request.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		bodies = append(bodies, append([]byte(nil), body...))
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":{\"prompt_tokens\":40,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	workspace := t.TempDir()
+	run := func(mode string) *Engine {
+		settings := engineSettings()
+		settings.TokenEconomyMode = mode
+		settings.Provider.BaseURL = server.URL
+		provider := gateway.NewOpenAICompatible(gateway.Config{Settings: settings, APIKey: "test", MaxRetries: 1})
+		engine, err := NewEngine(EngineConfig{
+			Settings: &settings,
+			Session:  contract.Session{ID: "economy-byte-equality", WorkspacePath: workspace},
+			Provider: provider,
+			Registry: NewRegistry(),
+			Prompt:   PromptContext{Model: "Test"},
+		})
+		if err != nil {
+			t.Fatalf("new %s engine: %v", mode, err)
+		}
+		if _, _, err := engine.Run(context.Background(), "make the smallest safe UI edit"); err != nil {
+			t.Fatalf("run %s engine: %v", mode, err)
+		}
+		return engine
+	}
+
+	off := run("off")
+	observe := run("observe")
+	if len(bodies) != 2 {
+		t.Fatalf("expected one provider request per mode, got %d", len(bodies))
+	}
+	if !bytes.Equal(bodies[0], bodies[1]) {
+		t.Fatalf("observe mode changed provider request bytes\noff:     %s\nobserve: %s", bodies[0], bodies[1])
+	}
+	if got := off.UsageRecords()[0].BudgetDecision; got != "" {
+		t.Fatalf("off mode unexpectedly recorded an active decision %q", got)
+	}
+	if got := observe.UsageRecords()[0].BudgetDecision; got != "budget.within" {
+		t.Fatalf("observe mode did not run its accounting path: decision=%q", got)
+	}
+}
+
+func TestBalancedUsesAdaptiveRequestPlanWhileObserveKeepsLegacyRequest(t *testing.T) {
+	run := func(mode string) (*Engine, *scriptedProvider) {
+		settings := engineSettings()
+		settings.TokenEconomyMode = mode
+		settings.Effort = contract.EffortMax
+		provider := &scriptedProvider{responses: []contract.ChatResponse{{Content: "done"}}}
+		engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "adaptive-" + mode, WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(), Prompt: PromptContext{Model: "Test"}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := engine.Run(context.Background(), "fix a tiny typo in a.go"); err != nil {
+			t.Fatal(err)
+		}
+		return engine, provider
+	}
+	balanced, balancedProvider := run("balanced")
+	_, observeProvider := run("observe")
+	if got := balancedProvider.requests[0]; got.Reasoning != contract.ReasoningLow || got.MaxTokens != 512 {
+		t.Fatalf("balanced request did not use adaptive plan: reasoning=%s max=%d", got.Reasoning, got.MaxTokens)
+	}
+	if got := observeProvider.requests[0]; got.Reasoning != contract.ReasoningMax || got.MaxTokens <= 512 {
+		t.Fatalf("observe changed legacy request: reasoning=%s max=%d", got.Reasoning, got.MaxTokens)
+	}
+	if decision := balanced.UsageRecords()[0].BudgetDecision; !strings.Contains(decision, "reasoning.low.selected") || !strings.Contains(decision, "output.orient.512") {
+		t.Fatalf("adaptive request plan was not attributed: %q", decision)
+	}
+}
 
 // TestProviderErrorLeavesNoPartialAssistantMessage (T045 / REV E7) documents the
 // investigation conclusion: a provider error surfaces to the caller and leaves

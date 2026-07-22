@@ -26,9 +26,21 @@ if ($GauntletOnly) {
 }
 
 Write-Host "==> [1/5] gofmt..." -ForegroundColor Cyan
-$unformatted = (gofmt -l internal cmd benchmarks 2>$null)
-if (-not [string]::IsNullOrWhiteSpace($unformatted)) {
-  Write-Host $unformatted
+$formatCandidates = (gofmt -l internal cmd benchmarks 2>$null)
+$unformatted = @()
+foreach ($path in ($formatCandidates -split "`n")) {
+  $path = $path.Trim()
+  if ([string]::IsNullOrWhiteSpace($path)) { continue }
+  # gofmt reports every CRLF file on Windows because its output is LF. Compare
+  # removed/added text from the diff so line-ending-only changes do not make the
+  # repository's documented Windows gate impossible to pass.
+  $diff = (gofmt -d $path 2>$null)
+  $removed = @($diff | Where-Object { $_.StartsWith('-') -and -not $_.StartsWith('---') } | ForEach-Object { $_.Substring(1) })
+  $added = @($diff | Where-Object { $_.StartsWith('+') -and -not $_.StartsWith('+++') } | ForEach-Object { $_.Substring(1) })
+  if (($removed -join "`n") -ne ($added -join "`n")) { $unformatted += $path }
+}
+if ($unformatted.Count -gt 0) {
+  $unformatted | ForEach-Object { Write-Host $_ }
   Fail "gofmt: files above are not formatted. Run: gofmt -w <files>"
 }
 
@@ -57,7 +69,7 @@ $allowed = @(
   'workspace[\\/]permissions\.go.*unreachable func: MemoryTrustStore\.IsTrusted',
   'workspace[\\/]permissions\.go.*unreachable func: MemoryTrustStore\.Trust'
 )
-$dead = (go run golang.org/x/tools/cmd/deadcode@latest ./... 2>$null)
+$dead = (go run golang.org/x/tools/cmd/deadcode@v0.47.0 ./... 2>$null)
 $violations = @()
 foreach ($line in ($dead -split "`n")) {
   $t = $line.Trim()

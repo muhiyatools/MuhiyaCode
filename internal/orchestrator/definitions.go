@@ -1,6 +1,8 @@
 package orchestrator
 
 import (
+	"strings"
+
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/instructions"
 )
@@ -11,7 +13,41 @@ import (
 // at execution time from the liveness guards, never by adding or removing
 // schemas.
 func (e *Engine) sessionDefinitions() []contract.ToolDefinition {
-	definitions := e.registry.BaseDefinitions(nil)
+	mode := strings.ToLower(strings.TrimSpace(e.settings.TokenEconomyMode))
+	if mode != "balanced" && mode != "aggressive" {
+		return e.fullSessionDefinitions()
+	}
+	full := e.brokerableDefinitions()
+	core := map[string]bool{
+		"inspect_workspace": true, "edit_file": true, "write_file": true,
+		"apply_patch": true, "run_shell": true, "ask_user": true,
+		"fetch_artifact": true,
+	}
+	definitions := make([]contract.ToolDefinition, 0, len(core)+2)
+	for _, item := range full {
+		if core[item.Function.Name] {
+			definitions = append(definitions, item)
+		}
+	}
+	definitions = append(definitions, discoverToolsDefinition(), invokeToolDefinition())
+	return definitions
+}
+
+func (e *Engine) fullSessionDefinitions() []contract.ToolDefinition {
+	definitions := make([]contract.ToolDefinition, 0)
+	for _, item := range e.registry.BaseDefinitions(nil) {
+		if item.Function.Name != "inspect_workspace" {
+			definitions = append(definitions, item)
+		}
+	}
+	return e.appendSyntheticDefinitions(definitions)
+}
+
+func (e *Engine) brokerableDefinitions() []contract.ToolDefinition {
+	return e.appendSyntheticDefinitions(e.registry.BaseDefinitions(nil))
+}
+
+func (e *Engine) appendSyntheticDefinitions(definitions []contract.ToolDefinition) []contract.ToolDefinition {
 	definitions = append(definitions, askUserDefinition(), proposeChangesDefinition(), saveMemoryDefinition(), recallMemoryDefinition(), editMemoryDefinition())
 	// read_skill is advertised only when the session actually catalogued skills:
 	// a tool the model can never use successfully is pure prefix weight, and its
@@ -21,6 +57,22 @@ func (e *Engine) sessionDefinitions() []contract.ToolDefinition {
 	}
 	definitions = append(definitions, e.registry.MCPDefinitions(nil)...)
 	return definitions
+}
+
+func discoverToolsDefinition() contract.ToolDefinition {
+	return definition("discover_tools", "Find deferred tools by capability. Returns compact descriptors and exact schema hashes.", map[string]any{
+		"query": map[string]any{"type": "string", "maxLength": 200},
+		"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 20},
+	}, []string{"query"})
+}
+
+func invokeToolDefinition() contract.ToolDefinition {
+	return definition("invoke_tool", "Invoke one discovered tool through its original validation, permission, audit, and reduction path.", map[string]any{
+		"name":              map[string]any{"type": "string"},
+		"schemaHash":        map[string]any{"type": "string"},
+		"serverFingerprint": map[string]any{"type": "string"},
+		"arguments":         map[string]any{"type": "object"},
+	}, []string{"name", "schemaHash", "arguments"})
 }
 
 // SessionToolNames exposes sessionDefinitions()'s full name set (feature 010

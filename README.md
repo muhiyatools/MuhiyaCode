@@ -42,6 +42,7 @@ You can also sign in from inside the app with `/login`.
 - **Browser sign-in** — one command, no API keys or endpoints to manage.
 - **Guarded agentic tools** — read, search, exact edits, patches, and shell, with a permission mode you control.
 - **DeepSeek prefix-cache optimized** — byte-stable prompts keep the cache warm across a whole session.
+- **Token Economy Overhaul & Deferred Broker** — lean fixed prompt prefix (≤10,000 bytes / ≤2,500 est. tokens) and deferred tool hydration via `--lean-prefix` or `tokenEconomyMode`.
 - **One agent, no hand-offs** — the same model reads, searches, edits, runs shells, and verifies its own work in a single continuous session. There is no planner/executor split, no delegation, and nothing waiting for a report.
 - **A checklist you can read** — for multi-step work the agent keeps a plain `tasks.md` (`- [ ]` lines, ordinary markdown, yours to edit) — usually at your workspace root, or beside the work for a task scoped to one part of it — and the live to-do panel follows it.
 - **Task-tuned models** — a cheap advisor checks once per task whether the current model still fits, then its choice is frozen for that whole task so the provider's cache stays warm while the work runs. It only ever moves you for free: to a small conversation, or back to a model already warm this session.

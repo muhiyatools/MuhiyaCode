@@ -55,7 +55,8 @@ func (e *Engine) compact(ctx context.Context, reason string) error {
 	// T042: digests accumulate, so the summarizer covers ONLY the region being
 	// folded — prior digests are preserved verbatim (via CompactTo accumulation)
 	// and carried forward in the request prefix, never re-summarized.
-	request := []contract.Message{{Role: contract.RoleSystem, Content: "Compress a coding-agent session under headings GOAL, STATE, FILES, DECISIONS, COMMANDS, PENDING. Preserve all durable facts and exact paths; use terse bullets."}, {Role: contract.RoleUser, Content: "Reason: " + reason + "\nDurable facts:\n" + strings.Join(e.knowledge.CompactionFacts(), "\n") + "\nConversation:\n" + strings.Join(lines, "\n")}}
+	priorSummary := contract.TruncateEllipsis(e.history.CompactSummary(), 24_000)
+	request := []contract.Message{{Role: contract.RoleSystem, Content: "Compress a coding-agent session under headings GOAL, STATE, FILES, DECISIONS, COMMANDS, PENDING. Produce one bounded replacement summary. Preserve all durable facts and exact paths; use terse bullets; remove facts explicitly superseded by newer state."}, {Role: contract.RoleUser, Content: "Reason: " + reason + "\nEarlier summary to consolidate:\n" + priorSummary + "\nDurable facts:\n" + strings.Join(e.knowledge.CompactionFacts(), "\n") + "\nRecent conversation:\n" + strings.Join(lines, "\n")}}
 	temperature := .1
 	// Compaction shares the main stream's pin: it uses ActiveModelID, so it
 	// belongs under the same gateway routing pin as the main loop (C1).
@@ -80,7 +81,7 @@ func (e *Engine) compact(ctx context.Context, reason string) error {
 	}
 	summary := ""
 	if usageErr := e.recordUsageAndEmit(func() error {
-		return e.recordAuxUsage(ctx, e.settings.Provider.ActiveModelID, ":aux", response.Usage, elapsedMS(summaryStart))
+		return e.recordAuxUsage(ctx, e.settings.Provider.ActiveModelID, ":main:compaction", response.Usage, elapsedMS(summaryStart))
 	}); usageErr != nil {
 		return fmt.Errorf("persist compaction usage: %w", usageErr)
 	}
@@ -88,12 +89,16 @@ func (e *Engine) compact(ctx context.Context, reason string) error {
 		summary = strings.TrimSpace(response.Content)
 	}
 	if summary == "" {
-		summary = strings.Join(lines, "\n")
+		summary = strings.TrimSpace(strings.Join([]string{priorSummary, strings.Join(lines, "\n")}, "\n\n"))
+		summary = contract.TruncateEllipsis(summary, 32_000)
 	}
 	// T042: pass just the digest (accumulated by CompactTo). The workspace path
 	// already lives in the cache-stable system prompt, so repeating it per
 	// accumulated digest would only bloat the summary.
-	e.history.CompactTo(summary, 2)
+	e.history.CompactToReplacing(summary, 2)
+	if err := e.ensureStatePersisted(); err != nil {
+		return err
+	}
 	if e.persistence.AddEvent != nil {
 		_ = e.persistence.AddEvent(ctx, "system", "compact_summary", e.redact(summary), "")
 	}
@@ -105,11 +110,14 @@ func (e *Engine) needsCompact(profile EffortProfile) bool {
 }
 
 func (e *Engine) contextPressure() pressureSnapshot {
+	rewriteVersion := e.history.RewriteVersion()
 	e.taskMu.Lock()
-	reported, available := e.latestPromptTokens, e.latestPromptAvailable
+	reported := e.latestPromptTokens
+	available := e.latestPromptAvailable && e.latestPromptRewriteVersion == rewriteVersion
 	e.taskMu.Unlock()
 	input := e.history.PressureInput(reported, available)
-	usable := max(8000, e.contextLimit()-outputReserveTokens)
+	toolTokens := e.history.TokensForChars(e.assemblyToolDefChars)
+	usable := max(1, e.contextBudgetFor(e.settings.Provider.ActiveModelID, toolTokens).UsableInput)
 	return pressureSnapshot{Tokens: input.Tokens, Estimated: input.Estimated, Ratio: float64(input.Tokens) / float64(usable)}
 }
 
@@ -145,7 +153,8 @@ func (e *Engine) runMaintenanceBoundary(ctx context.Context, profile EffortProfi
 	// prefix-shape guard with an unexplained change and hard-failed the session.
 	// Near the hard-fold threshold we always reclaim (compaction is imminent
 	// anyway), matching Reasonix's force semantics.
-	usable := max(8000, e.contextLimit()-outputReserveTokens)
+	toolTokens := e.history.TokensForChars(e.assemblyToolDefChars)
+	usable := max(1, e.contextBudgetFor(e.settings.Provider.ActiveModelID, toolTokens).UsableInput)
 	minYield := usable * maintenanceMinYieldPercent / 100
 	if e.history.EstimateMaintainYield(profile.KeepFullToolOutputs, profile.TrimmedToolOutputChars, 4) < minYield &&
 		pressure.Ratio < maintenanceHardFoldRatio {
@@ -191,6 +200,14 @@ func (e *Engine) applyBoundaryToolChange(ctx context.Context) error {
 	change, changed, err := e.boundaryTools()
 	if err != nil || !changed {
 		return err
+	}
+	mode := strings.ToLower(strings.TrimSpace(e.settings.TokenEconomyMode))
+	if mode == "balanced" || mode == "aggressive" {
+		// Deferred descriptors are outside the provider-visible core schema. A
+		// refresh swaps the exact live targets used by the broker without changing
+		// the session prefix, model, or upstream pin.
+		e.registry.ReplacePrefix("mcp__", change.Tools...)
+		return nil
 	}
 	if err := e.recordInvalidation(ctx, contract.InvalidationEvent{
 		Cause: contract.InvalidationToolsetChange, Trigger: contract.InvalidationBoundary,

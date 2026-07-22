@@ -16,11 +16,13 @@ const (
 	// minPruneBytes (T040, Reasonix prune.go) is the floor below which a tool
 	// result is left untouched — trimming a small result is not worth a prefix
 	// rewrite.
-	minPruneBytes = 1024
+	minPruneBytes     = 1024
+	TaskControlPrefix = "[task-control] "
 )
 
 type HistorySnapshot struct {
 	Version           int                `json:"version"`
+	TaskEpochID       string             `json:"taskEpochId,omitempty"`
 	CompactSummary    string             `json:"compactSummary,omitempty"`
 	Messages          []contract.Message `json:"messages"`
 	LastTaskStart     int                `json:"lastTaskStart"`
@@ -37,8 +39,10 @@ type History struct {
 	rewriteVersion    int
 	lastWindowStart   int
 	windowInitialized bool
+	taskEpochID       string
 	superseded        map[string]struct{}
 	persist           func(HistorySnapshot) error
+	lastPersistErr    error
 	// archive (T041) receives the originals of tool results about to be shortened
 	// by reclamation, BEFORE the mutation, so they stay recoverable. Optional.
 	archive func([]contract.PrunedRecord) error
@@ -61,9 +65,12 @@ type MaintenanceResult struct {
 }
 
 type RequestBuild struct {
-	Messages      []contract.Message
-	WindowDropped bool
-	DroppedUnits  int
+	Messages        []contract.Message
+	WindowDropped   bool
+	DroppedUnits    int
+	EstimatedTokens int
+	AvailableTokens int
+	OverBudget      bool
 }
 
 func NewHistory(snapshot HistorySnapshot, persist func(HistorySnapshot) error) *History {
@@ -78,6 +85,7 @@ func NewHistory(snapshot HistorySnapshot, persist func(HistorySnapshot) error) *
 		rewriteVersion:    max(0, snapshot.RewriteVersion),
 		lastWindowStart:   max(0, snapshot.LastWindowStart),
 		windowInitialized: snapshot.WindowInitialized,
+		taskEpochID:       snapshot.TaskEpochID,
 		superseded:        make(map[string]struct{}),
 		persist:           persist,
 	}
@@ -98,6 +106,54 @@ func (h *History) Snapshot() HistorySnapshot {
 	return h.snapshotLocked()
 }
 
+// ReplaceForEpoch persists the candidate history, then commits the epoch ledger.
+// If either write fails, the previous valid history remains active and is
+// restored on disk. The stable system prompt, model, tools, and upstream live
+// outside this message snapshot and therefore remain unchanged.
+func (h *History) ReplaceForEpoch(epochID string, messages []contract.Message, commit func() error) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	old := h.snapshotLocked()
+	candidate := HistorySnapshot{
+		Version: 1, TaskEpochID: epochID, Messages: cloneMessages(messages),
+		LastTaskStart: len(messages), RewriteVersion: h.rewriteVersion + 1,
+	}
+	if h.persist != nil {
+		if err := h.persist(candidate); err != nil {
+			return err
+		}
+	}
+	if commit != nil {
+		if err := commit(); err != nil {
+			if h.persist != nil {
+				_ = h.persist(old)
+			}
+			return err
+		}
+	}
+	h.messages = cloneMessages(messages)
+	h.compactSummary = ""
+	h.lastTaskStart = len(messages)
+	h.rewriteVersion = candidate.RewriteVersion
+	h.lastWindowStart = 0
+	h.windowInitialized = false
+	h.taskEpochID = epochID
+	h.lastPersistErr = nil
+	return nil
+}
+
+// RetryPersistence retries only a previously failed snapshot write. Healthy
+// state stays write-free, while a transient filesystem failure gets one safe
+// boundary retry before the engine blocks further provider work.
+func (h *History) RetryPersistence() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lastPersistErr != nil {
+		h.saveLocked()
+	}
+	return h.lastPersistErr
+}
+
 func (h *History) MarkTaskStart() {
 	h.mu.Lock()
 	h.lastTaskStart = len(h.messages)
@@ -110,6 +166,41 @@ func (h *History) Append(message contract.Message) {
 	h.messages = append(h.messages, message)
 	h.saveLocked()
 	h.mu.Unlock()
+}
+
+func (h *History) UpsertTaskControl(code, instruction string) bool {
+	content := TaskControlPrefix + strings.TrimSpace(code) + "\n" + strings.TrimSpace(instruction)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for index := len(h.messages) - 1; index >= h.lastTaskStart; index-- {
+		if h.messages[index].Role != contract.RoleUser || !strings.HasPrefix(h.messages[index].Content, TaskControlPrefix) {
+			continue
+		}
+		if h.messages[index].Content == content {
+			return false
+		}
+		h.messages[index].Content = content
+		h.rewriteVersion++
+		h.saveLocked()
+		return true
+	}
+	h.messages = append(h.messages, contract.Message{Role: contract.RoleUser, Content: content})
+	h.saveLocked()
+	return true
+}
+
+func (h *History) AppendTaskControl(code, instruction string) bool {
+	content := TaskControlPrefix + strings.TrimSpace(code) + "\n" + strings.TrimSpace(instruction)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for index := h.lastTaskStart; index < len(h.messages); index++ {
+		if h.messages[index].Role == contract.RoleUser && h.messages[index].Content == content {
+			return false
+		}
+	}
+	h.messages = append(h.messages, contract.Message{Role: contract.RoleUser, Content: content})
+	h.saveLocked()
+	return true
 }
 
 func (h *History) All() []contract.Message {
@@ -178,6 +269,8 @@ func (h *History) BuildRequestWithMetadata(system string, contextLimit, reserve 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	request, start, _ := assembleRequestWithStart(h.messages, h.compactSummary, system, contextLimit, reserve)
+	estimated := estimateMessagesTokens(request)
+	available := max(0, contextLimit-reserve)
 	changed := !h.windowInitialized || start != h.lastWindowStart
 	dropped := h.windowInitialized && start > h.lastWindowStart
 	droppedUnits := 0
@@ -192,7 +285,7 @@ func (h *History) BuildRequestWithMetadata(system string, contextLimit, reserve 
 	if changed {
 		h.saveLocked()
 	}
-	return RequestBuild{Messages: request, WindowDropped: dropped, DroppedUnits: droppedUnits}
+	return RequestBuild{Messages: request, WindowDropped: dropped, DroppedUnits: droppedUnits, EstimatedTokens: estimated, AvailableTokens: available, OverBudget: estimated > available}
 }
 
 func (h *History) MarkSuperseded(callIDs []string) {
@@ -460,6 +553,18 @@ func (h *History) IsToolResultIntact(callID string) bool {
 }
 
 func (h *History) CompactTo(summary string, keepRecentUnits int) {
+	h.compactTo(summary, keepRecentUnits, false)
+}
+
+// CompactToReplacing installs a hierarchical summary that already includes
+// the previous summary. Production compaction uses this bounded form so digest
+// text does not grow forever; CompactTo keeps its append behavior for legacy
+// callers and migration tests.
+func (h *History) CompactToReplacing(summary string, keepRecentUnits int) {
+	h.compactTo(summary, keepRecentUnits, true)
+}
+
+func (h *History) compactTo(summary string, keepRecentUnits int, replaceSummary bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	units := GroupUnits(h.messages)
@@ -475,7 +580,9 @@ func (h *History) CompactTo(summary string, keepRecentUnits int) {
 	// T042: digests ACCUMULATE — a new digest is appended to prior digests
 	// (which stay byte-identical) rather than replacing them, so repeated
 	// compaction is not lossy re-summarization that drops earlier facts.
-	if strings.TrimSpace(h.compactSummary) == "" {
+	if replaceSummary {
+		h.compactSummary = summary
+	} else if strings.TrimSpace(h.compactSummary) == "" {
 		h.compactSummary = summary
 	} else {
 		h.compactSummary = h.compactSummary + "\n\n" + summary
@@ -504,7 +611,7 @@ func GroupUnits(messages []contract.Message) [][]contract.Message {
 }
 
 func assembleRequestWithStart(messages []contract.Message, summary, system string, contextLimit, reserve int) ([]contract.Message, int, int) {
-	budget := max(8_000, contextLimit-reserve)
+	budget := max(0, contextLimit-reserve)
 	header := []contract.Message{{Role: contract.RoleSystem, Content: system}}
 	if summary != "" {
 		header = append(header, contract.Message{Role: contract.RoleSystem, Content: "Summary of earlier conversation:\n" + summary})
@@ -616,9 +723,6 @@ func (h *History) estimateTextLocked(text string) int {
 // estimator. systemChars is passed in because the system prompt is not stored in
 // the message log but IS counted in promptTokens.
 func (h *History) Calibrate(promptTokens, systemChars int) {
-	if promptTokens <= 0 {
-		return
-	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	chars := systemChars + len(h.compactSummary)
@@ -628,19 +732,41 @@ func (h *History) Calibrate(promptTokens, systemChars int) {
 			chars += len(call.ToolName()) + len(call.ArgumentsJSON())
 		}
 	}
-	if chars <= 0 {
+	if ratio, ok := calibrationRatio(promptTokens, chars); ok {
+		h.tokPerChar = ratio
+	}
+}
+
+// CalibrateRequest reconciles the estimator against the exact transmitted
+// message slice and canonical tool-definition bytes. This avoids teaching the
+// estimator from archived history that request-window assembly did not send.
+func (h *History) CalibrateRequest(promptTokens int, messages []contract.Message, toolDefinitionChars int) {
+	encoded, err := json.Marshal(messages)
+	if err != nil {
 		return
+	}
+	chars := len(encoded) + max(0, toolDefinitionChars)
+	ratio, ok := calibrationRatio(promptTokens, chars)
+	if !ok {
+		return
+	}
+	h.mu.Lock()
+	h.tokPerChar = ratio
+	h.mu.Unlock()
+}
+
+func calibrationRatio(promptTokens, chars int) (float64, bool) {
+	if promptTokens <= 0 || chars <= 0 {
+		return 0, false
 	}
 	ratio := float64(promptTokens) / float64(chars)
-	if ratio < 0.05 || ratio > 2 {
-		return
-	}
-	h.tokPerChar = ratio
+	return ratio, ratio >= 0.05 && ratio <= 2
 }
 
 func (h *History) snapshotLocked() HistorySnapshot {
 	return HistorySnapshot{
 		Version:           1,
+		TaskEpochID:       h.taskEpochID,
 		CompactSummary:    h.compactSummary,
 		Messages:          cloneMessages(h.messages),
 		LastTaskStart:     h.lastTaskStart,
@@ -652,6 +778,6 @@ func (h *History) snapshotLocked() HistorySnapshot {
 
 func (h *History) saveLocked() {
 	if h.persist != nil {
-		_ = h.persist(h.snapshotLocked())
+		h.lastPersistErr = h.persist(h.snapshotLocked())
 	}
 }

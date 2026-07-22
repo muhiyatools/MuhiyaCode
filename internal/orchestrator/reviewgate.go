@@ -381,27 +381,6 @@ func (e *Engine) setTaskReviewDecision(d ReviewDecision) {
 	}
 }
 
-// reviewCoverageRE parses the reviewer's machine-readable coverage line
-// (contracts/review-gating.md §4): lenient about spacing, strict about shape.
-var reviewCoverageRE = regexp.MustCompile(`(?mi)^\s*Coverage:\s*(covered=.*)$`)
-
-// updateTaskReviewOutcome stamps post-outcome facts (ceiling hit, coverage
-// line) onto the recorded decision so the completion stats and benchmark
-// records carry them (SC-004's ceiling_hit, the CoverageReport contract).
-func (e *Engine) updateTaskReviewOutcome(output string) {
-	e.taskMu.Lock()
-	defer e.taskMu.Unlock()
-	if e.taskReviewDecision == nil {
-		return
-	}
-	if strings.Contains(output, "partial (token ceiling)") {
-		e.taskReviewDecision.CeilingHit = true
-	}
-	if match := reviewCoverageRE.FindStringSubmatch(output); len(match) > 1 {
-		e.taskReviewDecision.Coverage = strings.TrimSpace(match[1])
-	}
-}
-
 func (e *Engine) takeTaskReviewDecision() *ReviewDecision {
 	e.taskMu.Lock()
 	defer e.taskMu.Unlock()

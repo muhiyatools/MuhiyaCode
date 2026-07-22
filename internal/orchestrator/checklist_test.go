@@ -165,6 +165,34 @@ func TestChecklistFeedSeesMultiFilePatch(t *testing.T) {
 	}
 }
 
+func TestEconomyChecklistAdmissionSkipsOrdinarySmallWork(t *testing.T) {
+	prompt := "In web/button.html change the label, update its aria-label, and run the existing focused test."
+	assessment := Classify(prompt, "")
+	if ShouldCreateChecklist(assessment, ChecklistAdmission{}) {
+		t.Fatalf("ordinary %s task requested a repository tasks.md", assessment.Class)
+	}
+}
+
+func TestEconomyChecklistAdmissionPreservesDurablePlans(t *testing.T) {
+	tests := []struct {
+		name       string
+		assessment Assessment
+		admission  ChecklistAdmission
+	}{
+		{name: "user explicitly requested plan", assessment: Assessment{Class: ClassSmall}, admission: ChecklistAdmission{ExplicitPlan: true}},
+		{name: "existing checklist governs work", assessment: Assessment{Class: ClassSmall}, admission: ChecklistAdmission{ExistingChecklist: true}},
+		{name: "large task benefits from durable checklist", assessment: Assessment{Class: ClassLarge}},
+		{name: "epic task benefits from durable checklist", assessment: Assessment{Class: ClassEpic}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if !ShouldCreateChecklist(test.assessment, test.admission) {
+				t.Fatal("durable checklist was suppressed")
+			}
+		})
+	}
+}
+
 // TestCompletionDisclosesOpenChecklistItems rebuilds the honesty guard against
 // tasks.md: an answer that would imply completion while items are open says so.
 func TestCompletionDisclosesOpenChecklistItems(t *testing.T) {

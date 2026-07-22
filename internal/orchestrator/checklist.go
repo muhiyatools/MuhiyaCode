@@ -23,6 +23,18 @@ import (
 // ChecklistFileName is the workspace-root file the model maintains.
 const ChecklistFileName = "tasks.md"
 
+type ChecklistAdmission struct {
+	ExplicitPlan      bool
+	ExistingChecklist bool
+}
+
+func ShouldCreateChecklist(assessment Assessment, admission ChecklistAdmission) bool {
+	if admission.ExplicitPlan || admission.ExistingChecklist {
+		return true
+	}
+	return assessment.Class == ClassLarge || assessment.Class == ClassEpic
+}
+
 // checklistLineRE matches a GitHub-style checklist item. The status suffix is
 // OPTIONAL: an unchecked box is pending, a checked box is completed, and an
 // explicit "(in progress)" marker overrides to in-progress. Requiring a status

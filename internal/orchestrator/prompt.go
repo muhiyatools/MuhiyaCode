@@ -35,6 +35,7 @@ type PromptContext struct {
 	// computed once at session start and restored verbatim from the sidecar on
 	// resume, so it is session-stable and rides the cache after one upgrade break.
 	ProjectContextBlock string
+	Lean                bool
 }
 
 // SkillListing is one advertised skill: a name, the absolute path to its
@@ -53,9 +54,26 @@ type SkillListing struct {
 // renderSkillsSection returns the deterministic SKILLS block, or "" when no
 // skills are advertised. Order is caller-guaranteed stable; each line is
 // byte-fixed for identical input (013 contract skills-autouse §2.2).
-func renderSkillsSection(skills []SkillListing) string {
+func renderSkillsSection(skills []SkillListing, lean ...bool) string {
 	if len(skills) == 0 {
 		return ""
+	}
+	if len(lean) > 0 && lean[0] {
+		names := make([]string, 0, min(8, len(skills)))
+		for _, skill := range skills {
+			if len(names) == 8 {
+				break
+			}
+			names = append(names, skill.Name)
+		}
+		body := "SKILLS\nWhen an applicable skill is named or evident, discover and invoke read_skill before that work. Available: " + strings.Join(names, ", ")
+		if len(skills) > len(names) {
+			body += fmt.Sprintf(" (+%d more)", len(skills)-len(names))
+		}
+		if len(body) > 240 {
+			body = body[:240]
+		}
+		return body
 	}
 	var b strings.Builder
 	b.WriteString(instructions.SkillsHeaderBody + "\n")
@@ -82,6 +100,11 @@ func SystemPrompt(c PromptContext) string {
 	if c.HasWeb {
 		web = instructions.PromptWebAvailableBody
 	}
+	environmentRules := []string{instructions.ShellCommandGuidance(c.Shell)}
+	if strings.TrimSpace(c.ModelAddendum) != "" {
+		environmentRules = append(environmentRules, c.ModelAddendum)
+	}
+	environmentRules = append(environmentRules, web)
 	sections := []string{
 		instructions.PromptIdentityBody,
 		instructions.PromptOperatingContractBody,
@@ -92,10 +115,16 @@ func SystemPrompt(c PromptContext) string {
 		instructions.PromptModelBody,
 		instructions.PromptCommunicationBody,
 		instructions.PromptSafetyBody,
-		fmt.Sprintf(instructions.PromptEnvironmentTemplate, c.Workspace, c.OS, c.Shell, c.Model, instructions.ShellCommandGuidance(c.Shell), c.ModelAddendum, web),
+		fmt.Sprintf(instructions.PromptEnvironmentTemplate, c.Workspace, c.OS, c.Shell, c.Model, strings.Join(environmentRules, "\n")),
+	}
+	if c.Lean {
+		sections = []string{
+			instructions.PromptLeanBody,
+			fmt.Sprintf(instructions.PromptEnvironmentTemplate, c.Workspace, c.OS, c.Shell, c.Model, strings.Join(environmentRules, "\n")),
+		}
 	}
 	base := strings.TrimSpace(strings.Join(sections, "\n\n"))
-	if section := renderSkillsSection(c.Skills); section != "" {
+	if section := renderSkillsSection(c.Skills, c.Lean); section != "" {
 		base += "\n\n" + section
 	}
 	// 006: the project-memory instruction is a fixed byte-stable paragraph; the
@@ -103,7 +132,11 @@ func SystemPrompt(c PromptContext) string {
 	// Both are deterministic functions of PromptContext, so two constructions with
 	// identical inputs stay byte-identical (constitution III upgrade break).
 	if c.ProjectMemory {
-		base += "\n\n" + projectMemoryInstruction
+		if c.Lean {
+			base += "\n\nPROJECT MEMORY\nUse recall_memory/save_memory/edit_memory only when durable project knowledge is relevant; never store progress, speculation, raw transcripts, or secrets."
+		} else {
+			base += "\n\n" + projectMemoryInstruction
+		}
 	}
 	if block := strings.TrimRight(c.ProjectContextBlock, "\n"); strings.TrimSpace(block) != "" {
 		base += "\n\n" + block

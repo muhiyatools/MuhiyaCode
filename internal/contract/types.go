@@ -49,10 +49,9 @@ type Settings struct {
 	Provider struct {
 		Type    string `json:"type"`
 		BaseURL string `json:"baseUrl"`
-		// ActiveModelID is the model the session runs on. It is frozen for the
-		// duration of a task and may only change at a task boundary, where the
-		// advisor weighs the cold-start cost of the switch (caching is the
-		// priority); the user sets it with `muhiyacode config set model`.
+		// ActiveModelID is selected before the first main request and frozen for
+		// the entire session. A different model requires a new session so the
+		// conversation never splits across provider cache namespaces.
 		ActiveModelID string  `json:"activeModelId"`
 		Models        []Model `json:"models"`
 		// ModelsRefreshedAt is when the gateway catalog was last discovered
@@ -68,6 +67,9 @@ type Settings struct {
 	} `json:"provider"`
 	PermissionMode PermissionMode `json:"permissionMode"`
 	Effort         EffortLevel    `json:"effort"`
+	// TokenEconomyMode is an additive rollout control. Until orchestrator
+	// integration is enabled, loading or changing it has no request-side effect.
+	TokenEconomyMode string `json:"tokenEconomyMode,omitempty"`
 	// ReviewGating controls the automatic review triggers (feature 011):
 	// "off" | "conservative" | "default" (empty = default). Explicit review
 	// requests always run regardless of this setting.
@@ -184,6 +186,11 @@ type Usage struct {
 	CachedTokens              int    `json:"cachedTokens,omitempty"`
 	CacheReadTokens           *int   `json:"cacheReadTokens,omitempty"`
 	CacheMissTokens           *int   `json:"cacheMissTokens,omitempty"`
+	CacheWriteTokens          *int   `json:"cacheWriteTokens,omitempty"`
+	CacheCreationTokens       *int   `json:"cacheCreationTokens,omitempty"`
+	UncachedInputTokens       *int   `json:"uncachedInputTokens,omitempty"`
+	CacheUsageSchema          string `json:"cacheUsageSchema,omitempty"`
+	CacheUsageDerivation      string `json:"cacheUsageDerivation,omitempty"`
 	MissDerived               bool   `json:"missDerived,omitempty"`
 	Contradictory             bool   `json:"contradictory,omitempty"`
 	Diagnostic                string `json:"diagnostic,omitempty"`
@@ -224,6 +231,9 @@ func (u Usage) Add(next Usage) Usage {
 		CachedTokens:              u.CachedTokens + next.CachedTokens,
 		CacheReadTokens:           addNullableInt(u.CacheReadTokens, next.CacheReadTokens),
 		CacheMissTokens:           addNullableInt(u.CacheMissTokens, next.CacheMissTokens),
+		CacheWriteTokens:          addNullableInt(u.CacheWriteTokens, next.CacheWriteTokens),
+		CacheCreationTokens:       addNullableInt(u.CacheCreationTokens, next.CacheCreationTokens),
+		UncachedInputTokens:       addNullableInt(u.UncachedInputTokens, next.UncachedInputTokens),
 		MissDerived:               u.MissDerived || next.MissDerived,
 		Contradictory:             u.Contradictory || next.Contradictory,
 		Diagnostic:                joinDiagnostic(u.Diagnostic, next.Diagnostic),
@@ -264,6 +274,12 @@ type ChatRequest struct {
 	MaxTokens   int
 	ToolChoice  string
 	Reasoning   ReasoningTier
+	// LogicalManifestHash is an orchestrator-computed identity for the logical
+	// request inventory. It is observation metadata and is never serialized.
+	LogicalManifestHash string
+	// OnRequestShape receives only hashes and byte counts from the final
+	// serializer; raw prompt/tool bytes and authorization data never cross it.
+	OnRequestShape func(RequestShapeObservation)
 	// SessionID is a routing pin derived once per session per stream and sent
 	// as the X-Muhiya-Session header. Long-lived providers key their cache by
 	// routing identity; without it, an upstream model flip silently invalidates
@@ -281,6 +297,16 @@ type ChatRequest struct {
 	PinUpstream      string
 	OnToken          func(string)
 	OnReasoningToken func(string)
+	// OnStreamReset is called before a mid-stream retry. Tokens from the failed
+	// attempt may already be visible, so presentation layers must discard that
+	// draft before the replacement attempt starts.
+	OnStreamReset func()
+}
+
+type RequestShapeObservation struct {
+	WireHash            string
+	LogicalManifestHash string
+	PayloadBytes        int
 }
 
 type ChatResponse struct {
@@ -322,6 +348,11 @@ type Tool interface {
 // "treat as mutating", so an unannotated server stays fail-closed.
 type ReadOnlyDeclaring interface {
 	DeclaresReadOnly() bool
+}
+
+type ToolIdentityDeclaring interface {
+	ToolServerFingerprint() string
+	ToolAvailability() string
 }
 
 type PlanStatus string
@@ -384,12 +415,43 @@ type PrunedRecord struct {
 	OriginalContent string `json:"originalContent"`
 }
 
+type RetryUsageRow struct {
+	Seq       int    `json:"seq"`
+	RetryOf   int    `json:"retryOf"`
+	Phase     string `json:"phase,omitempty"`
+	Transport string `json:"transport,omitempty"`
+}
+
+type TaskEconomyStats struct {
+	Aggregate             SessionUsageAggregate `json:"aggregate"`
+	RequestsByPhase       map[string]int        `json:"requestsByPhase,omitempty"`
+	RequestsByTransport   map[string]int        `json:"requestsByTransport,omitempty"`
+	Retries               []RetryUsageRow       `json:"retries,omitempty"`
+	PhasePlans            []PhasePlanUsageRow   `json:"phasePlans,omitempty"`
+	TruncationEscalations int                   `json:"truncationEscalations,omitempty"`
+	OutputBudgetOverrides []string              `json:"outputBudgetOverrides,omitempty"`
+}
+
+type PhasePlanUsageRow struct {
+	Seq       int    `json:"seq"`
+	Phase     string `json:"phase"`
+	Reasoning string `json:"reasoning,omitempty"`
+	OutputCap int    `json:"outputCap,omitempty"`
+	Decision  string `json:"decision,omitempty"`
+}
+
 type TaskStats struct {
-	DurationMS int64       `json:"durationMs"`
-	Effort     EffortLevel `json:"effort"`
-	TaskClass  string      `json:"taskClass"`
-	Usage      Usage       `json:"usage"`
-	AgentUsage Usage       `json:"agentUsage"`
+	DurationMS              int64            `json:"durationMs"`
+	Effort                  EffortLevel      `json:"effort"`
+	TaskClass               string           `json:"taskClass"`
+	Usage                   Usage            `json:"usage"`
+	Economy                 TaskEconomyStats `json:"economy"`
+	TaskEpochCount          int              `json:"taskEpochCount,omitempty"`
+	CapsuleCount            int              `json:"capsuleCount,omitempty"`
+	SelectedCapsuleRefs     []string         `json:"selectedCapsuleRefs,omitempty"`
+	EpochResetReasons       []string         `json:"epochResetReasons,omitempty"`
+	EpochFirstPromptSavings int              `json:"epochFirstPromptSavings,omitempty"`
+	AgentUsage              Usage            `json:"agentUsage"`
 	// SessionHitRate (T043) is the cumulative session cache-hit rate from the
 	// usage aggregate (provider-fields-only denominator), surfaced in the
 	// persistent usage footer alongside the per-task cache tag.
@@ -467,6 +529,7 @@ type Callbacks struct {
 	Notice         func(string)
 	Token          func(string)
 	ReasoningToken func(string)
+	StreamReset    func()
 	ToolStart      func(name string, input json.RawMessage)
 	ToolOutput     func(name, chunk string)
 	ToolEnd        func(name, output string)

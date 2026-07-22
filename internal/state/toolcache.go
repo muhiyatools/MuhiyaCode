@@ -72,7 +72,7 @@ func (s *ToolSurfaceStore) DeleteServer(server string) error {
 	return writeJSON(s.file, toolSurfaceFile{Version: 1, Entries: s.entries}, false)
 }
 
-func MCPServerFingerprint(server MCPServer, secretEnv map[string]string) string {
+func MCPServerFingerprint(server MCPServer, secretEnv map[string]string, oauthSecret map[string]any) string {
 	type envEntry struct{ Key, Value string }
 	combined := make(map[string]string, len(server.Env)+len(secretEnv))
 	for key, value := range server.Env {
@@ -91,13 +91,16 @@ func MCPServerFingerprint(server MCPServer, secretEnv map[string]string) string 
 		env = append(env, envEntry{Key: key, Value: combined[key]})
 	}
 	payload, _ := json.Marshal(struct {
+		Name      string
 		Transport string
 		Command   string
 		URL       string
 		CWD       string
 		Args      []string
 		Env       []envEntry
-	}{server.Transport, server.Command, server.URL, server.CWD, append([]string(nil), server.Args...), env})
+		OAuth     *MCPOAuth
+		OAuthAuth map[string]any
+	}{server.Name, server.Transport, server.Command, server.URL, server.CWD, append([]string(nil), server.Args...), env, server.OAuth, oauthSecret})
 	sum := sha256.Sum256(payload)
 	return hex.EncodeToString(sum[:])
 }

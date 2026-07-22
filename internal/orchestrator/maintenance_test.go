@@ -54,6 +54,16 @@ func TestTokenCalibration(t *testing.T) {
 	}
 }
 
+func TestRequestCalibrationExcludesUnsentArchivedHistory(t *testing.T) {
+	h := NewHistory(HistorySnapshot{Version: 1}, nil)
+	h.Append(contract.Message{Role: contract.RoleUser, Content: strings.Repeat("archived", 100_000)})
+	sent := []contract.Message{{Role: contract.RoleSystem, Content: strings.Repeat("s", 200)}}
+	h.CalibrateRequest(100, sent, 100)
+	if h.tokPerChar <= 0.1 {
+		t.Fatalf("calibration was diluted by unsent history: ratio=%f", h.tokPerChar)
+	}
+}
+
 func TestCombinedMaintenanceUsesOneRewriteAndAntiThrashLatch(t *testing.T) {
 	promptTokens := 100_000
 	settings := engineSettings()
@@ -74,11 +84,18 @@ func TestCombinedMaintenanceUsesOneRewriteAndAntiThrashLatch(t *testing.T) {
 	}
 	addCompletedToolPayload(history, "c2")
 	history.MarkTaskStart()
+	// The first rewrite invalidates the previous provider measurement. Simulate
+	// the fresh measurement that a real intervening request would produce.
+	engine.taskMu.Lock()
+	engine.latestPromptTokens = promptTokens
+	engine.latestPromptAvailable = true
+	engine.latestPromptRewriteVersion = history.RewriteVersion()
+	engine.taskMu.Unlock()
 	second, err := engine.runMaintenanceBoundary(context.Background(), Profile(contract.EffortMedium))
 	if err != nil || !second.Changed {
 		t.Fatalf("second=%+v err=%v", second, err)
 	}
-	if report := engine.ContextReport(); !report.MaintenanceLatched || report.PressureEstimated {
+	if report := engine.ContextReport(); !report.MaintenanceLatched || !report.PressureEstimated {
 		t.Fatalf("maintenance diagnostics=%+v", report)
 	}
 	addCompletedToolPayload(history, "c3")

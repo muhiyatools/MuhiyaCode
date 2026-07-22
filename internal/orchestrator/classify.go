@@ -182,18 +182,22 @@ func BudgetFor(a Assessment, effort EffortProfile) Budget {
 
 // buildBrief renders the per-task tail brief from a computed budget.
 func buildBrief(b Budget, a Assessment) string {
+	if a.Class == ClassChat {
+		return fmt.Sprintf("[task-brief: date=%s; class=chat; answer directly; tools=none; verify=none]", time.Now().Format("2006-01-02"))
+	}
 	guard := ""
 	if a.ScopeGuard {
 		guard = " scope=only the named target; quality words do not widen scope;"
 	}
 	done := " declare DONE before editing;"
-	if a.Class == ClassChat {
-		done = ""
+	checklist := ""
+	if a.Class == ClassStandard || a.Class == ClassLarge || a.Class == ClassEpic {
+		checklist = " keep the task checklist current;"
 	}
 	// The brief rides every user-message tail under a ~50-token budget (SC-004,
 	// request-assembly.md §4). It carries no agent count: delegation scale is the
 	// model's judgment, not a number to spend down.
-	return fmt.Sprintf("[task-brief: date=%s; class=%s; tools~%d; turns<=%d; reasoning=%s; verify=%s;%s%s keep tasks.md current]", time.Now().Format("2006-01-02"), b.Class, b.ToolCalls, b.MaxTurns, b.Reasoning, b.Verification, guard, done)
+	return fmt.Sprintf("[task-brief: date=%s; class=%s; tools~%d; turns<=%d; reasoning=%s; verify=%s;%s%s%s]", time.Now().Format("2006-01-02"), b.Class, b.ToolCalls, b.MaxTurns, b.Reasoning, b.Verification, guard, done, checklist)
 }
 
 func EscalateClass(value TaskClass) TaskClass {

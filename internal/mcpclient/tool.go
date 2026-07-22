@@ -25,15 +25,20 @@ type mcpTool struct {
 }
 
 type forwardingTool struct {
-	manager    *Manager
-	definition contract.ToolDefinition
+	manager     *Manager
+	definition  contract.ToolDefinition
+	fingerprint string
 }
 
 func (t *mcpTool) Definition() contract.ToolDefinition { return t.definition }
 
-func (t *mcpTool) DeclaresReadOnly() bool { return t.readOnly }
+func (t *mcpTool) DeclaresReadOnly() bool        { return t.readOnly }
+func (t *mcpTool) ToolServerFingerprint() string { return t.connection.fingerprint }
+func (t *mcpTool) ToolAvailability() string      { return "ready" }
 
 func (t *forwardingTool) Definition() contract.ToolDefinition { return t.definition }
+func (t *forwardingTool) ToolServerFingerprint() string       { return t.fingerprint }
+func (t *forwardingTool) ToolAvailability() string            { return "ready" }
 
 // DeclaresReadOnly asks the LIVE tool, because the annotation is learned on
 // connect and the cached surface this forwarder was built from does not carry

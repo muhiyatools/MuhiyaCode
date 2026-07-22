@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -124,7 +125,7 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 		// Drop the pin, latch it off for the process, and retry immediately. The
 		// cost of being wrong is one cold prefix; the cost of not checking is the
 		// whole session.
-		if isStatusError && !retryable && !streamed && input.PinUpstream != "" {
+		if isStatusError && !retryable && !streamed && input.PinUpstream != "" && rejectsUpstreamAffinity(httpErr) {
 			p.rejectUpstreamPin()
 			input.PinUpstream = ""
 			log.Printf("[gateway] upstream affinity refused (%v); continuing without it — expect cold prefixes on re-routes", err)
@@ -151,6 +152,9 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 		// re-sending would just repeat it).
 		if streamed && !streamRetried && !isStatusError && isNetworkError(err) && ctx.Err() == nil {
 			streamRetried = true
+			if input.OnStreamReset != nil {
+				input.OnStreamReset()
+			}
 			if cfg.StreamRetryObserver != nil {
 				cfg.StreamRetryObserver(err)
 			}
@@ -171,6 +175,26 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 		}
 	}
 	return contract.ChatResponse{}, last
+}
+
+// rejectsUpstreamAffinity recognizes only errors that specifically reject the
+// optional routing field. Authentication, model, quota, and unrelated request
+// errors must surface unchanged; retrying those without the pin only duplicates
+// a doomed request and incorrectly disables cache affinity for the process.
+func rejectsUpstreamAffinity(httpErr *HTTPError) bool {
+	if httpErr == nil || (httpErr.Status != http.StatusBadRequest && httpErr.Status != http.StatusUnprocessableEntity) {
+		return false
+	}
+	body := strings.ToLower(httpErr.Body)
+	if !strings.Contains(body, "provider") {
+		return false
+	}
+	for _, marker := range []string{"unrecognized", "unknown field", "unexpected field", "not allowed", "unsupported", "extra inputs"} {
+		if strings.Contains(body, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model contract.Model, profile ModelProfile, input contract.ChatRequest) (contract.ChatResponse, bool, time.Duration, error) {
@@ -244,6 +268,12 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return contract.ChatResponse{}, false, 0, err
+	}
+	if input.OnRequestShape != nil {
+		hash := sha256.Sum256(payload)
+		input.OnRequestShape(contract.RequestShapeObservation{
+			WireHash: fmt.Sprintf("%x", hash[:]), LogicalManifestHash: input.LogicalManifestHash, PayloadBytes: len(payload),
+		})
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint(cfg, "chat/completions"), bytes.NewReader(payload))
 	if err != nil {
@@ -348,11 +378,11 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 		case rawUsageCount > 1:
 			log.Printf("[gateway] provider emitted %d usage objects for one request; recording the last", rawUsageCount)
 			if err := cfg.RawUsageObserver(RawUsagePayload{At: time.Now().UTC(), Model: model.ID, Payload: lastRawUsage}); err != nil {
-				return contract.ChatResponse{}, acc.ReceivedData(), 0, fmt.Errorf("record raw provider usage: %w", err)
+				log.Printf("[gateway] raw usage observer failed after a successful response: %v", err)
 			}
 		default:
 			if err := cfg.RawUsageObserver(RawUsagePayload{At: time.Now().UTC(), Model: model.ID, Payload: lastRawUsage}); err != nil {
-				return contract.ChatResponse{}, acc.ReceivedData(), 0, fmt.Errorf("record raw provider usage: %w", err)
+				log.Printf("[gateway] raw usage observer failed after a successful response: %v", err)
 			}
 		}
 	}

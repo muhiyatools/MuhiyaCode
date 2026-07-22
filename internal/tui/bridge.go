@@ -13,6 +13,7 @@ import (
 type statusMsg string
 type noticeMsg string
 type streamMsg struct{ text string }
+type streamResetMsg struct{}
 type mcpRefreshTickMsg struct{}
 type toolStartMsg struct {
 	name  string
@@ -88,9 +89,10 @@ func (b *Bridge) send(message tea.Msg) {
 
 func (b *Bridge) Callbacks() contract.Callbacks {
 	return contract.Callbacks{
-		Status: func(value string) { b.send(statusMsg(value)) },
-		Notice: func(value string) { b.send(noticeMsg(value)) },
-		Token:  func(value string) { b.queueStream(value) },
+		Status:      func(value string) { b.send(statusMsg(value)) },
+		Notice:      func(value string) { b.send(noticeMsg(value)) },
+		Token:       func(value string) { b.queueStream(value) },
+		StreamReset: func() { b.resetStream() },
 		// ReasoningToken is deliberately absent: raw model thinking must never
 		// stream into the visible transcript (live incident — reasoning text
 		// rendered as a raw gutter line). Leaving the callback nil switches the
@@ -132,6 +134,19 @@ func (b *Bridge) Callbacks() contract.Callbacks {
 			}
 			return answers, nil
 		},
+	}
+}
+
+// resetStream discards bytes buffered from a failed provider attempt and asks
+// the model to remove any portion already rendered. The retry then streams a
+// single replacement draft instead of appending a duplicate answer.
+func (b *Bridge) resetStream() {
+	b.mu.Lock()
+	b.pending = ""
+	program := b.program
+	b.mu.Unlock()
+	if program != nil {
+		program.Send(streamResetMsg{})
 	}
 }
 

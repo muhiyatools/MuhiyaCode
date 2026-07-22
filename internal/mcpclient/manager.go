@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -52,6 +53,7 @@ type Manager struct {
 	usedNames      map[string]bool
 	surfaceStore   *state.ToolSurfaceStore
 	pinned         map[string]contract.ToolDefinition
+	pinnedIdentity map[string]string
 	applied        map[string]contract.ToolDefinition
 	knownAtStart   map[string]bool
 	pendingSurface bool
@@ -60,9 +62,10 @@ type Manager struct {
 }
 
 type connection struct {
-	server  state.MCPServer
-	session *mcp.ClientSession
-	tools   []*mcpTool
+	server      state.MCPServer
+	fingerprint string
+	session     *mcp.ClientSession
+	tools       []*mcpTool
 }
 
 func New(paths state.Paths, client *http.Client, confirm ConfirmFunc, onTool func(contract.Tool)) *Manager {
@@ -73,7 +76,7 @@ func New(paths state.Paths, client *http.Client, confirm ConfirmFunc, onTool fun
 	return &Manager{
 		paths: paths, httpClient: client, confirm: confirm, onTool: onTool,
 		tools: make(map[string]*mcpTool), statuses: make(map[string]Status), usedNames: make(map[string]bool),
-		surfaceStore: store, pinned: make(map[string]contract.ToolDefinition), applied: make(map[string]contract.ToolDefinition), knownAtStart: make(map[string]bool),
+		surfaceStore: store, pinned: make(map[string]contract.ToolDefinition), pinnedIdentity: make(map[string]string), applied: make(map[string]contract.ToolDefinition), knownAtStart: make(map[string]bool),
 	}
 }
 
@@ -199,28 +202,7 @@ func (m *Manager) refresh(ctx context.Context, onlyName string) {
 	defer m.refreshMu.Unlock()
 
 	m.mu.Lock()
-	previous := m.connections
-	if onlyName == "" {
-		m.connections = nil
-		m.tools = make(map[string]*mcpTool)
-		// M3: do NOT reset statuses wholesale — entries for configured servers
-		// would briefly vanish and `mcpServerInfos` would render "not connected".
-		// Set per-server "connecting" entries as each goroutine starts.
-		m.usedNames = make(map[string]bool)
-	} else {
-		filtered := previous[:0]
-		for _, connection := range previous {
-			if connection.server.Name != onlyName {
-				filtered = append(filtered, connection)
-				continue
-			}
-			_ = connection.session.Close()
-			for _, tool := range connection.tools {
-				delete(m.tools, tool.exposedName)
-			}
-		}
-		m.connections = filtered
-	}
+	previous := append([]*connection(nil), m.connections...)
 	m.mu.Unlock()
 
 	config, err := state.LoadMCPConfig(m.paths)
@@ -233,9 +215,14 @@ func (m *Manager) refresh(ctx context.Context, onlyName string) {
 		m.setStatus("secrets", "error", err.Error(), 0)
 		return
 	}
+	configured := make(map[string]bool, len(config.Servers))
+	eligible := make(map[string]bool, len(config.Servers))
+	connected := make(map[string]*connection, len(config.Servers))
+	var connectedMu sync.Mutex
 	var wait sync.WaitGroup
 	for _, server := range config.Servers {
 		server := server
+		configured[server.Name] = true
 		if onlyName != "" && server.Name != onlyName {
 			continue
 		}
@@ -247,6 +234,7 @@ func (m *Manager) refresh(ctx context.Context, onlyName string) {
 			m.setStatus(server.Name, "auth_required", "Run `muhiyacode mcp auth "+server.Name+"`.", 0)
 			continue
 		}
+		eligible[server.Name] = true
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
@@ -264,16 +252,91 @@ func (m *Manager) refresh(ctx context.Context, onlyName string) {
 				m.setStatus(server.Name, stateName, err.Error(), 0)
 				return
 			}
-			m.mu.Lock()
-			m.connections = append(m.connections, connection)
-			for _, tool := range connection.tools {
-				m.tools[tool.exposedName] = tool
-			}
-			m.mu.Unlock()
+			connectedMu.Lock()
+			connected[server.Name] = connection
+			connectedMu.Unlock()
 			m.setStatus(server.Name, "connected", fmt.Sprintf("Connected with %d tool(s).", len(connection.tools)), len(connection.tools))
 		}()
 	}
 	wait.Wait()
+	if ctx.Err() != nil {
+		for _, candidate := range connected {
+			closeMCPConnection(candidate, "cancelled refresh")
+		}
+		return
+	}
+
+	m.publishRefresh(previous, onlyName, refreshRound{configured: configured, eligible: eligible, connected: connected})
+}
+
+type refreshRound struct {
+	configured map[string]bool
+	eligible   map[string]bool
+	connected  map[string]*connection
+}
+
+// selectRefreshConnections retains a working session when its reconnect fails.
+// Servers removed from configuration or missing required auth are not retained.
+func selectRefreshConnections(previous []*connection, onlyName string, round refreshRound) map[string]*connection {
+	selected := make(map[string]*connection, len(previous)+len(round.connected))
+	for _, current := range previous {
+		keep := current.server.Name != onlyName
+		if onlyName == "" {
+			keep = round.configured[current.server.Name] && round.eligible[current.server.Name]
+		} else if !keep {
+			keep = round.eligible[current.server.Name]
+		}
+		if keep {
+			selected[current.server.Name] = current
+		}
+	}
+	for name, candidate := range round.connected {
+		selected[name] = candidate
+	}
+	return selected
+}
+
+func connectionsAndToolsByName(selected map[string]*connection) ([]*connection, map[string]*mcpTool) {
+	names := make([]string, 0, len(selected))
+	for name := range selected {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	connections := make([]*connection, 0, len(names))
+	tools := make(map[string]*mcpTool)
+	for _, name := range names {
+		current := selected[name]
+		connections = append(connections, current)
+		for _, tool := range current.tools {
+			tools[tool.exposedName] = tool
+		}
+	}
+	return connections, tools
+}
+
+// publishRefresh swaps the complete callable surface before closing replaced
+// transports, so concurrent tool discovery never observes a half-built set.
+func (m *Manager) publishRefresh(previous []*connection, onlyName string, round refreshRound) {
+	selected := selectRefreshConnections(previous, onlyName, round)
+	connections, tools := connectionsAndToolsByName(selected)
+	m.mu.Lock()
+	m.connections, m.tools = connections, tools
+	m.usedNames = make(map[string]bool)
+	m.mu.Unlock()
+	for _, retired := range previous {
+		if selected[retired.server.Name] != retired && retired.session != nil {
+			closeMCPConnection(retired, "retired refresh transport")
+		}
+	}
+}
+
+func closeMCPConnection(connection *connection, reason string) {
+	if connection == nil || connection.session == nil {
+		return
+	}
+	if err := connection.session.Close(); err != nil {
+		log.Printf("[mcp] close %s for %s: %v", connection.server.Name, reason, err)
+	}
 }
 
 func (m *Manager) connect(parent context.Context, server state.MCPServer, secrets state.MCPSecrets) (*connection, error) {
@@ -315,7 +378,8 @@ func (m *Manager) connect(parent context.Context, server state.MCPServer, secret
 		session.Close()
 		return nil, fmt.Errorf("list MCP tools for %s: %w", server.Name, err)
 	}
-	connection := &connection{server: server, session: session}
+	fingerprint := state.MCPServerFingerprint(server, secrets.Env[server.Name], secrets.OAuth[server.Name])
+	connection := &connection{server: server, session: session, fingerprint: fingerprint}
 	sort.Slice(listed.Tools, func(i, j int) bool { return listed.Tools[i].Name < listed.Tools[j].Name })
 	used := make(map[string]bool)
 	for _, remote := range listed.Tools {
@@ -328,7 +392,6 @@ func (m *Manager) connect(parent context.Context, server state.MCPServer, secret
 		tool := &mcpTool{manager: m, connection: connection, exposedName: name, remoteName: remote.Name, readOnly: readOnly, definition: canonicalDefinition(contract.ToolDefinition{Type: "function", Function: contract.FunctionDefinition{Name: name, Description: "[MCP:" + server.Name + "] " + firstNonempty(remote.Description, remote.Name), Parameters: normalizeSchema(remote.InputSchema)}})}
 		connection.tools = append(connection.tools, tool)
 	}
-	fingerprint := state.MCPServerFingerprint(server, secrets.Env[server.Name])
 	definitions := make([]contract.ToolDefinition, 0, len(connection.tools))
 	for _, tool := range connection.tools {
 		definitions = append(definitions, tool.definition)
@@ -343,6 +406,7 @@ func (m *Manager) connect(parent context.Context, server state.MCPServer, secret
 	if !m.knownAtStart[fingerprint] {
 		for _, definition := range definitions {
 			m.pinned[definition.Function.Name] = canonicalDefinition(definition)
+			m.pinnedIdentity[definition.Function.Name] = fingerprint
 		}
 		m.knownAtStart[fingerprint] = true
 		m.pendingSurface = true

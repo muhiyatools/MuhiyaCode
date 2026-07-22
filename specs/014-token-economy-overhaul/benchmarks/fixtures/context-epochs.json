@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "suite": "feature-014-context-epochs",
+  "description": "Deterministic relatedness, task-epoch, stale-evidence, and anti-thrashing sequences.",
+  "sequences": [
+    {
+      "id": "related-follow-up",
+      "reset": { "strategy": "materialize", "files": { "a.go": "package sample\n\nfunc helper() string { return \"old\" }\n" } },
+      "turns": [
+        { "prompt": "Change helper in a.go to return new.", "expected_relation": "new_epoch", "expected_epoch": 1 },
+        { "prompt": "Also rename that helper to currentValue.", "expected_relation": "continue", "expected_epoch": 1, "required_facts": ["a.go", "helper"] },
+        { "prompt": "Make its doc comment explain the returned value.", "expected_relation": "continue", "expected_epoch": 1, "required_facts": ["a.go", "currentValue"] }
+      ],
+      "rubric": { "same_model": true, "same_upstream": true, "required_fact_recall": 1.0 }
+    },
+    {
+      "id": "correction-chain",
+      "reset": { "strategy": "materialize", "files": { "config.json": "{\"color\":\"red\",\"size\":2}\n" } },
+      "turns": [
+        { "prompt": "Change color in config.json to blue.", "expected_relation": "new_epoch", "expected_epoch": 1 },
+        { "prompt": "Actually make it teal, not blue.", "expected_relation": "continue", "expected_epoch": 1, "required_facts": ["config.json", "color"] },
+        { "prompt": "Yes, do it.", "expected_relation": "continue", "expected_epoch": 1, "required_facts": ["teal"] }
+      ],
+      "rubric": { "same_model": true, "maximum_epoch_transitions": 1, "required_fact_recall": 1.0 }
+    },
+    {
+      "id": "unrelated-transition",
+      "reset": { "strategy": "materialize", "files": { "calc.go": "package sample\nfunc Add(a,b int) int{return a+b}\n", "README.md": "# Old title\n" } },
+      "turns": [
+        { "prompt": "Add a doc comment to Add in calc.go and verify formatting.", "expected_relation": "new_epoch", "expected_epoch": 1 },
+        { "prompt": "Now change the unrelated README title to Sample Project.", "expected_relation": "new_epoch", "expected_epoch": 2, "forbidden_context_facts": ["full calc.go tool output"] },
+        { "prompt": "Why did we keep the Add API name?", "expected_relation": "new_epoch", "expected_epoch": 3, "required_capsule_facts": ["calc.go", "Add"] }
+      ],
+      "rubric": { "same_model": true, "same_upstream": true, "first_prompt_reduction_minimum": 0.60, "required_fact_recall": 1.0 }
+    },
+    {
+      "id": "stale-file",
+      "reset": { "strategy": "materialize", "files": { "service.go": "package sample\nfunc Name() string{return \"v1\"}\n" } },
+      "events": [
+        { "after_turn": 1, "kind": "external_write", "path": "service.go", "content": "package sample\nfunc Name() string{return \"external-v2\"}\n" }
+      ],
+      "turns": [
+        { "prompt": "Document Name in service.go.", "expected_relation": "new_epoch", "expected_epoch": 1 },
+        { "prompt": "Add a Version function to the same file.", "expected_relation": "continue", "expected_epoch": 1, "required_behavior": "reacquire_stale_source" },
+        { "prompt": "Summarize the current returned name.", "expected_relation": "continue", "expected_epoch": 1, "required_facts": ["external-v2"] }
+      ],
+      "rubric": { "stale_operational_fact_rejected": true, "historical_decision_retained": true }
+    },
+    {
+      "id": "alternating-topics",
+      "reset": { "strategy": "materialize", "files": { "alpha.md": "# Alpha\n", "beta.md": "# Beta\n" } },
+      "turns": [
+        { "prompt": "Add an Overview section to alpha.md.", "expected_relation": "new_epoch", "expected_epoch": 1 },
+        { "prompt": "Add an Install section to beta.md.", "expected_relation": "new_epoch", "expected_epoch": 2 },
+        { "prompt": "In alpha.md add one example under the section we created.", "expected_relation": "new_epoch", "expected_epoch": 3, "required_capsule_facts": ["alpha.md", "Overview"] },
+        { "prompt": "In beta.md make that heading Setup instead.", "expected_relation": "new_epoch", "expected_epoch": 4, "required_capsule_facts": ["beta.md", "Install"] }
+      ],
+      "rubric": { "same_model": true, "required_fact_recall": 1.0, "maximum_spurious_transitions": 0, "hysteresis_requests": 2 }
+    }
+  ]
+}

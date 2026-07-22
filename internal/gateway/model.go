@@ -25,6 +25,14 @@ const (
 	ReasoningReplayPreserve ReasoningReplayPolicy = "preserve"
 )
 
+const OutputPolicyVersion = "014-output-v1"
+
+type PhaseOutputLimit struct {
+	Floor   int
+	Default int
+	Ceiling int
+}
+
 // ModelProfile is the client's boot-frozen capability profile for a model family
 // (feature 007, contracts/capability-profile.md). It is the single source of truth
 // for what the provider supports, so the request builder never emits an unsupported
@@ -40,8 +48,14 @@ type ModelProfile struct {
 	TopP                 float64
 	MaxOutputTokens      int // default max_tokens emitted when the caller does not specify one
 	OutputTokenLimit     int // documented hard ceiling; a requested max_tokens above this is clamped (0 = unknown, no clamp)
+	OutputPolicyVersion  string
+	PhaseOutputLimits    map[contract.ExecutionPhase]PhaseOutputLimit
 	DefaultContextWindow int // operational context budget (deliberate cost/latency bound)
 	ContextWindowLimit   int // documented provider context window; the operational budget must stay within it (0 = unknown)
+	// OutputSharesContext is true when max_tokens is counted inside the same
+	// context window as the prompt. Unknown families default to the conservative
+	// shared-window behavior; DeepSeek explicitly reports separate accounting.
+	OutputSharesContext  bool
 	NeedsToolCallRescue  bool
 	ParsesReasoning      bool
 	ReasoningReplay      ReasoningReplayPolicy
@@ -100,7 +114,7 @@ func ResolveModelProfile(name string) ModelProfile {
 	lower := strings.ToLower(name)
 	switch {
 	case strings.Contains(lower, "deepseek"):
-		return ModelProfile{
+		return withPhaseOutputPolicy(ModelProfile{
 			Family: "deepseek", Temperature: .1, TopP: .95,
 			// TB02: 32k, not the old 16k. A single-file implementation write plus
 			// reasoning did not fit in 16k, so the tool call was cut mid-JSON and
@@ -109,6 +123,7 @@ func ResolveModelProfile(name string) ModelProfile {
 			// from the context window, so headroom here costs nothing per request.
 			MaxOutputTokens: 32_000, OutputTokenLimit: 384_000,
 			DefaultContextWindow: 128_000, ContextWindowLimit: 1_000_000,
+			OutputSharesContext: false,
 			NeedsToolCallRescue: true,
 			ParsesReasoning:     true,
 			ReasoningReplay:     ReasoningReplayStrip,
@@ -120,13 +135,13 @@ func ResolveModelProfile(name string) ModelProfile {
 			JSONModeRules:       "response_format=json_object requires the word \"json\" plus an example of the shape in the prompt, and max_tokens sized to avoid truncation (known: occasional empty content).",
 			BetaFeatures:        deepSeekBetaFeatures,
 			KeepAliveNote:       "streaming keep-alive arrives as \": keep-alive\" comment lines; non-streaming as empty lines — both are liveness, not data.",
-		}
+		})
 	case isMiniMaxModelName(lower):
 		limit := 204_800
 		if isMiniMaxM3Name(lower) {
 			limit = 1_000_000
 		}
-		return ModelProfile{
+		return withPhaseOutputPolicy(ModelProfile{
 			Family: "minimax", Temperature: .15, TopP: .95,
 			// MiniMax counts max_tokens against the shared context budget
 			// (prompt + max_tokens must fit the window), so the operational
@@ -134,23 +149,63 @@ func ResolveModelProfile(name string) ModelProfile {
 			// request 400s with "maximum context length exceeded".
 			MaxOutputTokens: 16_000, OutputTokenLimit: limit,
 			DefaultContextWindow: limit, ContextWindowLimit: limit,
+			OutputSharesContext: true,
 			NeedsToolCallRescue: true, ParsesReasoning: true,
 			ReasoningReplay: ReasoningReplayPreserve, CacheMinPromptTokens: 512,
 			ContinuationLinking: ContinuationSupported,
 			PromptAddendum:      instructions.GatewayMiniMaxAddendumBody,
 			SupportedParams:     []string{"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options", "tools", "tool_choice", "reasoning_split"},
-		}
+		})
 	case strings.Contains(lower, "glm") || strings.Contains(lower, "zhipu"):
-		return ModelProfile{Family: "glm", Temperature: .1, TopP: .9, MaxOutputTokens: 32_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGLMAddendumBody}
+		return withPhaseOutputPolicy(ModelProfile{Family: "glm", Temperature: .1, TopP: .9, MaxOutputTokens: 32_000, DefaultContextWindow: 128_000, OutputSharesContext: true, NeedsToolCallRescue: true, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGLMAddendumBody})
 	default:
-		return ModelProfile{Family: "generic", Temperature: .1, TopP: .95, MaxOutputTokens: 32_000, DefaultContextWindow: 128_000, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGenericAddendumBody}
+		return withPhaseOutputPolicy(ModelProfile{Family: "generic", Temperature: .1, TopP: .95, MaxOutputTokens: 32_000, DefaultContextWindow: 128_000, OutputSharesContext: true, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGenericAddendumBody})
 	}
 }
 
-// OutputBudget resolves the output-token cap for a request (TB02). The catalog's
-// per-model MaxOutput wins when the provider reported one (it was parsed and then
-// ignored before this); otherwise the family default applies. The result is always
-// bounded by the documented ceiling.
+func withPhaseOutputPolicy(profile ModelProfile) ModelProfile {
+	profile.OutputPolicyVersion = OutputPolicyVersion
+	floor := 256
+	if profile.Family == "minimax" {
+		floor = 1_024
+	}
+	profile.PhaseOutputLimits = map[contract.ExecutionPhase]PhaseOutputLimit{
+		contract.ExecutionPhaseOrient:  {Floor: floor, Default: max(floor, 512), Ceiling: 2_000},
+		contract.ExecutionPhaseInspect: {Floor: floor, Default: max(floor, 1_200), Ceiling: 4_000},
+		contract.ExecutionPhaseChange:  {Floor: floor, Default: max(floor, 4_000), Ceiling: 16_000},
+		contract.ExecutionPhaseVerify:  {Floor: floor, Default: max(floor, 1_200), Ceiling: 4_000},
+		contract.ExecutionPhaseFinish:  {Floor: floor, Default: max(floor, 800), Ceiling: 2_000},
+		contract.ExecutionPhaseRecover: {Floor: floor, Default: max(floor, 2_400), Ceiling: 8_000},
+	}
+	return profile
+}
+
+func (p ModelProfile) PhaseOutputBudget(phase contract.ExecutionPhase, requested, contextAllowance int) int {
+	limit, ok := p.PhaseOutputLimits[phase]
+	if !ok {
+		limit = PhaseOutputLimit{Floor: 256, Default: min(2_000, p.MaxOutputTokens), Ceiling: p.MaxOutputTokens}
+	}
+	value := requested
+	if value <= 0 {
+		value = limit.Default
+	}
+	value = max(limit.Floor, value)
+	if limit.Ceiling > 0 {
+		value = min(value, limit.Ceiling)
+	}
+	if p.OutputTokenLimit > 0 {
+		value = min(value, p.OutputTokenLimit)
+	}
+	if contextAllowance > 0 {
+		value = min(value, contextAllowance)
+	}
+	return max(1, value)
+}
+
+// OutputBudget resolves the output-token cap for a request (TB02). The family
+// default is the operational request size; a catalog MaxOutput constrains it.
+// Separate-output families may safely use a larger reported capability. The
+// result is always bounded by the documented ceiling.
 //
 // MiniMax is deliberately excluded from the raise: it counts max_tokens against
 // the SHARED context window (see the profile comment), so extra output headroom
@@ -159,7 +214,12 @@ func ResolveModelProfile(name string) ModelProfile {
 func (p ModelProfile) OutputBudget(catalogMaxOutput int) int {
 	budget := p.MaxOutputTokens
 	if catalogMaxOutput > 0 {
-		budget = catalogMaxOutput
+		// A catalog value is a capability ceiling, not a desirable per-request
+		// default. Raising to it is safe only when output has a separate window;
+		// on shared-window families it would steal input capacity from every turn.
+		if !p.OutputSharesContext || budget <= 0 || catalogMaxOutput < budget {
+			budget = catalogMaxOutput
+		}
 	}
 	value, _ := p.ClampOutputTokens(budget)
 	return value

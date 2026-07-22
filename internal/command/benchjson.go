@@ -16,12 +16,33 @@ import (
 // explicitly flagged estimated); the runner never scrapes rendered output.
 
 type benchUsage struct {
-	PromptTokens     int  `json:"prompt_tokens"`
-	CompletionTokens int  `json:"completion_tokens"`
-	CacheReadTokens  int  `json:"cache_read_tokens"`
-	CacheMissTokens  int  `json:"cache_miss_tokens"`
-	CacheWriteTokens int  `json:"cache_write_tokens"`
-	Reported         bool `json:"reported"`
+	PromptTokens           int  `json:"prompt_tokens"`
+	CompletionTokens       int  `json:"completion_tokens"`
+	CacheReadTokens        int  `json:"cache_read_tokens"`
+	CacheMissTokens        int  `json:"cache_miss_tokens"`
+	CacheWriteTokens       int  `json:"cache_write_tokens"`
+	CacheCreationTokens    int  `json:"cache_creation_tokens"`
+	UncachedInputTokens    int  `json:"uncached_input_tokens"`
+	CacheWriteAvailable    bool `json:"cache_write_available"`
+	CacheCreationAvailable bool `json:"cache_creation_available"`
+	UncachedInputAvailable bool `json:"uncached_input_available"`
+	Reported               bool `json:"reported"`
+}
+
+type benchEconomy struct {
+	MainRequests            int                      `json:"main_requests"`
+	AuxRequests             int                      `json:"aux_requests"`
+	SubagentRequests        int                      `json:"subagent_requests"`
+	MaximumMainPrompt       *int                     `json:"maximum_main_prompt,omitempty"`
+	ReplayAmplification     *float64                 `json:"replay_amplification,omitempty"`
+	RequestsByPhase         map[string]int           `json:"requests_by_phase,omitempty"`
+	RequestsByTransport     map[string]int           `json:"requests_by_transport,omitempty"`
+	Retries                 []contract.RetryUsageRow `json:"retries,omitempty"`
+	TaskEpochCount          int                      `json:"task_epoch_count,omitempty"`
+	CapsuleCount            int                      `json:"capsule_count,omitempty"`
+	SelectedCapsuleRefs     []string                 `json:"selected_capsule_refs,omitempty"`
+	EpochResetReasons       []string                 `json:"epoch_reset_reasons,omitempty"`
+	EpochFirstPromptSavings int                      `json:"epoch_first_prompt_savings,omitempty"`
 }
 
 type benchReview struct {
@@ -50,6 +71,7 @@ type benchSummary struct {
 	Completed     bool            `json:"completed"`
 	Turns         int             `json:"turns"`
 	Usage         benchUsage      `json:"usage"`
+	Economy       benchEconomy    `json:"economy"`
 	CostUSD       float64         `json:"cost_usd"`
 	CostEstimated bool            `json:"cost_estimated"`
 	Review        benchReview     `json:"review"`
@@ -76,6 +98,18 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 	}
 	if stats.Usage.CacheMissTokens != nil {
 		usage.CacheMissTokens = *stats.Usage.CacheMissTokens
+	}
+	if stats.Usage.CacheWriteTokens != nil {
+		usage.CacheWriteTokens = *stats.Usage.CacheWriteTokens
+		usage.CacheWriteAvailable = true
+	}
+	if stats.Usage.CacheCreationTokens != nil {
+		usage.CacheCreationTokens = *stats.Usage.CacheCreationTokens
+		usage.CacheCreationAvailable = true
+	}
+	if stats.Usage.UncachedInputTokens != nil {
+		usage.UncachedInputTokens = *stats.Usage.UncachedInputTokens
+		usage.UncachedInputAvailable = true
 	}
 	review := benchReview{Tier: "none"}
 	if stats.ReviewTier != "" {
@@ -105,7 +139,18 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 		Completed: runErr == nil && stats.StopCause == "" && stats.TerminatedReason == "",
 		Turns:     stats.Turns,
 		Usage:     usage,
-		Review:    review,
+		Economy: benchEconomy{
+			MainRequests: stats.Economy.Aggregate.MainRequests, AuxRequests: stats.Economy.Aggregate.AuxRequests,
+			SubagentRequests:    stats.Economy.Aggregate.SubagentRequests,
+			MaximumMainPrompt:   stats.Economy.Aggregate.MaxMainPromptTokens,
+			ReplayAmplification: stats.Economy.Aggregate.ReplayAmplification,
+			RequestsByPhase:     stats.Economy.RequestsByPhase, RequestsByTransport: stats.Economy.RequestsByTransport,
+			Retries:        stats.Economy.Retries,
+			TaskEpochCount: stats.TaskEpochCount, CapsuleCount: stats.CapsuleCount,
+			SelectedCapsuleRefs: stats.SelectedCapsuleRefs, EpochResetReasons: stats.EpochResetReasons,
+			EpochFirstPromptSavings: stats.EpochFirstPromptSavings,
+		},
+		Review: review,
 		Violations: benchViolations{
 			TerminalReadWhenToolExists: stats.TerminalReadViolations,
 			DuplicateReads:             stats.DuplicateReadViolations,

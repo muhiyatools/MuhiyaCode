@@ -3,11 +3,109 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
+
+type OnboardingAction string
+
+const (
+	OnboardingSuppressed OnboardingAction = "suppressed"
+	OnboardingAskDirect  OnboardingAction = "ask_direct"
+	OnboardingGenerate   OnboardingAction = "generate"
+)
+
+type OnboardingDecision struct {
+	Action            OnboardingAction
+	UseAuxiliaryModel bool
+	Questions         []contract.Question
+	Reason            string
+}
+
+func DecideOnboarding(prompt string, assessment Assessment) OnboardingDecision {
+	if question, ok := directMaterialQuestion(prompt); ok {
+		return OnboardingDecision{Action: OnboardingAskDirect, Questions: []contract.Question{question}, Reason: "explicit_material_choice"}
+	}
+	if assessment.Class == ClassChat || assessment.Class == ClassTiny || clearlyScopedSmallPrompt(prompt, assessment) {
+		return OnboardingDecision{Action: OnboardingSuppressed, Reason: "clear_low_complexity"}
+	}
+	if ShouldConsiderOnboarding(prompt) {
+		return OnboardingDecision{Action: OnboardingGenerate, UseAuxiliaryModel: true, Reason: "material_ambiguity_unresolved"}
+	}
+	return OnboardingDecision{Action: OnboardingSuppressed, Reason: "no_material_ambiguity"}
+}
+
+func clearlyScopedSmallPrompt(prompt string, assessment Assessment) bool {
+	if assessment.Class != ClassSmall && assessment.Class != ClassTiny {
+		return false
+	}
+	return len(pathRE.FindAllStringIndex(prompt, 2)) > 0 || strings.ContainsAny(prompt, ".:/\\`")
+}
+
+func directMaterialQuestion(prompt string) (contract.Question, bool) {
+	lower := strings.ToLower(prompt)
+	if !strings.Contains(lower, "either ") || !strings.Contains(lower, " or ") {
+		return contract.Question{}, false
+	}
+	if !strings.Contains(lower, "not chosen") && !strings.Contains(lower, "which") && !strings.Contains(lower, "choose") {
+		return contract.Question{}, false
+	}
+	topic := "implementation"
+	if strings.Contains(lower, "auth") || strings.Contains(lower, "login") {
+		topic = "authentication"
+	}
+	return contract.Question{
+		Question: "Which " + topic + " option should I implement?",
+		Choices: []contract.QuestionChoice{
+			{Label: "First option", Description: "Use the first option named in the request.", Recommended: true},
+			{Label: "Second option", Description: "Use the second option named in the request."},
+		},
+	}, true
+}
+
+func (e *Engine) prepareTaskPrompt(ctx context.Context, prompt string, profile EffortProfile, assessment Assessment) (string, error) {
+	decision := DecideOnboarding(prompt, assessment)
+	if decision.Action == OnboardingAskDirect && e.callbacks.Ask != nil {
+		answers, err := e.callbacks.Ask(ctx, decision.Questions)
+		if err == nil {
+			return PromptWithAnswers(prompt, answers), nil
+		}
+		return prompt, nil
+	}
+	if decision.Action != OnboardingGenerate || !profile.Onboarding || e.callbacks.Ask == nil {
+		return prompt, nil
+	}
+	admission := EvaluateAuxiliaryAdmission(AuxiliaryAdmissionInput{
+		Kind: AuxiliaryOnboarding, MaterialDecision: true, ExpectedTokenCost: 800, ExpectedMainSavings: 1_600,
+		RemainingRequests: e.remainingAuxiliaryRequests(assessment, contract.ExecutionPhaseOrient), Isolated: true,
+	})
+	if !admission.Allowed {
+		return prompt, nil
+	}
+	e.callbacks.EmitStatus("Clarifying the task...")
+	started := time.Now()
+	model := e.utilityModelID()
+	questions, usage := GenerateOnboardingQuestions(ctx, e.provider, model, prompt, e.session.ID+":sub:onboarding")
+	if err := e.recordUsageAndEmit(func() error {
+		return e.recordAttributedAuxUsage(ctx, auxUsageObservation{
+			model: model, pin: ":sub:onboarding", usage: usage, durationMS: elapsedMS(started),
+			phase: contract.ExecutionPhaseOrient, decisionCode: admission.Code,
+		})
+	}); err != nil {
+		return "", fmt.Errorf("persist onboarding usage: %w", err)
+	}
+	if len(questions) == 0 {
+		return prompt, nil
+	}
+	answers, err := e.callbacks.Ask(ctx, questions)
+	if err != nil {
+		return prompt, nil
+	}
+	return PromptWithAnswers(prompt, answers), nil
+}
 
 func ShouldConsiderOnboarding(prompt string) bool {
 	text := strings.TrimSpace(prompt)

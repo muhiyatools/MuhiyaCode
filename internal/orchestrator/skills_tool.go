@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/instructions"
@@ -23,12 +24,14 @@ import (
 type SkillCatalog struct {
 	entries []SkillListing
 	byName  map[string]SkillListing
+	mu      sync.Mutex
+	bodies  map[string]string
 }
 
 // NewSkillCatalog indexes the session listing. Names are matched
 // case-insensitively because the model retypes them from the prompt.
 func NewSkillCatalog(entries []SkillListing) *SkillCatalog {
-	catalog := &SkillCatalog{entries: entries, byName: make(map[string]SkillListing, len(entries))}
+	catalog := &SkillCatalog{entries: entries, byName: make(map[string]SkillListing, len(entries)), bodies: make(map[string]string)}
 	for _, entry := range entries {
 		key := strings.ToLower(strings.TrimSpace(entry.Name))
 		if key == "" {
@@ -102,17 +105,32 @@ func (e *Engine) loadSkill(entry SkillListing) (string, error) {
 	if e.skillLoader == nil {
 		return "", errNoSkillLoader
 	}
-	return e.skillLoader(entry.Path)
+	key := strings.ToLower(strings.TrimSpace(entry.Name))
+	e.skills.mu.Lock()
+	if body, ok := e.skills.bodies[key]; ok {
+		e.skills.mu.Unlock()
+		return body, nil
+	}
+	e.skills.mu.Unlock()
+	body, err := e.skillLoader(entry.Path)
+	if err == nil {
+		e.skills.mu.Lock()
+		e.skills.bodies[key] = body
+		e.skills.mu.Unlock()
+	}
+	return body, err
 }
 
 func readSkillDefinition() contract.ToolDefinition {
 	return definition("read_skill", instructions.ToolReadSkillDescription, map[string]any{
-		"name": map[string]any{"type": "string", "description": instructions.ToolReadSkillNamePropertyDescription},
+		"name":    map[string]any{"type": "string", "description": instructions.ToolReadSkillNamePropertyDescription},
+		"section": map[string]any{"type": "string", "description": "Optional exact Markdown heading. Used only by section-safe skills; otherwise returns the full mandatory body."},
 	}, []string{"name"})
 }
 
 type readSkillInput struct {
-	Name string `json:"name"`
+	Name    string `json:"name"`
+	Section string `json:"section,omitempty"`
 }
 
 // readSkillTool loads one cataloged skill's instructions (013 contract
@@ -139,7 +157,11 @@ func (e *Engine) readSkillTool(_ context.Context, raw json.RawMessage) (string, 
 	// Already in hand: the manual /skills flow put this skill in the prompt, or
 	// the model already read it this task. Re-sending the body would retransmit
 	// content already in context for no benefit (Constitution V).
-	if e.skillAlreadyProvided(entry.Name) {
+	providedKey := entry.Name
+	if strings.TrimSpace(input.Section) != "" {
+		providedKey += "#" + strings.ToLower(strings.TrimSpace(input.Section))
+	}
+	if e.skillAlreadyProvided(providedKey) || e.skillAlreadyProvided(entry.Name) {
 		return fmt.Sprintf(instructions.ToolReadSkillAlreadyProvidedTmpl, entry.Name), nil
 	}
 	body, err := e.loadSkill(entry)
@@ -149,12 +171,47 @@ func (e *Engine) readSkillTool(_ context.Context, raw json.RawMessage) (string, 
 	if strings.TrimSpace(body) == "" {
 		return "", fmt.Errorf(instructions.ToolReadSkillEmptyBodyTmpl, entry.Name)
 	}
-	e.markSkillProvided(entry.Name)
+	body, sectioned := skillSection(body, input.Section)
+	if !sectioned {
+		providedKey = entry.Name
+	}
+	e.markSkillProvided(providedKey)
 	// Wrap the body in the same <skill name="..."> marker the manual /skills flow
 	// and subagent equipping use, so a later task can see (via seedProvidedSkills)
 	// that this skill is already in the settled history and must not be re-sent
 	// (A-3). Cache-safe: the result is per-turn dynamic content, not the prefix.
-	return skillWrapperMarker + entry.Name + "\">\n" + strings.TrimSpace(body) + "\n</skill>", nil
+	return skillWrapperMarker + providedKey + "\">\n" + strings.TrimSpace(body) + "\n</skill>", nil
+}
+
+func skillSection(body, requested string) (string, bool) {
+	requested = strings.TrimSpace(requested)
+	if requested == "" || !strings.Contains(body, "<!-- section-safe -->") {
+		return body, false
+	}
+	lines := strings.Split(body, "\n")
+	start, level := -1, 0
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		count := 0
+		for count < len(trimmed) && trimmed[count] == '#' {
+			count++
+		}
+		heading := strings.TrimSpace(trimmed[count:])
+		if start < 0 && strings.EqualFold(heading, requested) {
+			start, level = index, count
+			continue
+		}
+		if start >= 0 && count <= level {
+			return strings.Join(lines[start:index], "\n"), true
+		}
+	}
+	if start >= 0 {
+		return strings.Join(lines[start:], "\n"), true
+	}
+	return body, false
 }
 
 // skillAlreadyProvided / markSkillProvided track the per-task provided set.

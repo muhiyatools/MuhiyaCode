@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"sync"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
@@ -32,6 +33,15 @@ type Guard struct {
 	sensitiveMatchOf []string
 	trustMu          sync.Mutex
 }
+
+func sensitiveWorkspaceName(path string) bool {
+	name := strings.ToLower(filepath.Base(path))
+	return name == ".env" || strings.HasPrefix(name, ".env.") ||
+		name == ".npmrc" || name == ".netrc" || name == "_netrc" ||
+		name == "credentials.json" || name == "application_default_credentials.json"
+}
+
+var sensitiveShellNamePattern = regexp.MustCompile(`(?i)(?:^|[\\/'"( ])(?:\.env(?:\.[^\\/'" )]+)?|\.npmrc|\.netrc|_netrc|credentials\.json|application_default_credentials\.json)(?:$|[\\/'" )])`)
 
 // SetMode updates the live authorization policy. The guard is shared by tool
 // calls and the TUI, so reads and updates are synchronized explicitly.
@@ -100,11 +110,9 @@ func (g *Guard) ApprovePath(ctx context.Context, action Action, target string) (
 	if err != nil {
 		return "", err
 	}
-	for _, root := range g.sensitive {
-		if IsInside(root, canonical) {
-			g.emit(fmt.Sprintf("Blocked %s: %s is a protected credential location.", action, target))
-			return "", fmt.Errorf("%w: %s", ErrSensitivePath, target)
-		}
+	if g.IsSensitive(canonical) {
+		g.emit(fmt.Sprintf("Blocked %s: %s is a protected credential location or file.", action, target))
+		return "", fmt.Errorf("%w: %s", ErrSensitivePath, target)
 	}
 	outside := !IsInside(g.root, canonical)
 	if outside {
@@ -156,6 +164,9 @@ func (g *Guard) ApprovePath(ctx context.Context, action Action, target string) (
 // does not follow directory symlinks, so every enumerated path has a canonical
 // ancestry — no per-entry syscall is needed to compare it.
 func (g *Guard) IsSensitive(path string) bool {
+	if sensitiveWorkspaceName(path) {
+		return true
+	}
 	for _, root := range g.sensitive {
 		if IsInside(root, path) {
 			return true
@@ -204,6 +215,9 @@ func (g *Guard) sensitiveShellReference(command string) (string, bool) {
 		if matcher.MatchString(command) {
 			return g.sensitiveMatchOf[i], true
 		}
+	}
+	if sensitiveShellNamePattern.MatchString(command) {
+		return "credential file", true
 	}
 	return "", false
 }

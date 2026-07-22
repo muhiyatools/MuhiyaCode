@@ -129,7 +129,8 @@ func validInvalidationCause(cause contract.InvalidationCause) bool {
 		contract.InvalidationToolsetChange,
 		contract.InvalidationModelSwitch,
 		contract.InvalidationPromptRebuild,
-		contract.InvalidationUserCompact:
+		contract.InvalidationUserCompact,
+		contract.InvalidationTaskEpoch:
 		return true
 	default:
 		return false
@@ -166,6 +167,8 @@ func triggerAllowedForCause(cause contract.InvalidationCause, trigger contract.I
 		return trigger == contract.InvalidationUserAction
 	case contract.InvalidationPromptRebuild:
 		return trigger == contract.InvalidationConfigChange
+	case contract.InvalidationTaskEpoch:
+		return trigger == contract.InvalidationBoundary
 	default:
 		return false
 	}

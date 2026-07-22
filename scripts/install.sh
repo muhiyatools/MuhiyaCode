@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repository="${MUHIYA_REPOSITORY:-muhiya/muhiyacode}"
+repository="${MUHIYA_REPOSITORY:-muhiyatools/MuhiyaCode}"
 version="${MUHIYA_VERSION:-latest}"
 
 case "$(uname -s)" in

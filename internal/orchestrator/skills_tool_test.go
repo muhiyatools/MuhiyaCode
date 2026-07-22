@@ -198,6 +198,43 @@ func TestReadSkillRequiresAName(t *testing.T) {
 	}
 }
 
+func TestReadSkillSectionAddressingAndMandatoryFallback(t *testing.T) {
+	safe := skillEngine(t, map[string]string{"safe": "<!-- section-safe -->\n# Rules\nmandatory\n# Examples\nexample body\n# Other\nother"})
+	raw, _ := json.Marshal(readSkillInput{Name: "safe", Section: "Examples"})
+	out, err := safe.readSkillTool(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "example body") || strings.Contains(out, "other") || strings.Contains(out, "mandatory") {
+		t.Fatalf("section output=%q", out)
+	}
+	unsafe := skillEngine(t, map[string]string{"unsafe": "# Rules\nmandatory\n# Examples\nexample body"})
+	raw, _ = json.Marshal(readSkillInput{Name: "unsafe", Section: "Examples"})
+	out, err = unsafe.readSkillTool(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, "mandatory") || !strings.Contains(out, "example body") {
+		t.Fatalf("mandatory fallback was lossy: %q", out)
+	}
+}
+
+func TestSkillBodyLoadedOncePerSession(t *testing.T) {
+	loads := 0
+	listing := SkillListing{Name: "cached", Path: "virtual"}
+	e := &Engine{skills: NewSkillCatalog([]SkillListing{listing}), history: NewHistory(HistorySnapshot{Version: 1}, nil),
+		skillLoader: func(string) (string, error) { loads++; return "body", nil }}
+	if _, err := e.loadSkill(listing); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.loadSkill(listing); err != nil {
+		t.Fatal(err)
+	}
+	if loads != 1 {
+		t.Fatalf("loads=%d", loads)
+	}
+}
+
 // The tool is advertised only when skills exist: otherwise it is prefix weight
 // the model can only misuse.
 func TestReadSkillDefinitionOnlyWhenSkillsExist(t *testing.T) {

@@ -174,6 +174,10 @@ func (w *Workspace) Grep(ctx context.Context, options GrepOptions) (SearchResult
 		}
 		data, readErr := readTextFile(file, MaxSearchBytes)
 		if readErr != nil {
+			result.SkippedFiles++
+			if result.FirstSkipped == "" {
+				result.FirstSkipped = relativeSlash(w.root, file) + ": " + readErr.Error()
+			}
 			continue
 		}
 		for index, line := range splitLines(string(data)) {
@@ -200,10 +204,10 @@ func (w *Workspace) Glob(ctx context.Context, options GlobOptions) ([]GlobMatch,
 	}
 	pattern := filepath.ToSlash(options.Pattern)
 	var result []GlobMatch
-	errStop := errors.New("glob complete")
+	errStop := errors.New("glob result limit reached")
 	err = filepath.WalkDir(target, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return nil
+			return walkErr
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -235,7 +239,7 @@ func (w *Workspace) Glob(ctx context.Context, options GlobOptions) ([]GlobMatch,
 		return nil
 	})
 	if errors.Is(err, errStop) {
-		err = nil
+		return nil, fmt.Errorf("glob incomplete after %d matches; narrow the path or pattern", maxResults)
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].Path < result[j].Path })
 	return result, err
@@ -574,10 +578,10 @@ func (w *Workspace) suggestByBaseName(missing string) []string {
 
 func collectFiles(root string, maxFiles int, skip func(path string, entry fs.DirEntry) bool) ([]string, error) {
 	var files []string
-	errStop := errors.New("enough files")
+	errStop := errors.New("file scan limit reached")
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
 		if walkErr != nil {
-			return nil
+			return walkErr
 		}
 		if entry.IsDir() && ignoredNames[entry.Name()] && path != root {
 			return filepath.SkipDir
@@ -597,7 +601,7 @@ func collectFiles(root string, maxFiles int, skip func(path string, entry fs.Dir
 		return nil
 	})
 	if errors.Is(err, errStop) {
-		err = nil
+		return nil, fmt.Errorf("workspace scan incomplete after %d files; narrow the search path", maxFiles)
 	}
 	return files, err
 }
