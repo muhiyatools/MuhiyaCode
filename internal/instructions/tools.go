@@ -36,6 +36,7 @@ const (
 	ToolRunShellDescription  = "Run a shell command in the workspace with streaming output and cancellation. Each call runs fresh at the workspace root; a cd affects only that one command, so combine cd and the command in a single call. For reading or searching files use read_file/grep instead — they are cheaper and cache-tracked."
 	ToolGitStatusDescription = "Show concise git status."
 	ToolGitDiffDescription   = "Show the workspace git diff."
+	ToolInspectCodeDescription = "Inspect Go source structure: outline (declarations), definition (symbol lookup), or references (usage sites). Returns compact signatures with line numbers — no bodies."
 )
 
 var (
@@ -54,6 +55,7 @@ var (
 	_ = Register(Text{ID: "tool.run_shell.desc", Audience: MainStatic, Cache: Prefix, Body: ToolRunShellDescription})
 	_ = Register(Text{ID: "tool.git_status.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGitStatusDescription})
 	_ = Register(Text{ID: "tool.git_diff.desc", Audience: MainStatic, Cache: Prefix, Body: ToolGitDiffDescription})
+	_ = Register(Text{ID: "tool.inspect_code.desc", Audience: MainStatic, Cache: Prefix, Body: ToolInspectCodeDescription})
 )
 
 // Synthetic main-loop tool descriptions (engine.go sessionDefinitions).

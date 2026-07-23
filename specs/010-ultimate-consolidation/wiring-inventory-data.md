@@ -49,6 +49,7 @@ together by the session prefix golden.
 | Tool | run_shell | Run a shell command with streaming output and context-based cancellation | internal/workspace/workspace_test.go:255 (TestShellStreamingAndCancellation) | wired |
 | Tool | git_status | Show concise `git status --short` | internal/workspace/workspace_test.go:207 (TestListGlobWriteAndGitToolBehaviors) | wired |
 | Tool | git_diff | Show the workspace `git diff` (optionally staged/path/context-scoped) | internal/workspace/workspace_test.go:215 (TestListGlobWriteAndGitToolBehaviors) | wired |
+| Tool | inspect_code | Inspect Go source structure: outline (declarations), definition (symbol lookup), or references (usage sites) | internal/workspace/codeindex_test.go:161 (TestExecInspectCode_OutlineMode) | wired |
 | Tool | read_plan | REMOVED in v1.1.0 with the planning pipeline — the checklist lives in the workspace tasks.md, which ordinary read_file reaches | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 
 ## Tools — synthetic main-loop (8)

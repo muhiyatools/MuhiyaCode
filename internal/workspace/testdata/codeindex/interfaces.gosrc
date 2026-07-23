@@ -1,0 +1,37 @@
+package codeindex
+
+import "io"
+
+// Reader is a simple interface.
+type Reader interface {
+	Read(p []byte) (n int, err error)
+}
+
+// ReadWriteCloser embeds multiple interfaces.
+type ReadWriteCloser interface {
+	io.Reader
+	io.Writer
+	Close() error
+}
+
+// Handler is a generic handler.
+type Handler[T any] interface {
+	Handle(input T) (T, error)
+	Validate(input T) error
+}
+
+// Processor has methods with complex signatures.
+type Processor interface {
+	Process(ctx interface{ Done() <-chan struct{} }, items []string, opts ...Option) ([]Result, error)
+	Batch(fn func(string) error) error
+}
+
+// Option is a function option type.
+type Option func(*Config)
+
+// Result holds processing output.
+type Result struct {
+	Value  interface{}
+	Status Status
+	Err    error
+}

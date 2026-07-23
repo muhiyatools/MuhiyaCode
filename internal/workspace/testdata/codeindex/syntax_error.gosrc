@@ -1,0 +1,17 @@
+package codeindex
+
+// ValidStruct is parseable.
+type ValidStruct struct {
+	ID   int
+	Name string
+}
+
+// ValidFunc is parseable.
+func ValidFunc() string {
+	return "ok"
+}
+
+// BrokenFunc has a syntax error.
+func BrokenFunc( {
+	// missing closing paren and body
+}

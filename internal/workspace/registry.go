@@ -35,6 +35,7 @@ func (w *Workspace) Tools() []contract.Tool {
 		w.tool("run_shell", instructions.ToolRunShellDescription, object(map[string]any{"command": stringProp("Shell command"), "timeoutMs": intProp(1, 600000)}, []string{"command"}), w.execShell),
 		w.tool("git_status", instructions.ToolGitStatusDescription, object(map[string]any{}, nil), w.execGitStatus),
 		w.tool("git_diff", instructions.ToolGitDiffDescription, object(map[string]any{"staged": boolProp(), "path": stringProp("Optional path"), "context": intProp(1, 100)}, nil), w.execGitDiff),
+		w.tool("inspect_code", instructions.ToolInspectCodeDescription, object(map[string]any{"mode": map[string]any{"type": "string", "enum": []string{"outline", "definition", "references"}}, "path": stringProp("File or directory"), "symbol": stringProp("Symbol name (for definition/references)"), "testFiles": boolProp()}, []string{"mode", "path"}), w.execInspectCode),
 	}
 }
 

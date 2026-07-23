@@ -1,4 +1,4 @@
-INSTRUCTION SYSTEM DUMP — 59 texts, 0 examples
+INSTRUCTION SYSTEM DUMP — 60 texts, 0 examples
 
 ################ AUDIENCE: main-static ################
 
@@ -167,6 +167,10 @@ INSTRUCTION SYSTEM DUMP — 59 texts, 0 examples
 [tool.grep.desc]
   ---
   Regex/literal search with file, line, and text results. Patterns are Go RE2: lookaround ((?= and (?!) and backreferences do not exist — express the intent another way, or set literal=true for exact text.
+
+[tool.inspect_code.desc]
+  ---
+  Inspect Go source structure: outline (declarations), definition (symbol lookup), or references (usage sites). Returns compact signatures with line numbers — no bodies.
 
 [tool.list_files.desc]
   ---

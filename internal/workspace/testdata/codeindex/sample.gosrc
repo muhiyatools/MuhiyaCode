@@ -1,0 +1,73 @@
+package codeindex
+
+import (
+	"context"
+	"fmt"
+	"io"
+)
+
+// MaxItems is a constant.
+const MaxItems = 100
+
+// DefaultName is a package variable.
+var DefaultName = "sample"
+
+// Status is a type alias.
+type Status string
+
+const (
+	StatusActive  Status = "active"
+	StatusClosed  Status = "closed"
+)
+
+// Config holds configuration.
+type Config struct {
+	Name    string
+	Timeout int
+	Verbose bool
+}
+
+// Repository defines data access.
+type Repository interface {
+	Get(ctx context.Context, id string) (Config, error)
+	List(ctx context.Context) ([]Config, error)
+	Close() error
+}
+
+// Service processes requests.
+type Service struct {
+	repo    Repository
+	logger  io.Writer
+	config  Config
+}
+
+// NewService creates a Service.
+func NewService(repo Repository, logger io.Writer) *Service {
+	return &Service{repo: repo, logger: logger}
+}
+
+// Run starts the service.
+func (s *Service) Run(ctx context.Context) error {
+	fmt.Fprintln(s.logger, "starting")
+	return nil
+}
+
+// Stop halts the service.
+func (s *Service) Stop() {
+	fmt.Fprintln(s.logger, "stopping")
+}
+
+// ProcessItem handles one item by ID.
+func (s *Service) ProcessItem(ctx context.Context, id string) (Config, error) {
+	return s.repo.Get(ctx, id)
+}
+
+// FormatStatus returns a display string.
+func FormatStatus(s Status) string {
+	return string(s)
+}
+
+var (
+	ErrNotFound  = fmt.Errorf("not found")
+	ErrForbidden = fmt.Errorf("forbidden")
+)
