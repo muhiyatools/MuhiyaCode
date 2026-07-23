@@ -33,7 +33,12 @@ type UsageRecord struct {
 	// ":sub:<kind>", ":sub:onboarding", ":aux") — feature 011 D8. Per-(model,
 	// pin) aggregation is what makes mixed-model cache health measurable
 	// (SC-005). Empty on records persisted before feature 011.
-	Pin                string           `json:"pin,omitempty"`
+	Pin string `json:"pin,omitempty"`
+	// Upstream is the provider a routing layer actually served this request
+	// from (OpenRouter reports it; a direct connection does not). Persisted so
+	// a cache miss can be correlated against an upstream change after the fact
+	// — the one cause of a cold prefix that leaves no trace on our side.
+	Upstream           string           `json:"upstream,omitempty"`
 	PromptTokens       *int             `json:"prompt_tokens"`
 	CompletionTokens   *int             `json:"completion_tokens"`
 	CacheReadTokens    *int             `json:"cache_read_tokens"`
@@ -286,8 +291,15 @@ type SessionUsageAggregate struct {
 	// summary divides — must consume these, never the one-sided display sums
 	// above: a record that reported a read with an unknowable miss would
 	// otherwise fabricate part of a hit-rate denominator.
-	PairedCacheRead      int      `json:"paired_cache_read"`
-	PairedCacheMiss      int      `json:"paired_cache_miss"`
+	PairedCacheRead int `json:"paired_cache_read"`
+	PairedCacheMiss int `json:"paired_cache_miss"`
+	// AllStreamHitRate (013 FR-021) is the hit rate over EVERY request in the
+	// session — main loop, subagents, and auxiliary calls alike. It is the figure
+	// the UI shows, because a user asking "what was my session's cache hit rate"
+	// means the whole session; SessionHitRate below deliberately counts only the
+	// main stream and stays as the benchmark KPI, so historical comparisons keep
+	// their meaning. nil when no request reported both operands.
+	AllStreamHitRate     *float64 `json:"all_stream_hit_rate,omitempty"`
 	SessionHitRate       *float64 `json:"session_hit_rate"`
 	SteadyStateHitRate   *float64 `json:"steady_state_hit_rate"`
 	PrefixStabilityRate  *float64 `json:"prefix_stability_rate"`
@@ -355,13 +367,21 @@ func AggregateUsage(records []UsageRecord) SessionUsageAggregate {
 			aggregate.SteadyStateCacheRead += *record.CacheReadTokens
 			aggregate.SteadyStateCacheMiss += *record.CacheMissTokens
 			if record.PromptTokens != nil && record.NewTailTokens != nil {
-				eligible := max(0, *record.PromptTokens-*record.NewTailTokens)
-				aggregate.PrefixStableRead += *record.CacheReadTokens
-				aggregate.PrefixStableEligible += eligible
-				prefixStabilityAvailable = prefixStabilityAvailable || eligible > 0
+				// A-7: accumulate the numerator only when there IS an eligible prefix.
+				// A degenerate record (NewTailTokens >= PromptTokens) clamps eligible to
+				// 0, so adding its CacheReadTokens would inflate the ratio past 100%.
+				if eligible := max(0, *record.PromptTokens-*record.NewTailTokens); eligible > 0 {
+					aggregate.PrefixStableRead += *record.CacheReadTokens
+					aggregate.PrefixStableEligible += eligible
+					prefixStabilityAvailable = true
+				}
 			}
 		}
 	}
+	// Paired sums already exclude one-sided payloads, so this cannot fabricate a
+	// denominator (Constitution VI); CacheAvailable>0 means at least one request
+	// genuinely reported both operands.
+	aggregate.AllStreamHitRate = hitRateValues(aggregate.PairedCacheRead, aggregate.PairedCacheMiss, aggregate.CacheAvailable > 0)
 	aggregate.SessionHitRate = hitRateValues(sessionRateRead, sessionRateMiss, sessionRateAvailable)
 	aggregate.SteadyStateHitRate = hitRateValues(aggregate.SteadyStateCacheRead, aggregate.SteadyStateCacheMiss, steadyStateRateAvailable)
 	aggregate.PrefixStabilityRate = ratioValues(aggregate.PrefixStableRead, aggregate.PrefixStableEligible, prefixStabilityAvailable)
@@ -408,6 +428,12 @@ type PrefixShapeSnapshot struct {
 	SystemHash string `json:"systemHash"`
 	ToolsHash  string `json:"toolsHash"`
 	ModelID    string `json:"modelId"`
+	// Upstream is the routing-layer provider that last served this session
+	// (OpenRouter reports it; a direct connection does not). It rides here
+	// because it belongs to exactly the same question the rest of this snapshot
+	// answers — "will the next request find its prefix already cached?" — and a
+	// resume that forgets it asks a machine that never saw the conversation.
+	Upstream string `json:"upstream,omitempty"`
 }
 
 // PrefixShapeSnapshotVersion is the current prefix_shape.json schema version.

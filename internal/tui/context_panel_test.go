@@ -9,13 +9,13 @@ import (
 	"github.com/muhiya/muhiyacode/internal/orchestrator"
 )
 
-// Feature 008 T026 — /context panel rewrite (contracts/usage-display.md §2–§4).
+// Feature 008 T026 built a nine-section diagnostic panel here. 013 FR-023
+// replaced it with an essentials card, so these tests now pin what the card
+// SHOWS and — just as importantly — what it no longer shows.
 
-// contextPanelReport builds a hand-rolled fixture: two per-model rows (one with
-// a nil cost), categories summing to the context limit, API/active time and
-// lines± set, and session credits under the priced/eligible fallback.
+// contextPanelReport is a full engine report: the card must ignore most of it.
 func contextPanelReport() orchestrator.ContextReport {
-	session, steady := 0.75, 0.9
+	allStream, session, steady := 0.95, 0.75, 0.9
 	cost := 0.004 // 0.40 credits at 100 credits/USD
 	return orchestrator.ContextReport{
 		HistoryTokens: 90_000, ContextLimit: 100_000, Percent: 90,
@@ -23,176 +23,129 @@ func contextPanelReport() orchestrator.ContextReport {
 		SessionCreditsPriced: 1, SessionCreditsEligible: 3,
 		APITimeMS: 83_000, ActiveMS: 754_000, LinesAdded: 120, LinesRemoved: 45,
 		UsageAggregate: contract.SessionUsageAggregate{
-			Requests: 15, MainRequests: 12, SubagentRequests: 3,
+			Requests: 15, MainRequests: 12, AuxRequests: 3,
 			SumPrompt: 945_000, SumCompletion: 9_200,
 			SumCacheRead: 900_000, SumCacheMiss: 45_000, CacheAvailable: 12,
-			SessionHitRate: &session, SteadyStateHitRate: &steady,
+			AllStreamHitRate: &allStream, SessionHitRate: &session, SteadyStateHitRate: &steady,
 		},
 		ByModel: []contract.ModelUsageRow{
 			{Model: "reasonix-pro", Requests: 12, UncachedIn: 40_000, Output: 8_000, CacheRead: 900_000, CacheAvailable: true, CostUSD: &cost},
 			{Model: "flash", Requests: 3, UncachedIn: 5_000, Output: 1_200, CacheRead: 0, CacheAvailable: true, CostUSD: nil},
 		},
+		WarmModels: []string{"Reasonix Pro"},
 		Categories: []orchestrator.ContextCategory{
 			{Name: "system prompt", Tokens: 3_000, Percent: 3},
-			{Name: "tool definitions", Tokens: 9_000, Percent: 9},
-			{Name: "project memory & skills", Tokens: 8_000, Percent: 8},
 			{Name: "conversation", Tokens: 70_000, Percent: 70},
-			{Name: "free", Tokens: 10_000, Percent: 10},
 		},
 	}
 }
 
-// sectionIndex fails the test when the section header is absent.
-func sectionIndex(t *testing.T, report, header string) int {
-	t.Helper()
-	index := strings.Index(report, header)
-	if index < 0 {
-		t.Fatalf("report missing section %q:\n%s", header, report)
-	}
-	return index
-}
-
-// UD-14: the session panel renders first, then window, models, categories,
-// streams, cache health — so clipping drops detail before headlines.
-func TestContextReportSectionOrder(t *testing.T) {
-	report := formatContextReport(contextPanelReport())
-	order := []string{"This session", "Context window", "By model", "Context by category (estimated)", "Streams", "Cache health"}
+// The card is three groups in a fixed order, so a user always finds a figure in
+// the same place.
+func TestContextCardGroupOrder(t *testing.T) {
+	report := formatContextReport(contextPanelReport(), "Reasonix Pro")
 	last := -1
-	for _, header := range order {
-		index := sectionIndex(t, report, header)
+	for _, header := range []string{"Context", "Session", "Model"} {
+		index := strings.Index(report, "\n"+header)
+		if header == "Context" {
+			index = strings.Index(report, header)
+		}
+		if index < 0 {
+			t.Fatalf("card missing group %q:\n%s", header, report)
+		}
 		if index <= last {
-			t.Fatalf("section %q out of order:\n%s", header, report)
+			t.Fatalf("group %q out of order:\n%s", header, report)
 		}
 		last = index
 	}
 }
 
-// UD-6: cost, API time, active time (session-labeled), lines±, and both
-// cache-hit rates render inside the session panel.
-func TestContextReportSessionPanelContent(t *testing.T) {
-	report := formatContextReport(contextPanelReport())
+// FR-019/FR-020: complete counts, comma-grouped, never abbreviated.
+func TestContextCardShowsFullCacheInclusiveNumbers(t *testing.T) {
+	report := formatContextReport(contextPanelReport(), "Reasonix Pro")
 	for _, expected := range []string{
-		"  Credits used: unavailable (1 of 3 requests priced)",
-		"  API time:    1m23s",
-		"  Active time: 12m34s (this session)",
-		"  Lines: +120 −45",
-		"  Prompt / output tokens: 945.0k / 9.2k",
-		"  Cache read / uncached: 900.0k / 45.0k",
-		"  Session hit rate:      75.00%",
-		"  Steady-state hit rate: 90.00%",
+		"  In use:  90,000 of 100,000 tokens (90.0%)",
+		"  Free:    10,000 tokens",
+		"  Tokens:    945,000 in / 9,200 out",
+		"  Cache:     900,000 read / 45,000 uncached",
+		"  Hit rate:  95.00%",
+		"  Running:   Reasonix Pro",
 	} {
 		if !strings.Contains(report, expected) {
-			t.Fatalf("session panel missing %q:\n%s", expected, report)
+			t.Fatalf("card missing %q:\n%s", expected, report)
+		}
+	}
+	for _, abbreviated := range []string{"945.0k", "900.0k", "9.2k", "90.0k"} {
+		if strings.Contains(report, abbreviated) {
+			t.Fatalf("card still abbreviates (%q):\n%s", abbreviated, report)
 		}
 	}
 }
 
-// UD-7/UD-8: one row per model plus a Total; a nil row cost renders
-// "unavailable" and suppresses the Total cost (member-set rule).
-func TestContextReportByModelRowsAndTotal(t *testing.T) {
-	report := formatContextReport(contextPanelReport())
-	var modelLines []string
-	for _, line := range strings.Split(report, "\n") {
-		if strings.Contains(line, "in ") && strings.Contains(line, "cost ") {
-			modelLines = append(modelLines, line)
-		}
-	}
-	if len(modelLines) != 3 {
-		t.Fatalf("by-model lines = %d, want 3 (2 rows + Total):\n%s", len(modelLines), report)
-	}
-	for i, expected := range []string{
-		"reasonix-pro", "flash", "Total",
+// FR-023: everything else is gone. This is the test that keeps the modal from
+// silently re-accumulating diagnostics.
+func TestContextCardDropsDiagnostics(t *testing.T) {
+	report := formatContextReport(contextPanelReport(), "Reasonix Pro")
+	for _, absent := range []string{
+		"By model", "reasonix-pro", "Context by category", "system prompt", "conversation",
+		"Streams", "Cache health", "Prefix stability", "Steady-state", "Pressure",
+		"API time", "Active time", "Lines:", "Requests:",
 	} {
-		if !strings.Contains(modelLines[i], expected) {
-			t.Fatalf("row %d missing %q: %q", i, expected, modelLines[i])
-		}
-	}
-	if !strings.Contains(modelLines[0], "in 40.0k · out 8.0k · read 900.0k · cost 0.40") {
-		t.Fatalf("priced row = %q", modelLines[0])
-	}
-	if !strings.Contains(modelLines[1], "cost unavailable") {
-		t.Fatalf("nil-cost row did not render unavailable: %q", modelLines[1])
-	}
-	if !strings.Contains(modelLines[2], "in 45.0k · out 9.2k · read 900.0k · cost unavailable") {
-		t.Fatalf("Total row = %q (cost must be unavailable when any row's is)", modelLines[2])
-	}
-}
-
-// The Total cost sums only when every row carries one.
-func TestContextReportTotalCostWhenAllRowsPriced(t *testing.T) {
-	fixture := contextPanelReport()
-	other := 0.001 // 0.10 credits
-	fixture.ByModel[1].CostUSD = &other
-	report := formatContextReport(fixture)
-	if !strings.Contains(report, "Total") || !strings.Contains(report, "cost 0.50") {
-		t.Fatalf("all-priced Total cost missing (0.40 + 0.10 = 0.50 credits):\n%s", report)
-	}
-	if strings.Contains(report, "cost unavailable") {
-		t.Fatalf("all-priced table still rendered an unavailable cost:\n%s", report)
-	}
-}
-
-// UD-10: the category table renders name / tokens / percent per row and the
-// single "(estimated)" marker lives in the section header.
-func TestContextReportCategories(t *testing.T) {
-	report := formatContextReport(contextPanelReport())
-	for _, expected := range []string{
-		"Context by category (estimated)",
-		"system prompt",
-		"project memory & skills",
-		"conversation",
-		"free",
-		"70.0k",
-		"70.0%",
-	} {
-		if !strings.Contains(report, expected) {
-			t.Fatalf("categories missing %q:\n%s", expected, report)
-		}
-	}
-	if strings.Count(report, "(estimated)") != 1 {
-		t.Fatalf("\"(estimated)\" must appear exactly once (in the header):\n%s", report)
-	}
-}
-
-// UD-13: every rendered line fits the modal's 72 usable columns — including
-// the by-model table with a pathologically long model ID, which is clamped.
-func TestContextReportLinesFitModalWidth(t *testing.T) {
-	fixture := contextPanelReport()
-	fixture.ByModel[0].Model = strings.Repeat("very-long-model-id-", 4) // 76 chars
-	report := formatContextReport(fixture)
-	for _, line := range strings.Split(report, "\n") {
-		if width := lipgloss.Width(line); width > 72 {
-			t.Fatalf("line exceeds 72 columns (%d): %q", width, line)
-		}
-	}
-	if !strings.Contains(report, "…") {
-		t.Fatalf("over-wide model ID was not clamped:\n%s", report)
-	}
-}
-
-// UD-8: absent sources render "unavailable" — never zeros — and zero lines±
-// renders "Lines: none". Active time restarts at zero on resume (UD-9), so
-// zero is a true value there and renders as a duration.
-func TestContextReportUnavailableStates(t *testing.T) {
-	report := formatContextReport(orchestrator.ContextReport{ContextLimit: 128_000})
-	for _, expected := range []string{
-		"  Credits used: unavailable",
-		"  API time:    unavailable",
-		"  Active time: 0.0s (this session)",
-		"  Lines: none",
-		"  Cache read / uncached: unavailable",
-		"  Session hit rate:      unavailable",
-		"  Steady-state hit rate: unavailable",
-		"  Prefix stability rate: unavailable",
-	} {
-		if !strings.Contains(report, expected) {
-			t.Fatalf("empty report missing %q:\n%s", expected, report)
-		}
-	}
-	// No by-model or category sections when the engine reported none.
-	for _, absent := range []string{"By model", "Context by category"} {
 		if strings.Contains(report, absent) {
-			t.Fatalf("empty report rendered %q:\n%s", absent, report)
+			t.Fatalf("card still renders dropped detail %q:\n%s", absent, report)
 		}
+	}
+}
+
+// FR-023 bounds the card: it must stay scannable at a glance.
+func TestContextCardStaysCompact(t *testing.T) {
+	report := formatContextReport(contextPanelReport(), "Reasonix Pro")
+	lines := strings.Split(report, "\n")
+	content := 0
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			content++
+		}
+		if width := lipgloss.Width(line); width > 72 {
+			t.Fatalf("line exceeds the modal's 72 columns (%d): %q", width, line)
+		}
+	}
+	if content > 14 {
+		t.Fatalf("card has %d content lines, contract caps it at 14:\n%s", content, report)
+	}
+}
+
+// Cost follows the established member-set honesty rule: priced, unavailable
+// with counts, or (when nothing is eligible) omitted entirely.
+func TestContextCardCostHonesty(t *testing.T) {
+	priced := contextPanelReport()
+	cost := 0.05
+	priced.SessionCreditsUSD, priced.SessionCreditsEstimated = &cost, true
+	if got := formatContextReport(priced, "m"); !strings.Contains(got, "Cost:      ~5 credits") {
+		t.Fatalf("estimated cost should carry the ~ marker:\n%s", got)
+	}
+
+	partial := formatContextReport(contextPanelReport(), "m")
+	if !strings.Contains(partial, "Cost:      unavailable (1 of 3 requests priced)") {
+		t.Fatalf("partial pricing must say so:\n%s", partial)
+	}
+
+	none := formatContextReport(orchestrator.ContextReport{ContextLimit: 128_000}, "m")
+	if strings.Contains(none, "Cost:") {
+		t.Fatalf("with nothing priced the cost line is omitted:\n%s", none)
+	}
+}
+
+// FR-022: absent sources read "unavailable", never a stand-in zero.
+func TestContextCardUnavailableStates(t *testing.T) {
+	report := formatContextReport(orchestrator.ContextReport{ContextLimit: 128_000}, "")
+	if !strings.Contains(report, "Hit rate:  unavailable") {
+		t.Fatalf("empty session must report an unavailable rate:\n%s", report)
+	}
+	if strings.Contains(report, "Models") {
+		t.Fatalf("no model names means no Models group:\n%s", report)
+	}
+	if !strings.Contains(report, "In use:  0 of 128,000 tokens") {
+		t.Fatalf("a genuine zero is still a real value:\n%s", report)
 	}
 }

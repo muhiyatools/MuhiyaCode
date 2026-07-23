@@ -18,6 +18,10 @@ type mcpTool struct {
 	exposedName string
 	remoteName  string
 	definition  contract.ToolDefinition
+	// readOnly mirrors the server's readOnlyHint annotation, learned at connect
+	// time. It lets the plan/execute role gate stop refusing the main model a
+	// doc search or a log read (contract.ReadOnlyDeclaring).
+	readOnly bool
 }
 
 type forwardingTool struct {
@@ -27,7 +31,21 @@ type forwardingTool struct {
 
 func (t *mcpTool) Definition() contract.ToolDefinition { return t.definition }
 
+func (t *mcpTool) DeclaresReadOnly() bool { return t.readOnly }
+
 func (t *forwardingTool) Definition() contract.ToolDefinition { return t.definition }
+
+// DeclaresReadOnly asks the LIVE tool, because the annotation is learned on
+// connect and the cached surface this forwarder was built from does not carry
+// it. Before the server connects the answer is false — fail closed, so an
+// unconnected server is treated as mutating rather than assumed harmless.
+func (t *forwardingTool) DeclaresReadOnly() bool {
+	name := t.definition.Function.Name
+	t.manager.mu.RLock()
+	live := t.manager.tools[name]
+	t.manager.mu.RUnlock()
+	return live != nil && live.readOnly
+}
 
 func (t *forwardingTool) Execute(ctx context.Context, arguments json.RawMessage) (string, error) {
 	name := t.definition.Function.Name
@@ -42,6 +60,7 @@ func (t *forwardingTool) Execute(ctx context.Context, arguments json.RawMessage)
 	// server on demand so an unused MCP server still costs nothing at boot.
 	server := serverForTool(name)
 	if server == "" {
+		//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
 		return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
 	}
 	if err := t.manager.EnsureLive(ctx, server); err != nil {
@@ -51,6 +70,7 @@ func (t *forwardingTool) Execute(ctx context.Context, arguments json.RawMessage)
 	live = t.manager.tools[name]
 	t.manager.mu.RUnlock()
 	if live == nil {
+		//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
 		return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
 	}
 	return live.Execute(ctx, arguments)

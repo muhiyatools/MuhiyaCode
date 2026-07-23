@@ -112,6 +112,14 @@ func (l *InspectionLedger) Duplicate(call contract.ToolCall, intact func(string)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if call.ToolName() != "read_file" {
+		// A-4: search dedup (grep/glob/list_files) is invalidated ONLY by workspace
+		// mutations — every agent edit/write/patch/shell clears all search-kind
+		// signatures via invalidatePathLocked (see the entry.Kind == "search" branch
+		// there). Unlike read_file it carries no per-file mtime gate, so a change
+		// made OUTSIDE the agent's tools between turns is not detected; an identical
+		// re-search then serves the prior "already ran" block. This is by design: a
+		// search spans many files with no single freshness key, and the agent is the
+		// workspace's own mutator, so an external mid-session edit is out of scope.
 		entry, ok := l.signatures[callSignature(call)]
 		return entry, ok && intact(entry.CallID)
 	}
@@ -211,8 +219,20 @@ func (l *InspectionLedger) InvalidateFor(call contract.ToolCall) []string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	var dropped []string
+	// apply_patch carries no single "path" argument, but the files it touches are
+	// deterministic (the diff's file headers), so invalidate exactly those rather
+	// than wiping the whole ledger and superseding reads of untouched files (A-2).
+	// Only run_shell and mcp__* — whose effects the harness cannot bound — still
+	// take the blanket wipe.
+	if name == "apply_patch" {
+		for _, target := range contract.ToolTargetPaths(name, []byte(call.ArgumentsJSON())) {
+			dropped = append(dropped, l.invalidatePathLocked(l.pathKey(target))...)
+		}
+		l.saveLocked()
+		return uniqueStrings(dropped)
+	}
 	path := pathArgument(call)
-	if path == "" || name == "apply_patch" || name == "run_shell" || strings.HasPrefix(name, "mcp__") {
+	if path == "" || name == "run_shell" || strings.HasPrefix(name, "mcp__") {
 		for _, coverage := range l.coverage {
 			for _, segment := range coverage.Segments {
 				dropped = append(dropped, segment.CallID)

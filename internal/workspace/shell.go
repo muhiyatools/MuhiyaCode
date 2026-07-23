@@ -21,8 +21,25 @@ type ShellResult struct {
 	TimedOut  bool
 	Cancelled bool
 	Truncated bool
-	Duration  time.Duration
+	// BackgroundLeft is set when the command itself returned but a process it
+	// spawned (a server, a detached job) kept the output pipe open past the kill
+	// grace. The command did not fail — MuhiyaCode simply stopped waiting on the
+	// inherited pipe so the agent stays responsive instead of hanging.
+	BackgroundLeft bool
+	Duration       time.Duration
 }
+
+// shellKillGrace bounds how long Run waits for a process's inherited output
+// pipes to close after the process exits or after a kill is issued. A detached
+// grandchild (e.g. a server launched via Start-Process) can hold those pipes
+// open forever; once the grace elapses Wait force-closes them and returns, so a
+// shell command can never wedge the agent indefinitely.
+const shellKillGrace = 3 * time.Second
+
+// errShellAbandoned is returned internally when even the bounded post-kill wait
+// elapses — the process tree was killed but something still held the pipe. It is
+// treated like a timeout/cancel for reporting (never surfaced as a raw error).
+var errShellAbandoned = errors.New("shell process abandoned after kill grace")
 
 type ShellRunner struct {
 	Preferred   string
@@ -96,9 +113,17 @@ func (r *ShellRunner) runArgv(parent context.Context, cwd, label string, args []
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
-	cmd := exec.Command(args[0], args[1:]...)
+	// CommandContext ties the process to ctx: on deadline or task cancellation Go
+	// invokes cmd.Cancel (below) and then, after WaitDelay, force-closes the
+	// inherited I/O pipes so Wait always returns. Without WaitDelay a detached
+	// grandchild that keeps stdout open (a server started via Start-Process, a
+	// backgrounded job) blocks Wait forever — the root cause of a shell call that
+	// runs for minutes after it should have stopped.
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
 	cmd.Dir = cwd
 	cmd.Env = os.Environ()
+	cmd.Cancel = func() error { killProcessTree(cmd); return nil }
+	cmd.WaitDelay = shellKillGrace
 	prepareCommand(cmd)
 	collector := &boundedWriter{limit: limit, onOutput: r.OnOutput}
 	cmd.Stdout = collector
@@ -107,14 +132,30 @@ func (r *ShellRunner) runArgv(parent context.Context, cwd, label string, args []
 	if err := cmd.Start(); err != nil {
 		return ShellResult{}, err
 	}
+	// Bind the process (and its descendants) to a supervised group/job so
+	// killProcessTree can terminate the whole tree — even a grandchild that
+	// outlived the wrapper shell. releaseProcess detaches without killing on the
+	// normal path so an intentionally-backgrounded process is left running.
+	superviseProcess(cmd)
+	defer releaseProcess(cmd)
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	var waitErr error
 	select {
 	case waitErr = <-done:
+		// Bounded even when a daemon inherited the pipe: WaitDelay closes it.
 	case <-ctx.Done():
-		killProcessTree(cmd)
-		waitErr = <-done
+		// Deadline hit or the task was cancelled. CommandContext already ran Cancel
+		// (the tree kill) and WaitDelay bounds the unwind; wait for Wait to return,
+		// but never past the grace — an orphaned grandchild holding the pipe must
+		// not be able to wedge the agent (which would also freeze Stop, since the
+		// task goroutine cannot unwind until this returns).
+		select {
+		case waitErr = <-done:
+		case <-time.After(shellKillGrace + time.Second):
+			killProcessTree(cmd) // best-effort second attempt
+			waitErr = errShellAbandoned
+		}
 	}
 	output, truncated := collector.Result()
 	if truncated {
@@ -125,9 +166,19 @@ func (r *ShellRunner) runArgv(parent context.Context, cwd, label string, args []
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}
 	if waitErr != nil {
-		var exit *exec.ExitError
-		if !errors.As(waitErr, &exit) && ctx.Err() == nil {
-			return result, waitErr
+		switch {
+		case errors.Is(waitErr, exec.ErrWaitDelay):
+			// The command returned, but a background process it started still held
+			// the output pipe past the grace. Not a failure — report it so the model
+			// knows a process was left running rather than treating it as an error.
+			result.BackgroundLeft = true
+		case errors.Is(waitErr, errShellAbandoned):
+			// Timeout/cancel is already reflected in TimedOut/Cancelled below.
+		default:
+			var exit *exec.ExitError
+			if !errors.As(waitErr, &exit) && ctx.Err() == nil {
+				return result, waitErr
+			}
 		}
 	}
 	return result, nil

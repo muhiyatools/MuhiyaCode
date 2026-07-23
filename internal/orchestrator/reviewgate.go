@@ -23,12 +23,14 @@ import (
 // benchmark harness.
 var reviewLegacyMode = os.Getenv("MUHIYA_BENCH_LEGACY_REVIEW") == "1"
 
-// Review gating (feature 011, D1/D6 — contracts/review-gating.md). Both
-// automatic review triggers (the pipeline validation dispatch and the
-// AutoReview nudge) consult Decide before launching a review subagent; neither
-// may dispatch unconditionally. Explicit user requests NEVER route through
-// here — they run via the ungated model-invoked run_subagent("review") path
-// (contract §6a), in every gating mode including "off".
+// Review gating (feature 011, D1/D6 — contracts/review-gating.md). The
+// automatic review trigger — the AutoReview nudge at the end of a
+// file-changing task — consults Decide before it fires, so a trivial two-file
+// change does not spend a turn on ceremony just because the effort is max.
+//
+// The gate governs the AUTOMATIC trigger only. A user who asks for a review in
+// their prompt gets one: that is ordinary work the session does directly, and
+// no gating mode, including "off", suppresses an explicit request.
 //
 // Decide is deterministic and side-effect-free: same profile, same decision,
 // zero model calls, zero token cost.
@@ -178,8 +180,9 @@ type TaskProfile struct {
 	// risk matcher; empty is valid (paths alone still match).
 	ContentSamples []string
 	GatingMode     ReviewGatingMode
-	// ExplicitRequest is defense in depth only: explicit requests dispatch via
-	// the ungated run_subagent path and normally never reach Decide (§6a).
+	// ExplicitRequest is defense in depth only: an explicitly requested review
+	// is work the session simply does, so it does not reach the automatic
+	// trigger this gate governs (§6a). Set, it forces a review through anyway.
 	ExplicitRequest bool
 }
 
@@ -361,38 +364,9 @@ func (e *Engine) reviewProfileForTask(class TaskClass, filesChanged map[string]b
 	}
 }
 
-// decideValidationReview is the pipeline-validation dispatch gate. Full-depth
-// pipelines exist only for genuinely large work (post-D2 corroborated
-// classification), so the size-based skip rows never apply here — the gate's
-// job at this site is the "off" switch, the tier, the ceiling, and the
-// always-visible rationale. Risk areas in the plan/brief text can still raise
-// focused to deep.
-func (e *Engine) decideValidationReview(class TaskClass, contentSamples []string) ReviewDecision {
-	d := ReviewDecision{TaskType: "logic", RiskAreas: MatchRiskAreas(nil, contentSamples...)}
-	if reviewLegacyMode {
-		d.Tier, d.Rationale = ReviewTierFocused, "legacy baseline mode (pre-011 unconditional review)"
-		return d
-	}
-	if e.reviewGatingMode() == ReviewGatingOff {
-		d.Tier, d.Rationale = ReviewTierSkip, "review gating is off"
-		return d
-	}
-	d.Tier = ReviewTierFocused
-	d.Rationale = fmt.Sprintf("full-pipeline validation (%s)", class)
-	if class == ClassLarge || class == ClassEpic || len(d.RiskAreas) > 0 {
-		d.Tier = ReviewTierDeep
-	}
-	if len(d.RiskAreas) > 0 {
-		d.Rationale += " touching " + strings.Join(d.RiskAreas, ", ")
-	}
-	bucket := e.reviewRepoBucket()
-	if d.Tier == ReviewTierDeep && bucket == RepoBucketTiny && len(d.RiskAreas) == 0 {
-		d.Tier = ReviewTierFocused
-		d.Rationale += " (greenfield: capped at focused)"
-	}
-	d.ProportionalCapPct, d.AbsoluteCapTokens = ceilingsFor(d.Tier, bucket)
-	return d
-}
+// decideValidationReview went with the validation PHASE it gated: there is no
+// pipeline to validate now, and review dispatch is the model's call via
+// reviewProfileForTask.
 
 // setTaskReviewDecision records the gating decision that governed this task so
 // the completion stats and the rationale line can surface it (SC-009). First

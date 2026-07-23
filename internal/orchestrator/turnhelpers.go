@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/gateway"
 )
 
 func (e *Engine) drainSteering(ctx context.Context) bool {
@@ -32,6 +33,58 @@ func (e *Engine) hasSteering() bool {
 	has := len(e.steering) > 0
 	e.mu.Unlock()
 	return has
+}
+
+// turnRecoveryDelay paces the single in-loop retry of a failed provider call.
+// Longer than the provider's own stream retry (that one recovers a dropped
+// connection; this one recovers after the provider's whole retry ladder has
+// already been exhausted, so the upstream deserves a moment).
+const turnRecoveryDelay = 3 * time.Second
+
+// recoverableChatError decides whether a failed turn is worth exactly one more
+// attempt. Delegated to the gateway so the retry policy and the user-facing
+// error text (FriendlyRequestError) are derived from the same classification —
+// they used to be able to disagree about whether a failure was transient.
+func recoverableChatError(err error) bool { return gateway.Recoverable(err) }
+
+// explainRateLimit turns a 429 into an honest statement of WHICH limit was hit.
+// The gateway sends one shape for "slow down" and for "out of budget", so
+// without this the user is told to wait for a window that will never open, and
+// any retry loop hammers a permanent condition. /v1/usage is the only surface
+// that separates them; failing to reach it degrades to the generic text rather
+// than guessing.
+func (e *Engine) explainRateLimit(ctx context.Context, err error) string {
+	if !gateway.IsRateLimited(err) {
+		return ""
+	}
+	usage, usageErr := gateway.FetchUsage(ctx, *e.settings, e.secrets.ProviderAPIKey)
+	if usageErr != nil || usage == nil {
+		return ""
+	}
+	if !usage.BudgetExhausted() {
+		return ""
+	}
+	message := "Your plan's budget window is used up, so this is not a wait-and-retry limit."
+	if reset := strings.TrimSpace(usage.NextReset()); reset != "" {
+		message += " It resets at " + reset + "."
+	}
+	if usage.Credits.ExtraRemaining <= 0 {
+		message += " Top up credits to continue sooner."
+	}
+	return message
+}
+
+// sleepContext waits, but stays cancellable: a user pressing stop during a
+// retry backoff must not have to wait it out.
+func sleepContext(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // persistMessage records one durable event (and its transcript twin). target is
@@ -63,20 +116,10 @@ func (e *Engine) finalize(ctx context.Context, content string) string {
 	if strings.TrimSpace(content) == "" {
 		content = "Done."
 	}
-	// 004 US1 (T014/FR-017): reconcile the answer against recorded plan state so a
-	// finalized-but-incomplete plan discloses its open steps instead of implying
-	// the work is done. Uses only recorded state — no extra model call, no turns.
+	// FR-017: reconcile the answer against the tasks.md checklist so a finished
+	// answer never implies completion while checklist items are still open. Uses
+	// only recorded state — no extra model call, no turns.
 	content = e.appendCompletionDisclosure(content)
-	content = e.appendPipelineAttribution(content)
-	// G1/T020 last-chance sweep: a terminal goal marker in the final answer must
-	// terminate the goal even if no earlier branch scanned it.
-	if e.scanGoalMarker(content) {
-		e.clearGoalSidecar()
-	}
-	// DG1: a goal STILL active here reached task end without a completion/blocked
-	// marker (the H5 breaker, the hard turn ceiling, or an unmarked final answer) —
-	// block it and drop the sidecar so it never resurrects as active on resume.
-	e.reconcileGoalOnTaskEnd()
 	// The task is ending regardless: the user must still see the answer even
 	// if it could not be persisted, so a persistence failure here is
 	// surfaced as a warning rather than turned into a task error (which
@@ -84,25 +127,27 @@ func (e *Engine) finalize(ctx context.Context, content string) string {
 	if err := e.persistAssistant(ctx, content); err != nil {
 		e.callbacks.EmitStatus("Warning: failed to save the final answer to session history: " + err.Error())
 	}
-	// G1/T020: goal control markers are for the engine's parser, not the user.
-	// Strip them from the DISPLAYED answer while leaving persisted history intact
-	// for parsing on resume.
-	return StripGoalMarkers(content)
+	return content
 }
 
-// planDocBlock is the dynamic tail instruction for executing a user-named plan file
-// (P3a). It is built inline (not a registered/cached instruction), so it never
-// affects the prefix cache — it rides the per-task user tail only when a plan
-// document was referenced.
-func planDocBlock(path string) string {
-	target := "the plan file you named"
-	if strings.TrimSpace(path) != "" {
-		target = path
+// appendCompletionDisclosure keeps the final answer honest against the
+// workspace checklist: when tasks.md still has open items, the answer states
+// which ones instead of implying the work is finished. Research B3 recorded
+// that the model over-claims completion; this is the recorded-state-only
+// guard against it (no extra model call, no extra turn).
+func (e *Engine) appendCompletionDisclosure(content string) string {
+	open := e.openChecklistItems()
+	if len(open) == 0 || strings.Contains(strings.ToLower(content), "incomplete:") {
+		return content
 	}
-	return "[plan-document]\nThe user pointed you at an existing plan: " + target +
-		". Read the ENTIRE file first, then mirror its tasks into update_plan (status pending, keeping its order and wording; merge sub-bullets into their parent step). " +
-		"Execute the steps in order, marking each in_progress then completed as you go, and run each step's stated Verify/Acceptance check before marking it done. " +
-		"Do not re-plan or re-research; if a step conflicts with safety or reality, report that instead of silently changing the plan."
+	e.mu.Lock()
+	total := len(e.checklist.Steps)
+	e.mu.Unlock()
+	shown := open
+	if len(shown) > 3 {
+		shown = shown[:3]
+	}
+	return content + fmt.Sprintf("\n\n— %d of %d to-dos incomplete: %s", len(open), total, strings.Join(shown, "; "))
 }
 
 func (e *Engine) redact(value string) string {

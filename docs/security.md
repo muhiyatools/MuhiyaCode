@@ -16,9 +16,21 @@ MuhiyaCode combines model instructions with enforcement in Go. Prompt instructio
 
 ## Permission modes
 
-`normal` is the default and appropriate for unfamiliar repositories. `auto-accept` is intended for trusted disposable or version-controlled workspaces. Shift+Tab or `/permissions` changes the live mode.
+`normal` is the default and appropriate for unfamiliar repositories. `auto-accept` is intended for trusted disposable or version-controlled workspaces. Shift+Tab changes the live mode; the footer always shows which mode is active.
 
 MCP tools are external capabilities. In normal mode every invocation is confirmed; in auto-accept they may run without another prompt. Remove servers that are broader than the task requires.
+
+## Skill reading (`read_skill`)
+
+Skills may live outside the workspace (`~/.agents/skills`, `~/.codex/skills`, `$MUHIYA_SKILLS_DIR`), which the file tools cannot read — real-path containment is unchanged and was **not** widened for this feature.
+
+Instead the model loads a skill through `read_skill`, which is name-keyed, not path-keyed:
+
+- It accepts only a skill **name**, matched against the catalog discovered once at session start. There is no path argument, so the tool cannot be steered at an arbitrary file.
+- The only readable files are the `SKILL.md` documents already discovered under the documented skill roots and already advertised to the model.
+- Bodies are size-bounded (32 KiB) and pass through the same redaction and output pipeline as any other tool result.
+
+Treat an installed skill as trusted instruction content: anyone who can write to your skill folders can influence how the agent works, exactly as with `MUHIYA.md`.
 
 ## Non-goals
 

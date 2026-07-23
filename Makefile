@@ -7,7 +7,7 @@ fmt:
 	go fmt ./...
 
 check-fmt:
-	@test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)
+	@test -z "$$(gofmt -l cmd internal benchmarks)" || (gofmt -l cmd internal benchmarks && exit 1)
 
 vet:
 	go vet ./...
@@ -28,4 +28,3 @@ snapshot:
 
 clean:
 	go clean -testcache
-

@@ -229,7 +229,6 @@ func TestUsageIntegrityThroughApplicationLoop(t *testing.T) {
 	settings := state.DefaultSettings()
 	settings.Provider.BaseURL = server.URL + "/v1"
 	settings.Provider.ActiveModelID = "model"
-	settings.Provider.SubagentModelID = "model"
 	settings.Provider.Models = []contract.Model{{ID: "model", Name: "Model", ContextLimit: 128000}}
 	if err := state.SaveSettings(settings, paths); err != nil {
 		t.Fatal(err)
@@ -269,12 +268,8 @@ func TestUsageIntegrityThroughApplicationLoop(t *testing.T) {
 	}
 }
 
-func TestParsePlanAndKeyValues(t *testing.T) {
+func TestParseKeyValues(t *testing.T) {
 	t.Parallel()
-	plan := parsePlan("- [x] Inspect (completed)\n- [ ] Build (in_progress)\n\nKeep scope tight.\n")
-	if len(plan.Steps) != 2 || plan.Steps[1].Status != contract.PlanInProgress || plan.Note != "Keep scope tight." {
-		t.Fatalf("plan = %+v", plan)
-	}
 	values, err := parseKeyValues([]string{"TOKEN=a=b", "EMPTY="})
 	if err != nil || values["TOKEN"] != "a=b" || values["EMPTY"] != "" {
 		t.Fatalf("values=%v err=%v", values, err)

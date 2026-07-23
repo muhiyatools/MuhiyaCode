@@ -22,12 +22,9 @@ func TestClassificationAndBudgets(t *testing.T) {
 			t.Errorf("Classify(%q) = %s, want %s", test.prompt, got, test.want)
 		}
 	}
-	// Chat still gets no agents, but reasoning effort is the user's chosen
-	// level sent raw (the gateway maps it per provider) — not capped by class.
+	// Reasoning effort is the user's chosen level sent raw (the gateway maps it
+	// per provider) — not capped by class.
 	budget := BudgetFor(Classify("hi", ""), Profile(contract.EffortMax))
-	if budget.MaxAgentRuns != 0 {
-		t.Fatalf("chat should never run agents: %+v", budget)
-	}
 	if budget.Reasoning != contract.ReasoningMax {
 		t.Fatalf("reasoning effort should pass through the user's level: %+v", budget)
 	}
@@ -37,7 +34,7 @@ func TestClassificationAndBudgets(t *testing.T) {
 }
 
 func TestSystemPromptBudgetAndStability(t *testing.T) {
-	ctx := PromptContext{Workspace: `F:\work`, OS: "Windows", Shell: "pwsh", Model: "deepseek-v4-pro", ModelAddendum: "", HasSubagents: true, SubagentModel: "deepseek-v4-flash"}
+	ctx := PromptContext{Workspace: `F:\work`, OS: "Windows", Shell: "pwsh", Model: "deepseek-v4-pro", ModelAddendum: ""}
 	first, second := SystemPrompt(ctx), SystemPrompt(ctx)
 	if first != second {
 		t.Fatal("system prompt is not byte-stable")
@@ -76,7 +73,7 @@ func TestHistoryFoldAndIntactness(t *testing.T) {
 // DeepSeek's implicit prefix cache keeps hitting. This is what raises the hit
 // rate from ~73% toward Reasonix's ~99%.
 func TestPrefixStableAcrossTurnsAndClasses(t *testing.T) {
-	system := SystemPrompt(PromptContext{Workspace: `F:\work`, OS: "windows", Shell: "pwsh", Model: "deepseek-v4-pro", HasSubagents: true, SubagentModel: "deepseek-v4-flash"})
+	system := SystemPrompt(PromptContext{Workspace: `F:\work`, OS: "windows", Shell: "pwsh", Model: "deepseek-v4-pro"})
 	h := NewHistory(HistorySnapshot{Version: 1}, nil)
 
 	// Turn 1: a chat greeting.

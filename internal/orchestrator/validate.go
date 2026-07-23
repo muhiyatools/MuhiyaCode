@@ -19,12 +19,17 @@ func validateCallArgs(call contract.ToolCall, definitions []contract.ToolDefinit
 	}
 	var args map[string]any
 	if err := json.Unmarshal([]byte(raw), &args); err != nil {
-		// A truncated payload ("unexpected end of JSON input") is almost always
-		// the model's own generation cutting off mid-call (live incident: a long
-		// update_plan). Name that cause and the one-step fix instead of echoing
-		// the bare parser error.
+		// A truncated payload ("unexpected end of JSON input") is the model's own
+		// generation cutting off mid-call. The gateway now tags that at the source
+		// (TB01) and the loops answer it without dispatching (TB03), so reaching
+		// here means the tag was unavailable — a non-streaming path, or a provider
+		// that reported no finish reason. Give the SAME recovery either way.
+		//
+		// The prior text ("send a shorter version (fewer, more compact steps)") was
+		// written for an update_plan incident and is actively wrong for a file
+		// write, where "shorter" means dropping the user's features (TB04).
 		if strings.Contains(err.Error(), "unexpected end of JSON input") {
-			return fmt.Errorf("%s: the call's JSON was cut off mid-generation. Re-emit the ENTIRE call in one piece — and if the payload was large, send a shorter version (fewer, more compact steps)", call.ToolName())
+			return fmt.Errorf("%s: %s", call.ToolName(), truncationRecoveryBody(call.ToolName()))
 		}
 		return fmt.Errorf("%s: arguments were not valid JSON (%v)", call.ToolName(), err)
 	}

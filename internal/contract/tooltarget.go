@@ -39,6 +39,22 @@ func ToolTarget(name string, input []byte) string {
 // prefixes stripped. Multiple distinct files render as the first followed by
 // " (+N more)". Returns "" when no file header can be parsed.
 func PatchTargetFile(patch string) string {
+	files := PatchTargetFiles(patch)
+	if len(files) == 0 {
+		return ""
+	}
+	if len(files) == 1 {
+		return files[0]
+	}
+	return fmt.Sprintf("%s (+%d more)", files[0], len(files)-1)
+}
+
+// PatchTargetFiles returns EVERY file a unified diff touches, in order, with
+// a/ and b/ prefixes stripped. PatchTargetFile renders the display form from
+// it; callers that must match a specific path (the tasks.md checklist feed)
+// need the whole set, because a single patch can edit code and the checklist
+// in one call.
+func PatchTargetFiles(patch string) []string {
 	lines := strings.Split(strings.ReplaceAll(patch, "\r\n", "\n"), "\n")
 	name := func(v string) string {
 		v = strings.TrimSpace(strings.SplitN(v, "\t", 2)[0])
@@ -51,6 +67,13 @@ func PatchTargetFile(patch string) string {
 		if !strings.HasPrefix(lines[i], "--- ") || !strings.HasPrefix(lines[i+1], "+++ ") {
 			continue
 		}
+		// A real file header is immediately followed by its first "@@" hunk
+		// header. A body deletion/addition pair — deleting "-- old" (rendered
+		// "--- old") and adding "++ new" (rendered "+++ new") on adjacent lines —
+		// is not, so this stops such a pair from injecting a phantom file (E-3).
+		if i+2 >= len(lines) || !strings.HasPrefix(lines[i+2], "@@") {
+			continue
+		}
 		target := name(strings.TrimPrefix(lines[i+1], "+++ "))
 		if target == "/dev/null" || target == "" {
 			target = name(strings.TrimPrefix(lines[i], "--- "))
@@ -61,11 +84,25 @@ func PatchTargetFile(patch string) string {
 		seen[target] = true
 		files = append(files, target)
 	}
-	if len(files) == 0 {
-		return ""
+	return files
+}
+
+// ToolTargetPaths returns every workspace path a tool call writes, for callers
+// that must decide whether a specific file changed. Only mutating tools are
+// reported; a read or a shell command returns nothing (a shell redirect into a
+// file is deliberately not tracked — the harness cannot parse arbitrary shells).
+func ToolTargetPaths(name string, input []byte) []string {
+	var values map[string]any
+	_ = json.Unmarshal(input, &values)
+	switch name {
+	case "apply_patch":
+		if patch, ok := values["patch"].(string); ok {
+			return PatchTargetFiles(patch)
+		}
+	case "write_file", "edit_file", "multi_edit":
+		if path, ok := values["path"].(string); ok && path != "" {
+			return []string{path}
+		}
 	}
-	if len(files) == 1 {
-		return files[0]
-	}
-	return fmt.Sprintf("%s (+%d more)", files[0], len(files)-1)
+	return nil
 }

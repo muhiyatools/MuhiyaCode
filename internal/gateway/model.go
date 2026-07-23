@@ -102,7 +102,12 @@ func ResolveModelProfile(name string) ModelProfile {
 	case strings.Contains(lower, "deepseek"):
 		return ModelProfile{
 			Family: "deepseek", Temperature: .1, TopP: .95,
-			MaxOutputTokens: 16_000, OutputTokenLimit: 384_000,
+			// TB02: 32k, not the old 16k. A single-file implementation write plus
+			// reasoning did not fit in 16k, so the tool call was cut mid-JSON and
+			// the whole (unusable) payload was re-billed on every later turn. The
+			// documented ceiling is 384k, and DeepSeek bills output separately
+			// from the context window, so headroom here costs nothing per request.
+			MaxOutputTokens: 32_000, OutputTokenLimit: 384_000,
 			DefaultContextWindow: 128_000, ContextWindowLimit: 1_000_000,
 			NeedsToolCallRescue: true,
 			ParsesReasoning:     true,
@@ -136,10 +141,28 @@ func ResolveModelProfile(name string) ModelProfile {
 			SupportedParams:     []string{"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options", "tools", "tool_choice", "reasoning_split"},
 		}
 	case strings.Contains(lower, "glm") || strings.Contains(lower, "zhipu"):
-		return ModelProfile{Family: "glm", Temperature: .1, TopP: .9, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGLMAddendumBody}
+		return ModelProfile{Family: "glm", Temperature: .1, TopP: .9, MaxOutputTokens: 32_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGLMAddendumBody}
 	default:
-		return ModelProfile{Family: "generic", Temperature: .1, TopP: .95, MaxOutputTokens: 16_000, DefaultContextWindow: 128_000, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGenericAddendumBody}
+		return ModelProfile{Family: "generic", Temperature: .1, TopP: .95, MaxOutputTokens: 32_000, DefaultContextWindow: 128_000, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGenericAddendumBody}
 	}
+}
+
+// OutputBudget resolves the output-token cap for a request (TB02). The catalog's
+// per-model MaxOutput wins when the provider reported one (it was parsed and then
+// ignored before this); otherwise the family default applies. The result is always
+// bounded by the documented ceiling.
+//
+// MiniMax is deliberately excluded from the raise: it counts max_tokens against
+// the SHARED context window (see the profile comment), so extra output headroom
+// would shrink the usable input window. For MiniMax the chunked-write protocol,
+// not a bigger cap, is the answer to an oversized write.
+func (p ModelProfile) OutputBudget(catalogMaxOutput int) int {
+	budget := p.MaxOutputTokens
+	if catalogMaxOutput > 0 {
+		budget = catalogMaxOutput
+	}
+	value, _ := p.ClampOutputTokens(budget)
+	return value
 }
 
 func isMiniMaxModelName(lower string) bool {

@@ -21,7 +21,7 @@ func TestOnboardingOpensWithSingleOptionWhenSignedOut(t *testing.T) {
 	if m.modal == nil {
 		t.Fatal("onboarding modal did not open when signed out")
 	}
-	if m.modal.title != "Welcome to MuhiyaCode" {
+	if m.modal.title != "Set up MuhiyaCode" {
 		t.Fatalf("unexpected onboarding title %q", m.modal.title)
 	}
 	if len(m.modal.choices) != 1 || m.modal.choices[0].Label != "Log in with Muhiya Account" {
@@ -101,7 +101,7 @@ func TestOnboardingDefersBehindReplyModal(t *testing.T) {
 	// Answer the trust prompt; onboarding must now surface and the flag clear.
 	m.handleKey(tea.KeyPressMsg{Code: tea.KeyEnter})
 	<-reply
-	if m.modal == nil || m.modal.title != "Welcome to MuhiyaCode" {
+	if m.modal == nil || m.modal.title != "Set up MuhiyaCode" {
 		t.Fatalf("onboarding did not surface after the reply modal closed: %+v", m.modal)
 	}
 	if m.onboardingPending {
@@ -123,7 +123,7 @@ func TestLoginClearsPendingAndLogoutReopens(t *testing.T) {
 	}
 
 	m.handleAction(actionMsg{kind: "logout"})
-	if m.modal == nil || m.modal.title != "Welcome to MuhiyaCode" {
+	if m.modal == nil || m.modal.title != "Set up MuhiyaCode" {
 		t.Fatalf("logout must re-present onboarding: %+v", m.modal)
 	}
 }
@@ -145,7 +145,7 @@ func TestHydrationHoldsPendingPromptWhenSignedOut(t *testing.T) {
 	if got := m.input.Value(); got != "draft prompt" {
 		t.Fatalf("pending prompt not preserved in composer, got %q", got)
 	}
-	if m.modal == nil || m.modal.title != "Welcome to MuhiyaCode" {
+	if m.modal == nil || m.modal.title != "Set up MuhiyaCode" {
 		t.Fatalf("onboarding modal should be open after signed-out hydration: %+v", m.modal)
 	}
 }

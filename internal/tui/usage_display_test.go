@@ -1,12 +1,14 @@
 package tui
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
+// The per-model display table left with the context card (013 FR-023), but the
+// aggregate behind it still matters: a provider that reports no cache fields
+// must never have availability fabricated for it.
 func TestMixedProviderUsageRowsAndUnavailableCache(t *testing.T) {
 	prompt, output := 1000, 100
 	deepRead, deepMiss := 800, 200
@@ -23,8 +25,7 @@ func TestMixedProviderUsageRowsAndUnavailableCache(t *testing.T) {
 	if !rows[0].CacheAvailable || rows[1].CacheAvailable {
 		t.Fatalf("cache availability was fabricated: %+v", rows)
 	}
-	report := strings.Join(formatByModelRows(rows), "\n")
-	if !strings.Contains(report, "deepseek-v4-") || !strings.Contains(report, "minimax-m3") || !strings.Contains(report, "in unavailable") || !strings.Contains(report, "read unavailable") {
-		t.Fatalf("mixed-provider display lost rows/unavailable state:\n%s", report)
+	if rows[1].CacheRead != 0 || rows[1].UncachedIn != 0 {
+		t.Fatalf("a non-reporting provider must contribute no cache tokens: %+v", rows[1])
 	}
 }

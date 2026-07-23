@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/orchestrator"
 )
@@ -26,10 +27,9 @@ func testRuntime(t testing.TB) Runtime {
 	settings := &contract.Settings{Version: 1, PermissionMode: contract.PermissionNormal, Effort: contract.EffortMedium}
 	settings.Provider.Type = "openai-compatible"
 	settings.Provider.ActiveModelID = "main"
-	settings.Provider.SubagentModelID = "fast"
 	settings.Provider.Models = []contract.Model{{ID: "main", Name: "Main", ContextLimit: 64000}, {ID: "fast", Name: "Fast", ContextLimit: 32000}}
 	settings.RTL.Mode = "auto"
-	engine, err := orchestrator.NewEngine(orchestrator.EngineConfig{Settings: settings, Provider: inertProvider{}, Registry: orchestrator.NewRegistry(), InitialPlan: contract.Plan{Steps: []contract.PlanStep{{Title: "Inspect", Status: contract.PlanCompleted}, {Title: "Build", Status: contract.PlanInProgress}}}})
+	engine, err := orchestrator.NewEngine(orchestrator.EngineConfig{Settings: settings, Provider: inertProvider{}, Registry: orchestrator.NewRegistry()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,15 +276,24 @@ func TestCommandPaletteNeverOverflows(t *testing.T) {
 	}
 }
 
-func TestHeaderShowsBothModelsAndNoticeStaysOutOfTranscript(t *testing.T) {
+// TestHeaderIsModelFreeAndNoticeStaysOutOfTranscript: v1.1.0 removed model
+// names from the ambient chrome — users do not manage models, so naming them
+// on every frame was noise. The header keeps brand, version, and the context
+// meter; /context remains the surface that discloses the current pairing.
+func TestHeaderIsModelFreeAndNoticeStaysOutOfTranscript(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "1.0.0", Notice: "Set an API key with /login."})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 90, Height: 30})
 	view := m.View().Content
-	// The header shows both model names; the footer shows the key hints (the
-	// quiet "normal" permission mode intentionally has no badge now — A1 T012).
-	for _, want := range []string{"Main", "Fast", "Esc stop", "Set an API key"} {
+	for _, want := range []string{"MuhiyaCode", "context", "Esc stop", "Set an API key"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q", want)
+		}
+	}
+	// The fixture's model names ("Main", "Fast") must not appear anywhere in
+	// the ambient chrome.
+	for _, forbidden := range []string{"Main", "Fast"} {
+		if strings.Contains(view, forbidden) {
+			t.Fatalf("model name %q still rendered in the chrome", forbidden)
 		}
 	}
 	if len(m.items) != 0 {
@@ -406,6 +415,9 @@ func TestPromptStyleActivityAndPaste(t *testing.T) {
 	// section) shows the checklist with the in-progress step highlighted (A3,
 	// replacing the old "plan N/M" activity bar).
 	m.busy, m.status = true, "Working…"
+	// The panel reads the tasks.md checklist mirror; seed one open item so the
+	// busy branch has something to render.
+	m.plan = contract.Plan{Steps: todoSteps(contract.PlanCompleted, contract.PlanInProgress, contract.PlanPending)}
 	activity := m.renderActivity()
 	if !strings.Contains(activity, "Working…") {
 		t.Fatalf("activity component missing status:\n%s", activity)
@@ -720,40 +732,6 @@ func TestThinkingTextNeverRenders(t *testing.T) {
 	}
 }
 
-// TestPlanReadyModalOpensOnStatsMsg (P2) verifies that a task-complete stats
-// message with PlanReady set opens the Proceed now / Proceed later / Keep
-// planning modal, and that the "Proceed later" choice sets the engine's
-// pending-plan flag and clears plan mode.
-func TestPlanReadyModalOpensOnStatsMsg(t *testing.T) {
-	rt := testRuntime(t)
-	rt.Engine.SetLifecycleState(contract.LifecyclePlanning)
-	m := NewModel(Options{Runtime: rt, Version: "test"})
-	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
-	updated, _ := m.Update(statsMsg(contract.TaskStats{PlanReady: true, TaskClass: "plan"}))
-	m = updated.(*Model)
-	if m.modal == nil {
-		t.Fatal("PlanReady stats did not open the proceed modal")
-	}
-	var labels []string
-	for _, c := range m.modal.choices {
-		labels = append(labels, c.Label)
-	}
-	if !strings.Contains(strings.Join(labels, "|"), "Proceed now") || !strings.Contains(strings.Join(labels, "|"), "Proceed later") || !strings.Contains(strings.Join(labels, "|"), "Keep planning") {
-		t.Fatalf("proceed modal choices wrong: %v", labels)
-	}
-	// Select "Proceed later" (index 1) via the modal's onSelect callback and
-	// pump any command. Proceed later sets the pending-plan flag and clears
-	// plan mode without submitting, so the flag must remain set.
-	cmd := m.modal.onSelect(1)
-	m = pump(t, m, cmd, 30)
-	if !m.runtime.Engine.PendingPlan() {
-		t.Fatal("Proceed later did not set the engine pending-plan flag")
-	}
-	if m.runtime.Engine.PlanMode() {
-		t.Fatal("Proceed later did not clear plan mode")
-	}
-}
-
 // TestTerminatedReasonSurfacesAsWarn (H5) verifies that a task-complete stats
 // message carrying TerminatedReason surfaces as a TUI warn notice so the user
 // knows why the task stopped short of the turn ceiling.
@@ -796,5 +774,80 @@ func TestRTLAndWrappingAreStable(t *testing.T) {
 	markdown := RenderMarkdown("# Result\n\n- one\n- `two`\n```go\nfmt.Println(1)\n```", 24, "off", "auto", newPalette("dark"))
 	if strings.Contains(markdown, "```") || !strings.Contains(markdown, "Result") || !strings.Contains(markdown, "fmt.Println") {
 		t.Fatalf("markdown render = %q", markdown)
+	}
+}
+
+// TestUpdateAvailableSegment (v1.1.0 chrome): the header names a newer
+// published version when one exists, and renders nothing at all otherwise —
+// including when the check never completed (empty latest) or the installed
+// build is ahead of the registry.
+func TestUpdateAvailableSegment(t *testing.T) {
+	frame := func(latest string) string {
+		m := NewModel(Options{Runtime: testRuntime(t), Version: "1.1.0", LatestVersion: latest})
+		m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+		return ansi.Strip(m.View().Content)
+	}
+	available := frame("1.2.0")
+	if !strings.Contains(available, "Update available 1.2.0") {
+		t.Fatalf("newer version not surfaced:\n%s", available)
+	}
+	if !strings.Contains(available, "you have 1.1.0") {
+		t.Fatalf("installed version not shown alongside:\n%s", available)
+	}
+	for _, quiet := range []string{"", "1.1.0", "1.0.9"} {
+		if got := frame(quiet); strings.Contains(got, "Update available") {
+			t.Fatalf("update segment rendered for latest=%q:\n%s", quiet, got)
+		}
+	}
+}
+
+// TestHeaderLayoutOrder pins the v1.1.0 field-test layout: line 1 runs
+// brand+version, then the workspace path, then the context meter. The path is
+// the flexible segment — a long path truncates rather than pushing the context
+// meter off the line.
+func TestHeaderLayoutOrder(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "1.1.0"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
+	line1 := strings.Split(ansi.Strip(m.View().Content), "\n")[1]
+	versionAt := strings.Index(line1, "v1.1.0")
+	pathAt := strings.Index(line1, "muhiya")
+	contextAt := strings.Index(line1, "context")
+	if versionAt < 0 || pathAt < 0 || contextAt < 0 {
+		t.Fatalf("header line 1 missing a segment (version=%d path=%d context=%d):\n%q", versionAt, pathAt, contextAt, line1)
+	}
+	if !(versionAt < pathAt && pathAt < contextAt) {
+		t.Fatalf("header order must be version → path → context:\n%q", line1)
+	}
+}
+
+func TestHeaderKeepsContextMeterOnNarrowTerminals(t *testing.T) {
+	runtime := testRuntime(t)
+	runtime.Session.WorkspacePath = `C:\a\very\deeply\nested\workspace\path\that\keeps\going\and\going\project`
+	m := NewModel(Options{Runtime: runtime, Version: "1.1.0"})
+	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 62, Height: 24})
+	line1 := strings.Split(ansi.Strip(m.View().Content), "\n")[1]
+	if !strings.Contains(line1, "context") {
+		t.Fatalf("a long path pushed the context meter off line 1:\n%q", line1)
+	}
+	if !strings.Contains(line1, "project") {
+		t.Fatalf("path truncation dropped the most-specific segment:\n%q", line1)
+	}
+}
+
+// TestFormatDurationSpacesMinutesAndSeconds pins the requested "3m 07s" shape.
+func TestFormatDurationSpacesMinutesAndSeconds(t *testing.T) {
+	for _, row := range []struct {
+		seconds int
+		want    string
+	}{
+		{42, "42.0s"},
+		{61, "1m 01s"},
+		{90, "1m 30s"},
+		{187, "3m 07s"},
+		{3599, "59m 59s"},
+	} {
+		if got := formatDuration(time.Duration(row.seconds) * time.Second); got != row.want {
+			t.Errorf("formatDuration(%ds) = %q, want %q", row.seconds, got, row.want)
+		}
 	}
 }

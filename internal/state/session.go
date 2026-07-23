@@ -5,10 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
 	"strings"
 	"sync"
 
@@ -43,9 +43,6 @@ func (s *Sessions) New(ctx context.Context, workspace, title string) (contract.S
 		return contract.Session{}, err
 	}
 	if err := writeFileAtomic(filepath.Join(dir, "transcript.jsonl"), nil, false); err != nil {
-		return contract.Session{}, err
-	}
-	if err := s.WritePlan(session.ID, "No task has been planned yet."); err != nil {
 		return contract.Session{}, err
 	}
 	return session, nil
@@ -137,140 +134,47 @@ func readSessionJSONLines[T any](paths Paths, sessionID, name string) ([]T, erro
 		return nil, err
 	}
 	defer file.Close()
-	var result []T
+	var rawLines [][]byte
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
-	for line := 1; scanner.Scan(); line++ {
-		var value T
-		if err := json.Unmarshal(scanner.Bytes(), &value); err != nil {
-			return nil, fmt.Errorf("decode %s line %d: %w", name, line, err)
-		}
-		result = append(result, value)
+	for scanner.Scan() {
+		rawLines = append(rawLines, append([]byte(nil), scanner.Bytes()...))
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, fmt.Errorf("read %s: %w", name, err)
 	}
+	var result []T
+	for i, raw := range rawLines {
+		if len(strings.TrimSpace(string(raw))) == 0 {
+			continue
+		}
+		var value T
+		if err := json.Unmarshal(raw, &value); err != nil {
+			// These files are written append-only with a trailing fsync, so a crash
+			// mid-append can leave only the LAST line partial. Tolerate a malformed
+			// trailing line (return everything parsed so far) rather than discarding
+			// the whole ledger and hard-failing resume (F-2). A malformed line with
+			// real data after it is genuine corruption and still surfaces.
+			if allBlankLines(rawLines[i+1:]) {
+				log.Printf("[state] %s line %d is truncated (likely a crash mid-append); resuming with the %d prior record(s)", name, i+1, len(result))
+				break
+			}
+			return nil, fmt.Errorf("decode %s line %d: %w", name, i+1, err)
+		}
+		result = append(result, value)
+	}
 	return result, nil
 }
 
-func (s *Sessions) WritePlan(sessionID, content string) error {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
+// allBlankLines reports whether every line is whitespace-only, i.e. nothing but a
+// partial trailing record follows the current position.
+func allBlankLines(lines [][]byte) bool {
+	for _, line := range lines {
+		if len(strings.TrimSpace(string(line))) != 0 {
+			return false
+		}
 	}
-	body := []byte(strings.TrimSpace(content) + "\n")
-	if err := writeFileAtomic(filepath.Join(dir, "plan.md"), body, false); err != nil {
-		return err
-	}
-	return writeFileAtomic(filepath.Join(dir, "tasks.md"), body, false)
-}
-
-func (s *Sessions) ReadPlan(sessionID string) (string, error) {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return "", err
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "plan.md"))
-	if os.IsNotExist(err) {
-		return "", nil
-	}
-	return string(data), err
-}
-
-// WriteGoal (G4) persists the active-goal sidecar as goal.json next to the
-// session files, following the WritePlan atomic-write pattern. Only active
-// goals are written; callers clear the sidecar when a goal completes, is
-// blocked, or is cleared so a finished objective never resurrects on resume.
-func (s *Sessions) WriteGoal(sessionID string, snapshot contract.GoalSnapshot) error {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
-	}
-	return writeJSON(filepath.Join(dir, "goal.json"), snapshot, false)
-}
-
-// ReadGoal (G4) loads the goal sidecar. The bool is false when no sidecar
-// exists (no goal was active when the session last closed); a malformed file
-// is treated as absent so a corrupt sidecar never blocks session resume.
-func (s *Sessions) ReadGoal(sessionID string) (contract.GoalSnapshot, bool, error) {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return contract.GoalSnapshot{}, false, err
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "goal.json"))
-	if os.IsNotExist(err) {
-		return contract.GoalSnapshot{}, false, nil
-	}
-	if err != nil {
-		return contract.GoalSnapshot{}, false, err
-	}
-	var snapshot contract.GoalSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return contract.GoalSnapshot{}, false, nil
-	}
-	return snapshot, true, nil
-}
-
-// ClearGoal (G4) removes the goal sidecar. A missing file is not an error so
-// callers can invoke it unconditionally on every goal-clearing transition.
-func (s *Sessions) ClearGoal(sessionID string) error {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(filepath.Join(dir, "goal.json")); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
-}
-
-// WritePlanState (P2) persists the plan-mode and pending-plan flags to the
-// plan_state.json sidecar next to the session files, mirroring the goal
-// sidecar's atomic-write pattern. The plan CONTENT persists via plan.md/
-// tasks.md (WritePlan); this carries only the two flags the proceed flow needs.
-func (s *Sessions) WritePlanState(sessionID string, snapshot contract.PlanStateSnapshot) error {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
-	}
-	return writeJSON(filepath.Join(dir, "plan_state.json"), snapshot, false)
-}
-
-// ReadPlanState (P2) loads the plan-state sidecar. The bool is false when no
-// sidecar exists (no plan mode was active and no plan was pending when the
-// session last closed); a malformed file is treated as absent so a corrupt
-// sidecar never blocks session resume.
-func (s *Sessions) ReadPlanState(sessionID string) (contract.PlanStateSnapshot, bool, error) {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return contract.PlanStateSnapshot{}, false, err
-	}
-	data, err := os.ReadFile(filepath.Join(dir, "plan_state.json"))
-	if os.IsNotExist(err) {
-		return contract.PlanStateSnapshot{}, false, nil
-	}
-	if err != nil {
-		return contract.PlanStateSnapshot{}, false, err
-	}
-	var snapshot contract.PlanStateSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return contract.PlanStateSnapshot{}, false, nil
-	}
-	return snapshot, true, nil
-}
-
-// ClearPlanState (P2) removes the plan-state sidecar when both flags are false
-// (plan mode off and no pending plan). A missing file is not an error so
-// callers can invoke it unconditionally when the state goes fully idle.
-func (s *Sessions) ClearPlanState(sessionID string) error {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(filepath.Join(dir, "plan_state.json")); err != nil && !os.IsNotExist(err) {
-		return err
-	}
-	return nil
+	return true
 }
 
 // WritePrefixShape persists the session-stable prefix shape (Ultimate Polish C3),
@@ -343,104 +247,6 @@ func (s *Sessions) WriteJSON(sessionID, name string, value any) error {
 		return err
 	}
 	return writeJSON(filepath.Join(dir, name), value, false)
-}
-
-// Agent context records (feature 012 R-D3, data-model.md SubagentContextRecord)
-// live as one JSON file per completed subagent run under agents/ inside the
-// session dir. Stored verbatim (byte-identical replay requires it) with the
-// same on-disk protection as history.json; bounded by maxAgentRecords with
-// oldest-completed-first eviction so a long session cannot grow unbounded.
-var agentRecordName = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
-
-const maxAgentRecords = 32
-
-func (s *Sessions) WriteAgentRecord(sessionID, runID string, value any) error {
-	if !agentRecordName.MatchString(runID) {
-		return fmt.Errorf("invalid agent record id %q", runID)
-	}
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return err
-	}
-	agentsDir := filepath.Join(dir, "agents")
-	if err := os.MkdirAll(agentsDir, 0o755); err != nil {
-		return err
-	}
-	// COMPACT encoding, never writeJSON's indented form: the transcript's raw
-	// ReasoningDetails bytes are replayed verbatim on continuation, and
-	// re-indenting a json.RawMessage would change the replayed wire bytes and
-	// break provider prefix identity (research R-F6; caught by
-	// TestAgentRecordRoundTripPreservesBytes).
-	payload, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Errorf("encode agent record %s: %w", runID, err)
-	}
-	if err := writeFileAtomic(filepath.Join(agentsDir, runID+".json"), payload, false); err != nil {
-		return err
-	}
-	pruneAgentRecords(agentsDir)
-	return nil
-}
-
-// ReadAgentRecords returns the raw bytes of every persisted agent record for
-// the session (unordered; each record carries its own completion timestamp).
-// A missing agents/ dir is an empty result, never an error.
-func (s *Sessions) ReadAgentRecords(sessionID string) ([][]byte, error) {
-	dir, err := SessionDir(s.DB.paths, sessionID)
-	if err != nil {
-		return nil, err
-	}
-	entries, err := os.ReadDir(filepath.Join(dir, "agents"))
-	if os.IsNotExist(err) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	var records [][]byte
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		data, readErr := os.ReadFile(filepath.Join(dir, "agents", entry.Name()))
-		if readErr != nil {
-			continue
-		}
-		records = append(records, data)
-	}
-	return records, nil
-}
-
-// pruneAgentRecords enforces the per-session record cap by removing the
-// oldest-modified files beyond maxAgentRecords. Best-effort: eviction failures
-// never surface (the cap is hygiene, not correctness).
-func pruneAgentRecords(agentsDir string) {
-	entries, err := os.ReadDir(agentsDir)
-	if err != nil || len(entries) <= maxAgentRecords {
-		return
-	}
-	type aged struct {
-		name string
-		mod  int64
-	}
-	var files []aged
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
-			continue
-		}
-		info, infoErr := entry.Info()
-		if infoErr != nil {
-			continue
-		}
-		files = append(files, aged{name: entry.Name(), mod: info.ModTime().UnixNano()})
-	}
-	if len(files) <= maxAgentRecords {
-		return
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].mod < files[j].mod })
-	for _, file := range files[:len(files)-maxAgentRecords] {
-		_ = os.Remove(filepath.Join(agentsDir, file.name))
-	}
 }
 
 var secretPatterns = []*regexp.Regexp{

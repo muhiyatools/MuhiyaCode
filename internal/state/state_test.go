@@ -133,7 +133,7 @@ func TestDatabaseCompatibilityAndSessions(t *testing.T) {
 	if err != nil || len(lines) != 1 || lines[0]["content"] == "Bearer abcdefghijklmnop" {
 		t.Fatalf("transcript redaction failed: %#v %v", lines, err)
 	}
-	if _, err := os.Stat(filepath.Join(paths.SessionsDir, session.ID, "plan.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(paths.SessionsDir, session.ID, "transcript.jsonl")); err != nil {
 		t.Fatal(err)
 	}
 }

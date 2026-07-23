@@ -8,29 +8,48 @@ The only compatibility boundary is the user's durable data in `~/.muhiya` (or
 
 - `internal/contract`: dependency-free values and ports shared across layers.
 - `internal/state`: atomic configuration/secrets, SQLite sessions/events/trust,
-  compatible session bundles, transcripts, plans, memory, and checkpoints.
+  compatible session bundles, transcripts, memory, and checkpoints. The
+  `plan.md` / `plan_state.json` sidecars are gone with v1.1.0's pipeline
+  removal; the model's checklist is an ordinary workspace file.
 - `internal/gateway`: OpenAI-compatible streaming, model discovery, usage
   accounting, retries/timeouts, tool-call rescue, and gateway web search.
+- `internal/updatecheck`: one cached npm-registry GET per day behind a 24-hour
+  TTL, feeding the header's "update available" line. Silent on any failure;
+  `MUHIYACODE_NO_UPDATE_CHECK` opts out.
 - `internal/workspace`: symlink-aware path policy, file/search/edit/diff tools,
   shell execution, approvals, risk checks, checkpoints, and skills discovery.
 - `internal/mcpclient`: lifecycle-managed stdio and Streamable HTTP MCP clients,
   namespaced tool schemas, OAuth, deadlines, and failure isolation.
-- `internal/orchestrator`: task classification, effort budgets, prompt compiler,
-  cache-stable history, inspection/knowledge ledgers, subagents, steering,
-  compaction, plan completion, and the bounded landing protocol. Feature 012
-  adds subagent context linking (`contextlink.go`/`contextrecord.go`:
-  continuation-first stream reuse with verbatim transcript records under the
-  session's `agents/` sidecars), the phase read gate (`rolegate.go`), and the
-  harness-served `read_plan` tool.
+- `internal/orchestrator`: task sizing, effort budgets, prompt compiler,
+  cache-stable history, inspection/knowledge ledgers, steering, compaction,
+  the workspace checklist, and the bounded landing protocol. The subagent
+  system — dispatch, the plan/execute role gate, and context linking between
+  delegated runs — is gone: one session now reads, edits, and verifies for
+  itself. In its place, a per-task model advisor (`advisor.go`) picks the
+  model for each task and weighs the switch against its cold-start cost
+  (`switchcost.go`), and the `tasks.md` checklist observer and parser
+  (`checklist.go`) still track the model's own plan.
+- `internal/app`: the frontend-neutral core seam. It holds the types a frontend
+  needs to drive a session — `Runtime`, `Actions`, `Skill`, `UsageData`, and the
+  MCP view models — plus `app.AssemblePrompt`, the single prompt-assembly path
+  every frontend calls. The `internal/tui` names are now aliases of these.
 - `internal/tui`: Bubble Tea v2 presentation. It consumes runtime events and
   owns keyboard input, menus, responsive layout, RTL display, and accessibility.
-- `internal/command`: Cobra command graph and application composition.
+- `internal/command`: Cobra command graph and application composition. It also
+  refreshes the gateway model catalog on a 24-hour TTL, so the default model and
+  the task advisor resolve against current entries.
 - `cmd/muhiyacode`: a minimal executable entry point.
 
 Dependencies point inward toward `contract`; presentation and commands compose
-concrete implementations at the edge. Long-running operations take a
-`context.Context`. Background work is owned by an explicit lifecycle and must
-terminate on cancellation; no package-global worker goroutines are allowed.
+concrete implementations at the edge. `internal/app` sits above `orchestrator`
+and below the frontends: it may import `orchestrator`, and it must never import
+`internal/tui` or any other frontend. Those types previously lived in
+`internal/tui` and were implemented by `internal/command`, which made the
+composition root depend on the terminal renderer just to name its own return
+values; extracting them is groundwork for the planned desktop app. Long-running
+operations take a `context.Context`. Background work is owned by an explicit
+lifecycle and must terminate on cancellation; no package-global worker
+goroutines are allowed.
 
 ## Product invariants
 
@@ -42,16 +61,30 @@ terminate on cancellation; no package-global worker goroutines are allowed.
    ancestors, including symlinks and Windows junctions.
 4. Every assistant tool call has exactly one ordered tool result, including
    cancellation and failure paths.
-5. Across a session, model request prefixes are byte-stable. Folding, trimming,
-   compaction, model changes, and tool-surface changes occur only at deliberate,
-   attributable boundaries.
-6. All task classes use one stable full prompt and pinned tool surface. Prompt
-   and schema regression budgets are enforced in tests.
-7. Independent subagents may run concurrently, but edits and ordinary tools
-   stay ordered. Read-only subagents have physically restricted tool registries.
-   Each subagent kind carries its own provider cache pin (`:sub:<kind>`), an
-   optional provider-reported token ceiling, and — for the review kind — a
-   deterministic dispatch gate (feature 011) with a user-visible rationale.
+5. Within a task, model request prefixes are byte-stable. Folding, trimming,
+   compaction, and tool-surface changes occur only at deliberate, attributable
+   boundaries — a model switch is one of them, recorded as an
+   `InvalidationModelSwitch` event. The model for a task is chosen once — by
+   configuration, a pin, or a per-task advisor call — and then frozen for that
+   task's duration: no path switches it once the task is under way. Between
+   tasks the advisor may move to a different model, but only when the switch is
+   affordable: the conversation is still small enough to re-read for free, or
+   the target model is already warm in this session. The user does not manage
+   models; there is no `/model`.
+6. All task classes use one stable full prompt and pinned tool surface. Task
+   sizing sets tool and turn budgets only — it never selects a different
+   execution path or prompt. Prompt and schema regression budgets are enforced
+   in tests.
+7. There is exactly one agent and one toolset: the session that reads the
+   workspace is the session that edits it, verifies it, and reports on it —
+   no restricted registry, and no gate refusing a mutation on the grounds that
+   it belongs to someone else. A deterministic review gate (feature 011,
+   `reviewgate.go`) still decides whether a change is substantial or risky
+   enough to warrant a dedicated review pass and how deep it should go, with a
+   user-visible rationale line; risk-area changes (auth, billing, concurrency,
+   security config, migrations) always review regardless of size. The model
+   verifies its own work: it runs the check that proves a change works and
+   ticks the checklist item, and never reports a result it did not observe.
 8. A task never silently dies at a turn cap: it escalates once when warranted,
    receives a convergence warning, then lands with tools disabled and a factual
    final report.
@@ -60,7 +93,15 @@ terminate on cancellation; no package-global worker goroutines are allowed.
    token palette (dark/light, `NO_COLOR`-aware); the terminal's own background is
    respected rather than force-filled, and all non-ASCII glyphs route through a
    single table with an ASCII fallback. Below a 60×20 floor the UI shows one
-   clean "terminal too small" message instead of a collapsed layout.
+   clean "terminal too small" message instead of a collapsed layout. Header
+   line 1 carries brand+version, the workspace path, an optional update notice,
+   and the context meter; the path is the one flexible segment — the fixed
+   segments are measured first and it takes what is left, left-truncated so the
+   most specific directories survive and the meter is never pushed off.
+   Structured tool payloads are rendered as what they represent, not as raw
+   JSON (an `ask_user` result reads as the question and the chosen answer; the
+   payload itself is the model-facing contract and is unchanged), with a
+   fallback to the generic rendering when a payload does not parse.
 10. Per-task cost is measured, never estimated: credits shown in the task summary
     and `/context` come only from the gateway's per-request `muhiya_log` cost
     field (USD, ×100 = credits), summed over the task's own usage records; any
@@ -71,7 +112,7 @@ terminate on cancellation; no package-global worker goroutines are allowed.
     arm64, with one linker-injected version and checksumed archives.
 12. The TUI is mouse-native: an immutable per-frame InteractionMap resolves every
     click/hover to the same action as its keyboard equivalent (command rows,
-    modal/MCP choices, tool/subagent chips, the composer), and dragging over
+    modal/MCP choices, tool chips, the composer), and dragging over
     transcript text selects it with Ctrl+C copying via OSC 52. All of this is
     presentation-only — it never reaches the request-assembly path or the prefix
     cache. On very long sessions the in-memory transcript window is bounded (with a

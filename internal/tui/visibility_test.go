@@ -74,18 +74,24 @@ func TestPaletteNeverCombinesFaintWithColor(t *testing.T) {
 	}
 }
 
-// TestHeaderHasTopPadding: the top bar starts with one blank spacer row so it
-// never sits flush against the terminal's upper edge, and the layout height
-// accounting (which counts rendered lines) stays consistent with the render.
-func TestHeaderHasTopPadding(t *testing.T) {
+// TestHeaderIsAFixedIdentityRow: the top bar starts with one blank spacer row so
+// it never sits flush against the terminal's upper edge, and it is exactly three
+// rows — spacer, identity line, rule. The header used to grow a second line for
+// the focused-agent view; with one session there is nothing to focus, so the
+// height is fixed and the layout accounting can rely on it.
+func TestHeaderIsAFixedIdentityRow(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	header := m.renderHeader()
 	if !strings.HasPrefix(header, "\n") {
 		t.Fatalf("header lacks the top spacer row:\n%q", header)
 	}
-	if lineCount(header) != 4 {
-		t.Fatalf("header should be spacer + two lines + rule (4 rows), got %d", lineCount(header))
+	if lineCount(header) != 3 {
+		t.Fatalf("header should be spacer + identity line + rule (3 rows), got %d:\n%q", lineCount(header), header)
+	}
+	rows := strings.Split(header, "\n")
+	if !strings.Contains(rows[1], "MuhiyaCode") || !strings.Contains(rows[1], "context") {
+		t.Fatalf("the identity row should carry the brand and the context meter:\n%q", rows[1])
 	}
 }
 

@@ -69,8 +69,24 @@ func (e *Engine) emitColdStartNoticeIfPending(ctx context.Context) {
 	if !ok {
 		return
 	}
-	e.callbacks.EmitNotice(fmt.Sprintf("Cache restarted cold — ~%s re-read uncached this turn (%s). Normal on a resumed session; the next turns reuse the warm cache.", contract.HumanTokens(tokens), cause))
+	e.callbacks.EmitNotice(fmt.Sprintf("Cache restarted cold — ~%s re-read uncached this turn (%s). Normal on a resumed session; the next turns reuse the warm cache.", contract.FullTokens(tokens), cause))
 	e.recordHarnessEvent(ctx, contract.HarnessProvider, "cache-cold-start", cause)
+}
+
+// emitUpstreamNoticeIfPending reports a routing-layer upstream change once, at
+// the same call site and for the same reason as the cold-start notice: a miss
+// the user is being billed for deserves its actual cause, and this is the one
+// cause that leaves no evidence in anything we sent.
+func (e *Engine) emitUpstreamNoticeIfPending(ctx context.Context) {
+	e.taskMu.Lock()
+	notice := e.pendingUpstreamNotice
+	e.pendingUpstreamNotice = ""
+	e.taskMu.Unlock()
+	if notice == "" {
+		return
+	}
+	e.callbacks.EmitNotice(notice)
+	e.recordHarnessEvent(ctx, contract.HarnessProvider, "upstream-changed", notice)
 }
 
 // checkResumeDrift, on the FIRST request of a resumed session, compares the
@@ -98,7 +114,7 @@ func (e *Engine) checkResumeDrift(ctx context.Context, shape PrefixShape) {
 		changed = append(changed, "the tool set")
 		_ = e.recordInvalidation(ctx, contract.InvalidationEvent{
 			Cause: contract.InvalidationToolsetChange, Trigger: contract.InvalidationBoundary,
-			Scope: "tool set changed since the last session (MCP servers)", RequestSeq: e.nextRequestSeq(),
+			Scope: "tool set changed since the last session (MCP servers or installed skills)", RequestSeq: e.nextRequestSeq(),
 		})
 	}
 	if prior.ModelID != shape.ModelID && len(changed) == 0 {
@@ -170,7 +186,8 @@ func (e *Engine) staleResumePruneIfNeeded(ctx context.Context, profile EffortPro
 // persistPrefixShapeOnce writes this session's stable prefix shape to the sidecar
 // once, after the first successful request, so the NEXT resume has a baseline to
 // compare against. It re-arms whenever the model switches (SwitchModel resets the
-// flag) so the sidecar always reflects the current stable shape.
+// flag) or the routing layer moves us to a different upstream, so the sidecar
+// always reflects the shape a resume would actually be resuming onto.
 func (e *Engine) persistPrefixShapeOnce(ctx context.Context, shape PrefixShape) {
 	if e.prefixShapeSaved || e.persistence.WritePrefixShape == nil {
 		return
@@ -181,5 +198,6 @@ func (e *Engine) persistPrefixShapeOnce(ctx context.Context, shape PrefixShape) 
 		SystemHash: shape.SystemHash,
 		ToolsHash:  shape.ToolsHash,
 		ModelID:    shape.ModelID,
+		Upstream:   e.upstreamPin(),
 	})
 }

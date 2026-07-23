@@ -232,7 +232,7 @@ func TestLegacyModeRestoresUnconditionalReview(t *testing.T) {
 }
 
 // Legacy mode also restores single-signal Large classification so baseline
-// runs route tasks into the full pipeline exactly as the old build did.
+// runs escalate tasks to the heaviest class exactly as the old build did.
 func TestLegacyModeRestoresSingleSignalLarge(t *testing.T) {
 	reviewLegacyMode = true
 	defer func() { reviewLegacyMode = false }()

@@ -3,9 +3,53 @@ package orchestrator
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
+
+func TestUsagePersistenceDoesNotBlockSnapshots(t *testing.T) {
+	persistStarted := make(chan struct{})
+	releasePersist := make(chan struct{})
+	engine := &Engine{persistence: Persistence{AppendUsage: func(context.Context, contract.UsageRecord) error {
+		close(persistStarted)
+		<-releasePersist
+		return nil
+	}}}
+	persistDone := make(chan error, 1)
+	go func() {
+		persistDone <- engine.recordUsageAndEmit(func() error {
+			return engine.recordAuxUsage(context.Background(), "utility", ":aux", contract.Usage{}, nil)
+		})
+	}()
+	<-persistStarted
+
+	snapshotDone := make(chan struct{})
+	go func() {
+		engine.UsageAggregate()
+		close(snapshotDone)
+	}()
+	select {
+	case <-snapshotDone:
+	case <-time.After(time.Second):
+		close(releasePersist)
+		t.Fatal("usage snapshot blocked on persistence")
+	}
+	close(releasePersist)
+	if err := <-persistDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestUsageAggregateSnapshotDoesNotAliasEngine(t *testing.T) {
+	rate := 0.75
+	engine := &Engine{usageAggregate: contract.SessionUsageAggregate{AllStreamHitRate: &rate}}
+	snapshot := engine.UsageAggregate()
+	*snapshot.AllStreamHitRate = 0
+	if *engine.usageAggregate.AllStreamHitRate != rate {
+		t.Fatal("usage snapshot mutated engine-owned all-stream hit rate")
+	}
+}
 
 func TestEnginePersistsUsageSequenceAttributionAndResumeAggregate(t *testing.T) {
 	read1, miss1, read2, miss2 := 0, 100, 90, 10
@@ -167,40 +211,37 @@ func TestModelSwitchRefreshesPromptAndRecordsBoundary(t *testing.T) {
 	}
 }
 
-// TestTaskUsageDeltaCoversAllStreamsAndLiveEmissionMatches: the per-task usage
+// TestTaskUsageDeltaCoversEveryRequestAndLiveEmissionMatches: the per-task usage
 // (and therefore the summary's cache %) must aggregate EVERY request the task
-// made — main turns AND subagent runs — and the live Usage callback must land
-// on exactly the same task-cumulative numbers, not the last request's.
-func TestTaskUsageDeltaCoversAllStreamsAndLiveEmissionMatches(t *testing.T) {
-	mainRead1, mainMiss1 := 0, 100
-	subRead, subMiss := 40, 60
-	mainRead2, mainMiss2 := 200, 8
+// made, and the live Usage callback must land on exactly the same
+// task-cumulative numbers, not the last request's.
+func TestTaskUsageDeltaCoversEveryRequestAndLiveEmissionMatches(t *testing.T) {
+	read1, miss1 := 0, 100
+	read2, miss2 := 40, 60
+	read3, miss3 := 200, 8
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
-		{ToolCalls: []contract.ToolCall{contract.NewToolCall("s", "run_subagent", `{"agent":"explore","task":"survey the config loader"}`)}, Usage: reportedUsage(100, 5, &mainRead1, &mainMiss1)},
-		{Content: "Findings: the loader is in config.go; validated.", Usage: reportedUsage(90, 4, &subRead, &subMiss)}, // subagent stream
-		{Content: "All done.", Usage: reportedUsage(208, 6, &mainRead2, &mainMiss2)},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("r1", "read_file", `{"path":"config.go"}`)}, Usage: reportedUsage(100, 5, &read1, &miss1)},
+		{ToolCalls: []contract.ToolCall{contract.NewToolCall("r2", "read_file", `{"path":"loader.go"}`)}, Usage: reportedUsage(90, 4, &read2, &miss2)},
+		{Content: "All done.", Usage: reportedUsage(208, 6, &read3, &miss3)},
 	}}
 	settings := engineSettings()
-	settings.Effort = contract.EffortHigh // grants a subagent budget
+	settings.Effort = contract.EffortHigh
 	var emitted []contract.Usage
 	engine, err := NewEngine(EngineConfig{
 		Settings: &settings, Session: contract.Session{ID: "lifecycle", WorkspacePath: t.TempDir()},
-		Provider: provider, Registry: NewRegistry(&recordingTool{name: "run_subagent"}, &recordingTool{name: "read_file"}),
+		Provider: provider, Registry: NewRegistry(&recordingTool{name: "read_file"}),
 		Prompt:    PromptContext{Model: "Test"},
 		Callbacks: contract.Callbacks{Usage: func(u contract.Usage) { emitted = append(emitted, u) }},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Large-class prompt so the task grants an agent budget. Since feature 011
-	// (D2), Large needs TWO corroborating size signals — here a breadth phrase
-	// plus four named file paths.
 	_, stats, err := engine.Run(context.Background(), "Implement a new config loader module with validation across the package and verify it in config.go, loader.go, validate.go and main.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantRead := mainRead1 + subRead + mainRead2 // 240
-	wantMiss := mainMiss1 + subMiss + mainMiss2 // 168
+	wantRead := read1 + read2 + read3 // 240
+	wantMiss := miss1 + miss2 + miss3 // 168
 	if stats.Usage.CacheReadTokens == nil || stats.Usage.CacheMissTokens == nil {
 		t.Fatalf("task usage lost cache operands: %+v", stats.Usage)
 	}
@@ -222,16 +263,17 @@ func TestTaskUsageDeltaCoversAllStreamsAndLiveEmissionMatches(t *testing.T) {
 	if last.TotalTokens != stats.Usage.TotalTokens {
 		t.Fatalf("live tokens %d != summary tokens %d", last.TotalTokens, stats.Usage.TotalTokens)
 	}
-	// The live line must be task-cumulative mid-task too: the emission after the
-	// subagent's request already includes the first main turn AND the subagent.
-	sawSubCumulative := false
+	// The live line must be task-cumulative MID-task too: the emission after the
+	// second request already carries the first two requests summed, not just the
+	// second one's numbers.
+	sawMidCumulative := false
 	for _, u := range emitted {
-		if u.CacheReadTokens != nil && u.CacheMissTokens != nil && *u.CacheReadTokens == mainRead1+subRead && *u.CacheMissTokens == mainMiss1+subMiss {
-			sawSubCumulative = true
+		if u.CacheReadTokens != nil && u.CacheMissTokens != nil && *u.CacheReadTokens == read1+read2 && *u.CacheMissTokens == miss1+miss2 {
+			sawMidCumulative = true
 		}
 	}
-	if !sawSubCumulative {
-		t.Fatalf("no emission carried the cumulative main+subagent usage: %+v", emitted)
+	if !sawMidCumulative {
+		t.Fatalf("no emission carried the mid-task cumulative usage: %+v", emitted)
 	}
 }
 

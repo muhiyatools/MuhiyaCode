@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -79,8 +80,14 @@ func (m *Model) renderTool(tool *toolView, width int) string {
 		// expand just that tool's detail block.
 		return lines[0]
 	}
-	// Expanded: uniform detail block. A diff renders colorized; any other output
-	// renders in the same gutter-prefixed style.
+	// Expanded: uniform detail block. An ask_user exchange renders as the
+	// question and the choice the user made; a diff renders colorized; any other
+	// output renders in the same gutter-prefixed style.
+	if tool.name == "ask_user" {
+		if answers, ok := parseUserAnswers(tool.output); ok {
+			return strings.Join(append(lines, m.renderUserAnswers(answers, width)...), "\n")
+		}
+	}
 	if diff := diffLines(tool.output); len(diff) > 0 {
 		for _, source := range diff {
 			lines = append(lines, "  "+m.diffLineStyle(source).Render(oneLine(source, width-2)))
@@ -160,6 +167,15 @@ func (m *Model) toolOutcome(tool *toolView) string {
 		}
 	case "run_shell":
 		return shellOutcome(tool.output)
+	case "ask_user":
+		// The collapsed row counts the exchange; the raw JSON payload is never a
+		// useful summary line.
+		if answers, ok := parseUserAnswers(tool.output); ok {
+			if len(answers) == 1 {
+				return "1 answered"
+			}
+			return fmt.Sprintf("%d answered", len(answers))
+		}
 	}
 	return summarizeTool(tool.output)
 }
@@ -259,36 +275,9 @@ func (m *Model) diffLineStyle(source string) lipgloss.Style {
 	}
 }
 
-func (m *Model) renderAgentChip(agent *agentView, width int) string {
-	marker := m.palette.brand.Render(m.glyphs.brand)
-	if agent.status == "running" {
-		marker = m.palette.brand.Render(m.spinner())
-	} else if agent.status == "failed" || agent.status == "cancelled" {
-		marker = m.palette.danger.Render(m.glyphs.brand)
-	}
-	// Hover affordance: underline the subagent title when the row is under the mouse.
-	titleStyle := m.palette.text
-	if agent.hovered {
-		titleStyle = titleStyle.Underline(true)
-	}
-	line := fmt.Sprintf("%s [%d] %s", marker, agent.index, titleStyle.Render(agent.title))
-	identity := agent.agent
-	if agent.phase != "" && agent.phase != string(contract.LifecycleDirect) {
-		identity = agent.phase + "/" + agent.role
-	}
-	label := identity + " · " + agent.status
-	if agent.model != "" {
-		label = identity + " (" + agent.model + ") · " + agent.status
-	}
-	line += "  " + m.palette.faint.Render(label)
-	if agent.usage.TotalTokens > 0 {
-		line += "  " + m.palette.faint.Render(contract.HumanTokens(agent.usage.TotalTokens))
-	}
-	if agent.active != "" {
-		line += "\n  " + m.palette.faint.Render("└ "+agent.active)
-	}
-	return fitLine(line, width)
-}
+// renderAgentChip drew one subagent's transcript card — marker, index, title,
+// role, model, tokens, and its currently-running tool. It is gone with the
+// subagent system; ordinary tool rows are the only chips now.
 
 // deriveToolTarget recovers a path-target tool's file from its diff output when
 // no persisted target is available (a tool row from a session that predates the
@@ -306,7 +295,7 @@ func deriveToolTarget(name, output string) string {
 }
 
 func toolLabel(name string) string {
-	labels := map[string]string{"list_files": "List", "read_file": "Read", "grep": "Grep", "search_text": "Search", "glob": "Glob", "edit_file": "Edit", "multi_edit": "Edit", "write_file": "Write", "apply_patch": "Patch", "run_shell": "Shell", "git_status": "Git status", "git_diff": "Git diff", "update_plan": "To-dos", "ask_user": "Question", "propose_changes": "Change plan", "run_subagent": "Delegate", "web_search": "Web search", "save_memory": "Memory", "recall_memory": "Memory", "edit_memory": "Memory"}
+	labels := map[string]string{"list_files": "List", "read_file": "Read", "grep": "Grep", "search_text": "Search", "glob": "Glob", "edit_file": "Edit", "multi_edit": "Edit", "write_file": "Write", "apply_patch": "Patch", "run_shell": "Shell", "git_status": "Git status", "git_diff": "Git diff", "update_plan": "To-dos", "ask_user": "Question", "propose_changes": "Change plan", "web_search": "Web search", "save_memory": "Memory", "recall_memory": "Memory", "edit_memory": "Memory"}
 	if label := labels[name]; label != "" {
 		return label
 	}
@@ -362,4 +351,66 @@ func isFailure(output string) bool {
 
 func diffLines(output string) []string {
 	return contract.DiffLines(output)
+}
+
+// answerView is one question/answer pair from an ask_user result, for display.
+type answerView struct {
+	question    string
+	label       string
+	description string
+}
+
+// parseUserAnswers decodes the ask_user tool result. That result is the
+// MODEL-facing payload (orchestrator.encodeAnswers) — deliberately verbose JSON
+// the model reads well and a person does not. Rendering it verbatim put a wall
+// of braces in the transcript, so the TUI parses it back into the exchange it
+// represents. ok is false for any other output, which falls back to the generic
+// rendering rather than guessing.
+func parseUserAnswers(output string) ([]answerView, bool) {
+	var payload struct {
+		Type    string `json:"type"`
+		Answers []struct {
+			Question    string `json:"question"`
+			Label       string `json:"selected_label"`
+			Description string `json:"selected_description"`
+		} `json:"answers"`
+	}
+	if json.Unmarshal([]byte(output), &payload) != nil || payload.Type != "user_answers" {
+		return nil, false
+	}
+	views := make([]answerView, 0, len(payload.Answers))
+	for _, answer := range payload.Answers {
+		views = append(views, answerView{
+			question:    strings.TrimSpace(answer.Question),
+			label:       strings.TrimSpace(answer.Label),
+			description: strings.TrimSpace(answer.Description),
+		})
+	}
+	return views, len(views) > 0
+}
+
+// renderUserAnswers renders the ask_user exchange as a conversation: the
+// question, then the choice the user made. Nothing else from the payload is
+// surfaced — selected_index and recommended are model bookkeeping.
+func (m *Model) renderUserAnswers(answers []answerView, width int) []string {
+	var lines []string
+	for i, answer := range answers {
+		if i > 0 {
+			lines = append(lines, "")
+		}
+		if answer.question != "" {
+			for _, wrapped := range wrapPlain(answer.question, max(10, width-6)) {
+				lines = append(lines, "  "+m.palette.faint.Render(m.rtl(wrapped)))
+			}
+		}
+		chosen := answer.label
+		if chosen == "" {
+			chosen = "(no answer)"
+		}
+		lines = append(lines, "  "+m.palette.brandSoft.Render(m.glyphs.todoActive+" ")+m.palette.text.Render(m.rtl(chosen)))
+		for _, wrapped := range wrapPlain(answer.description, max(10, width-8)) {
+			lines = append(lines, "    "+m.palette.muted.Render(m.rtl(wrapped)))
+		}
+	}
+	return lines
 }

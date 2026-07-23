@@ -3,7 +3,6 @@ package orchestrator
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -11,23 +10,8 @@ import (
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
-// subagentKind reads the "agent" field out of a run_subagent call's raw
-// arguments. H3: malformed JSON fails closed to "general" (the most
-// restricted-by-gates kind) so a mangled call never gains an unintended
-// capability class.
-func subagentKind(call contract.ToolCall) string {
-	var input struct {
-		Agent string `json:"agent"`
-	}
-	if err := json.Unmarshal([]byte(call.ArgumentsJSON()), &input); err != nil {
-		return "general"
-	}
-	kind := strings.TrimSpace(input.Agent)
-	if kind == "" {
-		return "general"
-	}
-	return kind
-}
+// subagentKind was removed with the harness-side fan-out that inspected a
+// call's kind before dispatch: run_subagent now decodes its own arguments.
 
 // failedCallLastError returns the cached error for an identical prior
 // verbatim call, or ("", false) when no such failure has been recorded.
@@ -68,59 +52,26 @@ func failedClassKey(name, message string) string {
 	return name + "|" + normalizeError(message)
 }
 
+// executeBatch runs a turn's tool calls in order through the shared gate. The
+// batch-announce path that once fanned out delegate rows is gone with the
+// subagents it announced: every call here is an ordinary tool the session runs
+// itself, with strict start/end nesting.
 func (e *Engine) executeBatch(ctx context.Context, calls []contract.ToolCall, definitions []contract.ToolDefinition, effort EffortProfile) []toolOutcome {
-	// Feature 014 (user directive): subagents run ONE at a time, always. A
-	// serial chain is cheaper (each dispatch can continue its predecessor's
-	// cached stream, feature 012), safer (no interleaved workspace edits),
-	// and matches the intended shape: the main model plans, one subagent
-	// executes. Batches are still announced up front so the queue is visible.
-	allSubagents := len(calls) > 1
-	for _, call := range calls {
-		allSubagents = allSubagents && call.ToolName() == "run_subagent"
-	}
-	// Announce every delegate in the batch BEFORE any of them executes. The
-	// per-call ToolStart inside gatedExecute fires only when that call is
-	// dispatched, so a serial delegate batch revealed delegate N+1's
-	// "Delegate … running" transcript row only after delegate N fully
-	// completed — the announced fan-out looked frozen for minutes. Announcing
-	// up front renders every row at batch launch; execution order, the shared
-	// dispatch gate, and all taskMu-guarded counters are untouched (announced
-	// suppresses only the duplicate onStart). Restricted to all-run_subagent
-	// batches: delegates never stream ToolOutput, so the TUI's name-keyed
-	// live-output routing cannot mis-route, and ordinary tool batches keep
-	// their strict start/end nesting.
-	announced := allSubagents && e.callbacks.ToolStart != nil
-	if announced {
-		for _, call := range calls {
-			e.callbacks.ToolStart(call.ToolName(), json.RawMessage(call.ArgumentsJSON()))
-		}
-	}
-	execute := func(c context.Context, call contract.ToolCall) toolOutcome {
-		if !announced {
-			return e.executeCall(c, call, definitions, effort)
-		}
-		scope := e.mainScope(definitions)
-		scope.onStart = nil // already announced at batch launch
-		return e.gatedExecute(c, call, definitions, effort, scope)
-	}
 	result := make([]toolOutcome, len(calls))
 	for i, call := range calls {
-		result[i] = execute(ctx, call)
+		result[i] = e.executeCall(ctx, call, definitions, effort)
 	}
 	return result
 }
 
-// callCounters holds the per-scope dispatch-gate state: identical-call repeats,
+// callCounters holds the task's dispatch-gate state: identical-call repeats,
 // the verbatim failed-call cache, the storm-breaker class counts, and the
-// plan-mode violation count. One instance per task (main loop) and one per
-// subagent RUN, guarded by its own mutex so parallel subagents never share or
-// race gate state. (B6.)
+// plan-mode violation count.
 type callCounters struct {
 	mu                sync.Mutex
 	callCounts        map[string]int
 	failedCalls       map[string]string
 	failedClassCounts map[string]int
-	planViolations    int
 }
 
 func newCallCounters() *callCounters {
@@ -131,13 +82,13 @@ func newCallCounters() *callCounters {
 	}
 }
 
-// dispatchScope carries the scope-specific wiring for gatedExecute so ONE gate
-// serves both the main loop and subagent runs without divergence. (B6.)
+// dispatchScope carries the wiring gatedExecute needs. It kept per-scope flags
+// while subagent runs shared the gate; with one session there is one scope, and
+// the flags that distinguished them (dedupe, trackStats, readOnly, runReads)
+// are gone — the gate always dedupes against the inspection ledger and always
+// tracks discipline stats.
 type dispatchScope struct {
 	counters     *callCounters
-	dedupe       bool // consult the inspection ledger (main loop only)
-	trackStats   bool // increment engine-level discipline stats (main loop only)
-	readOnly     bool // allow shell checks only when IsReadOnlyShell approves them
 	onStart      func(contract.ToolCall)
 	onEnd        func(contract.ToolCall, string)
 	escalate     func(string)
@@ -149,15 +100,12 @@ func (e *Engine) executeCall(ctx context.Context, call contract.ToolCall, defini
 	return e.gatedExecute(ctx, call, definitions, effort, e.mainScope(definitions))
 }
 
-// mainScope is the dispatch scope for the primary agent loop: per-task counters,
-// the duplicate-read guard + discipline stats, ToolStart/ToolEnd callbacks,
-// loop-guard notices on the main history tail, dispatch through the synthetic-
-// tool switch, and read-coverage / supersede bookkeeping. (B6.)
+// mainScope is the session's dispatch scope: per-task counters, ToolStart/
+// ToolEnd callbacks, loop-guard notices on the history tail, dispatch through
+// the synthetic-tool switch, and read-coverage / supersede bookkeeping.
 func (e *Engine) mainScope(definitions []contract.ToolDefinition) dispatchScope {
 	return dispatchScope{
-		counters:   e.taskCounters,
-		dedupe:     true,
-		trackStats: true,
+		counters: e.taskCounters,
 		onStart: func(call contract.ToolCall) {
 			if e.callbacks.ToolStart != nil {
 				e.callbacks.ToolStart(call.ToolName(), json.RawMessage(call.ArgumentsJSON()))
@@ -173,7 +121,7 @@ func (e *Engine) mainScope(definitions []contract.ToolDefinition) dispatchScope 
 			if !failed && readonlyTools[name] {
 				e.inspection.Record(call, output)
 			}
-			if isMutation(name) && !errors.Is(dispatchErr, contract.ErrPlanModeExited) {
+			if isMutation(name) {
 				e.history.MarkSuperseded(e.inspection.InvalidateFor(call))
 			}
 		},

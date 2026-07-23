@@ -20,14 +20,24 @@ import (
 )
 
 type Config struct {
-	Settings         contract.Settings
-	APIKey           string
-	Client           *http.Client
-	IdleTimeout      time.Duration
-	RequestLifetime  time.Duration
-	MaxRetries       int
-	RawUsageObserver RawUsageObserver
+	Settings        contract.Settings
+	APIKey          string
+	Client          *http.Client
+	IdleTimeout     time.Duration
+	RequestLifetime time.Duration
+	MaxRetries      int
+	// StreamRetryObserver, when set, is called once per mid-stream retry so the
+	// harness can telemeter transport friction that would otherwise be invisible
+	// (the retry itself is silent to the user by design — a 2s recovery should
+	// not become a notification).
+	StreamRetryObserver func(error)
+	RawUsageObserver    RawUsageObserver
 }
+
+// streamRetryDelay is short on purpose: the connection dropped, it did not rate
+// limit us. Long enough to let a transient blip clear, short enough that the
+// user reads it as a pause rather than a stall.
+const streamRetryDelay = 2 * time.Second
 
 // RawUsagePayload exposes the provider's unmodified usage object for benchmark
 // ground-truth logs. It contains no authorization headers or API key.
@@ -43,17 +53,29 @@ type OpenAICompatible struct {
 	mu     sync.RWMutex
 	config Config
 	client *http.Client
+	// pinRejected latches when an upstream-affinity request came back with a
+	// non-retryable status. The pin is a pure optimization — it buys a warm
+	// cache — so the moment a route proves it cannot accept the field, we stop
+	// sending it for the rest of the process rather than failing every task on
+	// a caching nicety. See the retry loop in Chat.
+	pinRejected bool
 }
 
 func NewOpenAICompatible(config Config) *OpenAICompatible {
 	if config.Client == nil {
 		config.Client = &http.Client{}
 	}
+	// These are PAIRED with the gateway's own bounds (gateway repo
+	// proxy/handler.go:22 httpClient.Timeout, :49 streamIdleTimeout). Each CLI
+	// value sits just INSIDE its gateway counterpart so the CLI — the side that
+	// can actually recover, via the stream retry in Chat below — is the one that
+	// times out first. Inverting this would surface the gateway's hard close as
+	// an unrecoverable transport error instead of a retried turn.
 	if config.IdleTimeout <= 0 {
-		config.IdleTimeout = 90 * time.Second
+		config.IdleTimeout = 110 * time.Second // gateway cuts a silent stream at 120s
 	}
 	if config.RequestLifetime <= 0 {
-		config.RequestLifetime = 10 * time.Minute
+		config.RequestLifetime = 14 * time.Minute // gateway's total upstream bound is 15m
 	}
 	if config.MaxRetries <= 0 {
 		config.MaxRetries = 3
@@ -77,7 +99,13 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 		return contract.ChatResponse{}, err
 	}
 	profile := ResolveModelProfile(model.ID + " " + model.Name)
+	// The upstream pin is an optimization, and an optimization must never be
+	// able to fail a task. If any route has already rejected it, it is off.
+	if p.upstreamPinRejected() {
+		input.PinUpstream = ""
+	}
 	var last error
+	streamRetried := false
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
 		response, streamed, retryAfter, err := p.chatOnce(ctx, cfg, model, profile, input)
 		if err == nil {
@@ -85,9 +113,51 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 		}
 		last = err
 		var httpErr *HTTPError
-		retryable := errors.As(err, &httpErr) && httpErr.Retryable
-		if !retryable && !streamed && isNetworkError(err) {
+		isStatusError := errors.As(err, &httpErr)
+		retryable := isStatusError && httpErr.Retryable
+		// A pinned request that was refused OUTRIGHT — a 400 for an unrecognized
+		// routing field, say — is the one failure this feature could cause that
+		// the user did not have before. A 4xx is terminal here, so without this
+		// branch a gateway that does not forward `provider` would turn every
+		// single task into a hard failure.
+		//
+		// Drop the pin, latch it off for the process, and retry immediately. The
+		// cost of being wrong is one cold prefix; the cost of not checking is the
+		// whole session.
+		if isStatusError && !retryable && !streamed && input.PinUpstream != "" {
+			p.rejectUpstreamPin()
+			input.PinUpstream = ""
+			log.Printf("[gateway] upstream affinity refused (%v); continuing without it — expect cold prefixes on re-routes", err)
+			continue
+		}
+		// A TRANSPORT failure before any bytes arrived is retryable. The
+		// !isStatusError term matters: isNetworkError only excludes cancellation,
+		// so without it an explicitly non-retryable status (400, 401, 404) was
+		// promoted back to retryable and re-sent three times — a bad API key
+		// hammered the gateway, and a malformed request burned the user's clock
+		// reproducing the same 400.
+		if !retryable && !streamed && !isStatusError && isNetworkError(err) {
 			retryable = true
+		}
+		// A stream that DIED after headers is retried exactly once. It used to be
+		// terminal, which meant one dropped connection killed the whole task —
+		// the turn loop's only move on a Chat error is to abort.
+		//
+		// The retry is close to free: the partial is discarded, the request bytes
+		// are identical, and the prefix we just sent is still warm in the
+		// provider's cache, so the second attempt pays cache-hit input rates.
+		// Bounded at one so a genuinely dead upstream still surfaces promptly, and
+		// never attempted for an HTTP-status failure (that body already landed;
+		// re-sending would just repeat it).
+		if streamed && !streamRetried && !isStatusError && isNetworkError(err) && ctx.Err() == nil {
+			streamRetried = true
+			if cfg.StreamRetryObserver != nil {
+				cfg.StreamRetryObserver(err)
+			}
+			if sleepErr := sleepContext(ctx, streamRetryDelay); sleepErr != nil {
+				return contract.ChatResponse{}, sleepErr
+			}
+			continue
 		}
 		if streamed || !retryable || attempt == cfg.MaxRetries || ctx.Err() != nil {
 			return contract.ChatResponse{}, err
@@ -110,9 +180,9 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	// arrive and the stream is flowing, this deadline is retired (below) and the
 	// rolling IdleTimeout alone governs, so a long answer after a long queue is never
 	// cut off by a whole-attempt cap.
-	ctx, cancel := context.WithCancel(parent)
-	defer cancel()
-	lifetime := time.AfterFunc(cfg.RequestLifetime, cancel)
+	ctx, cancel := context.WithCancelCause(parent)
+	defer cancel(nil)
+	lifetime := time.AfterFunc(cfg.RequestLifetime, func() { cancel(errStreamStalled) })
 	defer lifetime.Stop()
 	temperature := profile.Temperature
 	if input.Temperature != nil {
@@ -142,10 +212,33 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 		}
 		body["tool_choice"] = choice
 	}
-	if input.Reasoning != "" {
+	// Upstream affinity (OpenRouter). A model slug on OpenRouter is served by
+	// several upstream providers (minimax-m3 lists NINE), and each keeps its OWN
+	// prompt cache. Without a preference OpenRouter is free to re-route between
+	// turns, and the next request re-reads the entire conversation uncached —
+	// with byte-identical input, so nothing on our side can detect or prevent it.
+	//
+	// order+allow_fallbacks is deliberate rather than "only": a hard restriction
+	// converts an upstream outage into a failed task, which is a far worse trade
+	// than one cold prefix. We express a strong preference and stay alive if it
+	// cannot be honored; the orchestrator notices the flip from the response and
+	// re-pins to whoever actually served it.
+	//
+	// The field is passed through to OpenRouter verbatim by the gateway and
+	// ignored by every provider that does not understand it, so it is safe on
+	// any route.
+	if input.PinUpstream != "" {
+		body["provider"] = map[string]any{
+			"order":           upstreamOrderCandidates(input.PinUpstream),
+			"allow_fallbacks": true,
+		}
+	}
+	if input.Reasoning != "" && profileSupportsParam(profile, "reasoning_effort") {
 		// Send the raw effort level. The gateway (X-Muhiya-Effort header, which
 		// it prefers over this body field) maps it per provider; we must not
-		// downgrade it client-side or DeepSeek would never see "max".
+		// downgrade it client-side or DeepSeek would never see "max". Omitted from
+		// the body for a model whose profile does not list reasoning_effort (B-2);
+		// the header still carries effort, so nothing is lost.
 		body["reasoning_effort"] = string(input.Reasoning)
 	}
 	payload, err := json.Marshal(body)
@@ -171,6 +264,12 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	}
 	response, err := cfg.Client.Do(req)
 	if err != nil {
+		// The first-byte (lifetime) deadline fires here as a context cancel; surface
+		// it as a retryable stall, not the raw context.Canceled that reads as a user
+		// cancel and is never retried.
+		if stall := stalledError(parent, ctx, "waiting for the first byte"); stall != nil {
+			return contract.ChatResponse{}, false, 0, stall
+		}
 		return contract.ChatResponse{}, false, 0, err
 	}
 	defer response.Body.Close()
@@ -185,7 +284,7 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	// this timer (see the scan loop), so a queued-but-alive stream survives well past
 	// RequestLifetime as long as the provider keeps signalling (feature 007 R1).
 	lifetime.Stop()
-	idle := time.AfterFunc(cfg.IdleTimeout, cancel)
+	idle := time.AfterFunc(cfg.IdleTimeout, func() { cancel(errStreamStalled) })
 	defer idle.Stop()
 	acc := NewStreamAccumulatorForProfile(profile, input.OnToken, input.OnReasoningToken)
 	rawUsageCount := 0
@@ -222,11 +321,17 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 			if parent.Err() != nil {
 				return contract.ChatResponse{}, acc.ReceivedData(), 0, parent.Err()
 			}
-			return contract.ChatResponse{}, acc.ReceivedData(), 0, fmt.Errorf("provider stream stalled or request timed out: %w", ctx.Err())
+			return contract.ChatResponse{}, acc.ReceivedData(), 0, &StalledError{Phase: "mid-stream"}
 		default:
 		}
 	}
 	if err := scanner.Err(); err != nil {
+		// A stalled read surfaces here as raw context.Canceled; reclassify a
+		// timer-induced stall as retryable so the stream retry (and the turn-loop
+		// recovery) fire instead of the task dying with "stopped."
+		if stall := stalledError(parent, ctx, "mid-stream"); stall != nil {
+			return contract.ChatResponse{}, acc.ReceivedData(), 0, stall
+		}
 		return contract.ChatResponse{}, acc.ReceivedData(), 0, err
 	}
 	if !acc.ReceivedData() {
@@ -260,7 +365,26 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 		usage.CostEstimated = costMeta.estimated
 		usage.CostLogID = costMeta.logID
 	}
-	return contract.ChatResponse{Content: visible, Reasoning: reasoning, ReasoningDetails: result.ReasoningDetails, ToolCalls: result.ToolCalls, Usage: usage}, acc.ReceivedData(), 0, nil
+	usage.Upstream = result.Upstream
+	return contract.ChatResponse{Content: visible, Reasoning: reasoning, ReasoningDetails: result.ReasoningDetails, ToolCalls: result.ToolCalls, Usage: usage, FinishReason: result.FinishReason, TruncatedCalls: result.TruncatedCalls}, acc.ReceivedData(), 0, nil
+}
+
+// profileSupportsParam reports whether an optional request parameter may be sent
+// to this model. An empty SupportedParams is permissive (a generic endpoint we
+// have not profiled); otherwise the param must be listed. This keeps the request
+// builder honest about model.go's "never emits an unsupported param" contract
+// (B-2). Effort still reaches the gateway via the X-Muhiya-Effort header, which
+// it prefers, so gating reasoning_effort out of the body loses nothing.
+func profileSupportsParam(profile ModelProfile, param string) bool {
+	if len(profile.SupportedParams) == 0 {
+		return true
+	}
+	for _, supported := range profile.SupportedParams {
+		if supported == param {
+			return true
+		}
+	}
+	return false
 }
 
 // muhiyaLogMeta is the parsed muhiya_log object from a gateway meta chunk.
@@ -581,6 +705,48 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+// errStreamStalled is the cancel CAUSE our own idle/lifetime timers attach to
+// the request context. context.Cause(ctx) returns it only when a timer fired,
+// which is how a timeout is told apart from a user cancel (whose cause comes
+// from the parent context).
+var errStreamStalled = errors.New("provider stream stalled")
+
+// StalledError marks a request that OUR OWN idle or first-byte (lifetime) timer
+// aborted because the provider went silent — NOT a user cancel. It is
+// deliberately not context.Canceled/DeadlineExceeded: isNetworkError, Recoverable,
+// and FriendlyRequestError each special-case it as a RETRYABLE stall, whereas a
+// raw context.Canceled reads as "the user stopped" and is never retried. That
+// distinction is the whole fix — a half-open TCP stall used to surface as
+// context.Canceled and kill the task with a misleading "stopped."
+type StalledError struct {
+	Phase string // "waiting for the first byte" or "mid-stream", for diagnostics
+}
+
+func (e *StalledError) Error() string {
+	if e.Phase != "" {
+		return "provider went silent (" + e.Phase + ") past the timeout"
+	}
+	return "provider went silent past the timeout"
+}
+
+// stalledError returns a retryable *StalledError when THIS request's own timer
+// cancelled ctx (cause == errStreamStalled) and the parent (user) context is
+// still live; otherwise nil, leaving the original error unchanged (a genuine
+// user cancel, or an unrelated transport failure).
+func stalledError(parent, ctx context.Context, phase string) error {
+	if parent.Err() != nil {
+		return nil
+	}
+	if errors.Is(context.Cause(ctx), errStreamStalled) {
+		return &StalledError{Phase: phase}
+	}
+	return nil
+}
+
 func isNetworkError(err error) bool {
+	var stall *StalledError
+	if errors.As(err, &stall) {
+		return true // a stall we induced is retryable exactly like a dropped connection
+	}
 	return !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded)
 }
