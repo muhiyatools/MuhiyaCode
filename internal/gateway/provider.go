@@ -163,6 +163,9 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 			return contract.ChatResponse{}, err
 		}
 		delay := retryAfter
+		if delay > 2*time.Minute {
+			return contract.ChatResponse{}, fmt.Errorf("provider requested backoff %s exceeds max retry window: %w", delay.String(), err)
+		}
 		if delay <= 0 {
 			delay = time.Second*time.Duration(1<<attempt) + time.Duration(rand.IntN(250))*time.Millisecond
 		}
@@ -241,6 +244,9 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 		// the header still carries effort, so nothing is lost.
 		body["reasoning_effort"] = string(input.Reasoning)
 	}
+	if input.Seed != nil && profileSupportsParam(profile, "seed") {
+		body["seed"] = *input.Seed
+	}
 	payload, err := json.Marshal(body)
 	if err != nil {
 		return contract.ChatResponse{}, false, 0, err
@@ -286,6 +292,8 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	lifetime.Stop()
 	idle := time.AfterFunc(cfg.IdleTimeout, func() { cancel(errStreamStalled) })
 	defer idle.Stop()
+	streamCap := time.AfterFunc(12*time.Minute, func() { cancel(errors.New("stream exceeded maximum 12-minute lifetime")) })
+	defer streamCap.Stop()
 	acc := NewStreamAccumulatorForProfile(profile, input.OnToken, input.OnReasoningToken)
 	rawUsageCount := 0
 	var lastRawUsage json.RawMessage
@@ -377,6 +385,9 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 // it prefers, so gating reasoning_effort out of the body loses nothing.
 func profileSupportsParam(profile ModelProfile, param string) bool {
 	if len(profile.SupportedParams) == 0 {
+		if param == "reasoning_effort" {
+			return false
+		}
 		return true
 	}
 	for _, supported := range profile.SupportedParams {
@@ -591,13 +602,7 @@ func normalizeModels(payload any) []contract.Model {
 	var result []contract.Model
 	for _, raw := range data {
 		item, _ := raw.(map[string]any)
-		id := stringValue(item["virtual_name"])
-		if id == "" {
-			id = stringValue(item["alias"])
-		}
-		if id == "" {
-			id = stringValue(item["id"])
-		}
+		id := stringValue(item["id"])
 		if id == "" {
 			id = stringValue(item["name"])
 		}
@@ -605,9 +610,6 @@ func normalizeModels(payload any) []contract.Model {
 			continue
 		}
 		name := stringValue(item["display_name"])
-		if name == "" {
-			name = stringValue(item["virtual_name"])
-		}
 		if name == "" {
 			name = stringValue(item["name"])
 		}
