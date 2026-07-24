@@ -1,0 +1,13 @@
+{
+  "name": "MuhiyaCode",
+  "build": {
+    "command": "go build -o /usr/local/bin/muhiyacode ./cmd/muhiyacode"
+  },
+  "run": {
+    "command": "muhiyacode bench --task ${HARBOR_TASK_FILE:-/workspace/task.txt} --out ${HARBOR_OUTPUT_FILE:-/tmp/result.json} --task-timeout ${HARBOR_TIMEOUT:-600s}"
+  },
+  "env": {
+    "PERMISSION_MODE": "auto-accept",
+    "MUHIYA_HOME": "/tmp/muhiya-home"
+  }
+}
