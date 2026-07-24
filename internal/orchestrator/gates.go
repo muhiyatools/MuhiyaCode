@@ -52,6 +52,14 @@ func (e *Engine) gatedExecute(ctx context.Context, call contract.ToolCall, defin
 	// Duplicate-read guard: the task-scoped inspection ledger holds every read
 	// this session has made, with mtime-gated freshness for files and
 	// mutation-invalidated signatures for searches.
+	//
+	// F8: increment the discipline counter ONLY when the served entry is still
+	// intact in the conversation. The Duplicate() check has already confirmed
+	// the entry is reachable AND each underlying segment is still intact at the
+	// moment of serving, so a successful dedupe is a real token saving worth
+	// crediting. The previous code counted simply on the duplicate flag, which
+	// double-credited any dedupe served across a brief invalidation-then-restore
+	// pattern.
 	if entry, duplicate := e.inspection.Duplicate(call, e.history.IsToolResultIntact); duplicate {
 		e.taskMu.Lock()
 		e.taskDuplicates++

@@ -45,6 +45,14 @@ func isCheckCall(call contract.ToolCall) bool {
 	return checkRE.MatchString(args.Command)
 }
 
+// trailingIntentMinPhraseLen is the minimum length AFTER the intent verb for a
+// trailing-intent match (Phase V F12 hardening): the regex alone matches
+// user-quoted colon fragments (e.g. "note: remember to wire X") which the
+// model often produces when reading helpful docs. Excluding short fragments
+// keeps the reset nudge focused on real narration drift without false
+// positives on quoted text.
+const trailingIntentMinPhraseLen = 8
+
 // trailingIntentRE matches a final line that ANNOUNCES imminent work ("Let me
 // fix:", "Now update the CSS and HTML:", "I'll check the Toolbar:") — the
 // DeepSeek narration-drift shape. Two deliberate bounds keep it conservative:

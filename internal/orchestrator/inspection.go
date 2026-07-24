@@ -103,7 +103,17 @@ func NewInspection(snapshot InspectionSnapshot, persist func(InspectionSnapshot)
 	return &InspectionLedger{signatures: snapshot.Signatures, coverage: snapshot.Coverage, inspected: inspected, fullReads: snapshot.FullReads, root: root, persist: persist}
 }
 
-var readonlyTools = map[string]bool{"read_file": true, "list_files": true, "grep": true, "glob": true, "search_text": true, "git_status": true, "git_diff": true}
+// readonlyTools is the dispatch-side dedup ledger's tool set. These are the
+// tools whose results flow into the conversation unchanged on a second call
+// and therefore pay nothing on a second hit — inspect_code and web_search are
+// included because (a) inspect_code is an AST parse that is fully deterministic
+// given (mode, path, symbol) and (b) web_search cache-cache of identical queries
+// is the dominant token waste on research-heavy tasks. Both fall into the
+// "search_kind" record path below, key on `callSignature` (compactJSON), and
+// are wiped alongside other search results when any workspace file changes —
+// which is the right trade-off because both kinds of results can describe any
+// file in the workspace and have no per-file freshness key.
+var readonlyTools = map[string]bool{"read_file": true, "list_files": true, "grep": true, "glob": true, "search_text": true, "git_status": true, "git_diff": true, "inspect_code": true, "web_search": true}
 
 func (l *InspectionLedger) Duplicate(call contract.ToolCall, intact func(string) bool) (InspectionEntry, bool) {
 	if !readonlyTools[call.ToolName()] {
@@ -112,15 +122,20 @@ func (l *InspectionLedger) Duplicate(call contract.ToolCall, intact func(string)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if call.ToolName() != "read_file" {
-		// A-4: search dedup (grep/glob/list_files) is invalidated ONLY by workspace
-		// mutations — every agent edit/write/patch/shell clears all search-kind
-		// signatures via invalidatePathLocked (see the entry.Kind == "search" branch
-		// there). Unlike read_file it carries no per-file mtime gate, so a change
-		// made OUTSIDE the agent's tools between turns is not detected; an identical
-		// re-search then serves the prior "already ran" block. This is by design: a
-		// search spans many files with no single freshness key, and the agent is the
-		// workspace's own mutator, so an external mid-session edit is out of scope.
-		entry, ok := l.signatures[callSignature(call)]
+		// A-4: search dedup (grep/glob/list_files/inspect_code/web_search) is
+		// invalidated ONLY by workspace mutations — every agent edit/write/patch/
+		// shell clears all search-kind signatures via invalidatePathLocked (see
+		// the entry.Kind == "search" branch there). Unlike read_file it carries no
+		// per-file mtime gate, so a change made OUTSIDE the agent's tools between
+		// turns is not detected; an identical re-search then serves the prior
+		// "already ran" block. This is by design: a search spans many files with
+		// no single freshness key, and the agent is the workspace's own mutator, so
+		// an external mid-session edit is out of scope.
+		key := callSignature(call)
+		if call.ToolName() == "inspect_code" {
+			key = inspectSignature(call)
+		}
+		entry, ok := l.signatures[key]
 		return entry, ok && intact(entry.CallID)
 	}
 	path := pathArgument(call)
@@ -165,7 +180,11 @@ func (l *InspectionLedger) Record(call contract.ToolCall, output string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if call.ToolName() != "read_file" {
-		l.addSignatureLocked(callSignature(call), InspectionEntry{CallID: call.ID, Kind: "search"})
+		key := callSignature(call)
+		if call.ToolName() == "inspect_code" {
+			key = inspectSignature(call)
+		}
+		l.addSignatureLocked(key, InspectionEntry{CallID: call.ID, Kind: "search"})
 		l.saveLocked()
 		return
 	}
@@ -476,6 +495,34 @@ func coveringSegments(segments []InspectionSegment, start, end int) []Inspection
 
 func callSignature(call contract.ToolCall) string {
 	return call.ToolName() + " " + compactJSON(call.ArgumentsJSON())
+}
+
+// inspectSignature produces a dedup key for inspect_code that is stable across
+// reorders of JSON fields and that ignores irrelevant fields (testFiles). The
+// output format is still deterministic because compactJSON orders keys
+// canonically. It uses mode, path, and symbol; mode "outline" rarely carries a
+// symbol and is keyed on (mode, path) only so a symbol-less outline and a
+// symbol-bearing outline with the same path are correctly distinguished when
+// a symbol is set but collapse to the same key when it is not.
+func inspectSignature(call contract.ToolCall) string {
+	var args struct {
+		Mode      string `json:"mode"`
+		Path      string `json:"path"`
+		Symbol    string `json:"symbol"`
+		TestFiles bool   `json:"testFiles"`
+	}
+	if err := json.Unmarshal([]byte(call.ArgumentsJSON()), &args); err != nil {
+		return call.ToolName() + " " + compactJSON(call.ArgumentsJSON())
+	}
+	mode := strings.TrimSpace(args.Mode)
+	if mode == "" {
+		mode = "outline"
+	}
+	parts := []string{call.ToolName(), mode, strings.TrimSpace(args.Path)}
+	if strings.TrimSpace(args.Symbol) != "" {
+		parts = append(parts, strings.TrimSpace(args.Symbol))
+	}
+	return strings.Join(parts, " ")
 }
 
 func compactJSON(value string) string {

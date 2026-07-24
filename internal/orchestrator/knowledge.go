@@ -32,12 +32,23 @@ type KnowledgeSnapshot struct {
 	EditEpoch int               `json:"editEpoch"`
 }
 
+// knowledgeFilesCap bounds the per-session "files already inspected" ledger.
+// The cap protects /context output and the BriefingForScope scan from
+// quadratic blowup. Eviction is deterministic (oldest insert first) via the
+// filesOrder list.
+const knowledgeFilesCap = 80
+
 type Knowledge struct {
-	mu      sync.Mutex
-	facts   []KnowledgeFact
-	files   map[string]string
-	epoch   int
-	persist func(KnowledgeSnapshot) error
+	mu    sync.Mutex
+	facts []KnowledgeFact
+	files map[string]string
+	// filesOrder preserves INSERT order so eviction (cap=80) is deterministic
+	// regardless of Go's randomized map iteration. Updated atomically with
+	// k.files under k.mu; persisted via Snapshot/snapshotLocked so the saved
+	// snapshot can be reloaded verbatim on resume.
+	filesOrder []string
+	epoch      int
+	persist    func(KnowledgeSnapshot) error
 }
 
 func NewKnowledge(snapshot KnowledgeSnapshot, persist func(KnowledgeSnapshot) error) *Knowledge {
@@ -47,7 +58,18 @@ func NewKnowledge(snapshot KnowledgeSnapshot, persist func(KnowledgeSnapshot) er
 	if snapshot.Files == nil {
 		snapshot.Files = make(map[string]string)
 	}
-	return &Knowledge{facts: append([]KnowledgeFact(nil), snapshot.Facts...), files: snapshot.Files, epoch: snapshot.EditEpoch, persist: persist}
+	files := make(map[string]string, len(snapshot.Files))
+	order := make([]string, 0, len(snapshot.Files))
+	for path, note := range snapshot.Files {
+		files[path] = note
+		order = append(order, path)
+	}
+	// Deterministic initial order on resume: lexicographic by path. Until the
+	// session writes enough to evict, eviction follows this order; once writes
+	// happen, new entries are appended and the oldest (lexicographic or
+	// write-order) entry is the eviction victim.
+	sort.Strings(order)
+	return &Knowledge{facts: append([]KnowledgeFact(nil), snapshot.Facts...), files: files, filesOrder: order, epoch: snapshot.EditEpoch, persist: persist}
 }
 
 func (k *Knowledge) AddReport(agent, title, task, report string) {
@@ -88,13 +110,18 @@ func (k *Knowledge) NoteFile(path, note string) {
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	path = canonicalKey(path)
+	if _, existed := k.files[path]; !existed {
+		k.filesOrder = append(k.filesOrder, path)
+	}
 	k.files[path] = note
-	if len(k.files) > 80 {
-		// Maps have no stable age; cap deterministically by removing one key.
-		for key := range k.files {
-			delete(k.files, key)
-			break
-		}
+	if len(k.files) > knowledgeFilesCap {
+		// Drop the OLDEST entry from filesOrder. Iteration order of Go map
+		// is randomized; we rely on filesOrder (mutated only under k.mu) to
+		// make this deterministic across runs and identical between in-memory
+		// and persisted states.
+		victim := k.filesOrder[0]
+		k.filesOrder = k.filesOrder[1:]
+		delete(k.files, victim)
 	}
 	if note == "edited" {
 		k.epoch++

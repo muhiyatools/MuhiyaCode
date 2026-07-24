@@ -71,7 +71,18 @@ func PatchTargetFiles(patch string) []string {
 		// header. A body deletion/addition pair — deleting "-- old" (rendered
 		// "--- old") and adding "++ new" (rendered "+++ new") on adjacent lines —
 		// is not, so this stops such a pair from injecting a phantom file (E-3).
-		if i+2 >= len(lines) || !strings.HasPrefix(lines[i+2], "@@") {
+		// Scan forward for the hunk header, tolerating a few empty lines or a
+		// trailing context marker after the header pair (A-2 race). The hunk
+		// must appear within the next 5 lines, or the pair is not a real file
+		// header.
+		foundHunk := false
+		for j := i + 2; j < len(lines) && j < i+7; j++ {
+			if strings.HasPrefix(lines[j], "@@") {
+				foundHunk = true
+				break
+			}
+		}
+		if !foundHunk {
 			continue
 		}
 		target := name(strings.TrimPrefix(lines[i+1], "+++ "))

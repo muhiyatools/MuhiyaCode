@@ -402,6 +402,13 @@ func (e *Engine) resetTaskState(budget Budget) {
 	// from the submitted prompt right after this reset.
 	e.taskSkillsProvided = nil
 	e.taskMu.Unlock()
+	// Phase VI F21: clear the soft-notice and routed-window latches so a new
+	// task gets its own advisory budget for "context is filling" notices and
+	// "this conversation has outgrown some of the providers" advisories.
+	// Without this a previous task's shown flag would suppress the new task's
+	// first advisory even if the pressure is fresh.
+	e.softNoticeShown = false
+	e.routedWindowNoted = false
 }
 
 func (e *Engine) IsBusy() bool {

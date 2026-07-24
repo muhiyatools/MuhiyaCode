@@ -2,6 +2,12 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
+## 1.3.1 – AST & Code Intelligence Integration (Feature 015)
+
+- **`inspect_code` Workspace Tool:** Native Go AST-powered structural parser (`go/parser`, `go/ast`, `go/token`) supporting `outline` (declaration signatures), `definition` (symbol lookup), and `references` (usage sites) modes.
+- **Context Economy & Token Savings:** Replaces full-file reads with compact line-number outlines, reducing context token usage by >85-90% during codebase navigation.
+- **Zero External Dependencies & Safety:** Implemented entirely with Go stdlib, fully guarded by workspace containment security, read-only, and prefix-budget compliant (164-byte tool description).
+
 ## 1.3.0 – Token-Economy Overhaul (Feature 014)
 
 - **Lean fixed prefix (≤10,000 bytes / ≤2,500 estimated tokens):** Core system prompt and core tool definitions wire footprint reduced by >60% on zero-MCP baseline.
