@@ -40,8 +40,19 @@ func validateCallArgs(call contract.ToolCall, definitions []contract.ToolDefinit
 	parameters, _ := schema.Function.Parameters["properties"].(map[string]any)
 	required := stringListFromAny(schema.Function.Parameters["required"])
 	for _, key := range required {
-		if _, present := args[key]; !present {
+		val, present := args[key]
+		if !present {
 			return fmt.Errorf("%s: missing required field %q (per definition)", call.ToolName(), key)
+		}
+		if str, ok := val.(string); ok && str == "" {
+			return fmt.Errorf(`{"error": "required string field %s is empty", "gateRejected": true}`, key)
+		}
+	}
+	if additional, ok := schema.Function.Parameters["additionalProperties"].(bool); ok && !additional {
+		for key := range args {
+			if _, known := parameters[key]; !known {
+				return fmt.Errorf(`{"error": "unknown property: %s", "gateRejected": true}`, key)
+			}
 		}
 	}
 	for propName, propSchemaAny := range parameters {

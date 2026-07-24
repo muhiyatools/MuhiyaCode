@@ -1,0 +1,21 @@
+# Terminal-Bench Container Smoke Dockerfile
+FROM golang:1.22-alpine AS builder
+
+WORKDIR /build
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 go build -o /bin/muhiyacode ./cmd/muhiyacode
+
+FROM alpine:latest
+RUN apk add --no-cache git bash python3 py3-pip nodejs npm
+
+COPY --from=builder /bin/muhiyacode /usr/local/bin/muhiyacode
+
+WORKDIR /workspace
+
+ENV MUHIYA_HOME=/tmp/muhiya-home
+ENV PERMISSION_MODE=auto-accept
+
+ENTRYPOINT ["muhiyacode", "bench"]

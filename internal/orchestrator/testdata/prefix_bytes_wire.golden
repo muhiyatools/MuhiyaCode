@@ -52,7 +52,7 @@ OS: Windows | shell: pwsh | model: deepseek-v4-pro
 This shell is PowerShell, not POSIX: use New-Item, Remove-Item, Copy-Item, and $env:VAR — not mkdir -p, touch, rm -rf, cat, or 2>/dev/null — and sequence commands with ; (test success with if ($?)), since && and || do not work. 
 Use web_search only for changing or niche facts and cite returned sources.
 
-=== TOOL DEFINITIONS JSON (16925 bytes) ===
+=== TOOL DEFINITIONS JSON (17003 bytes) ===
 [
   {
     "type": "function",
@@ -87,6 +87,9 @@ Use web_search only for changing or niche facts and cite returned sources.
       "parameters": {
         "additionalProperties": false,
         "properties": {
+          "fullLines": {
+            "type": "boolean"
+          },
           "limit": {
             "maximum": 4000,
             "minimum": 1,
@@ -396,7 +399,7 @@ Use web_search only for changing or niche facts and cite returned sources.
     "type": "function",
     "function": {
       "name": "inspect_code",
-      "description": "Inspect Go source structure: outline (declarations), definition (symbol lookup), or references (usage sites). Returns compact signatures with line numbers — no bodies.",
+      "description": "[Go only] Inspect Go source structure: outline (declarations), definition (symbol lookup), or references (usage sites). Returns compact signatures with line numbers — no bodies.",
       "parameters": {
         "additionalProperties": false,
         "properties": {

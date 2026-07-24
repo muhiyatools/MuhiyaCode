@@ -102,6 +102,10 @@ type Workspace struct {
 	shell      *ShellRunner
 }
 
+func (w *Workspace) Guard() *Guard {
+	return w.guard
+}
+
 type ListOptions struct {
 	Path       string
 	MaxEntries int
@@ -123,9 +127,10 @@ type ListEntry struct {
 }
 
 type ReadOptions struct {
-	Path   string
-	Offset int // one-based
-	Limit  int
+	Path      string
+	Offset    int // one-based
+	Limit     int
+	FullLines bool
 }
 
 type ReadResult struct {

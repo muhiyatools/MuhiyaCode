@@ -116,6 +116,9 @@ func (s *DB) IsTrusted(ctx context.Context, path string) (bool, error) {
 }
 
 func (s *DB) Trust(ctx context.Context, path string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	_, err := s.db.ExecContext(ctx, `INSERT INTO trusted_workspaces(path, created_at) VALUES(?, ?) ON CONFLICT(path) DO UPDATE SET created_at=excluded.created_at`, path, nowText())
 	return err
 }

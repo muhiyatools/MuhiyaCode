@@ -14,7 +14,7 @@ import (
 const (
 	maxSymbols     = 200
 	maxReferences  = 50
-	maxOutputBytes = 2000
+	maxOutputBytes = 3000
 )
 
 // SymbolKind classifies a Go declaration.
@@ -564,7 +564,7 @@ func collectGoFiles(path string, includeTests bool) ([]string, error) {
 
 	if !info.IsDir() {
 		if !strings.HasSuffix(path, ".go") {
-			return nil, fmt.Errorf("inspect_code only supports Go source files (.go)")
+			return nil, fmt.Errorf("inspect_code only supports Go source files (.go). Use grep_search or list_files for Python, JavaScript, TypeScript, Rust, and other languages.")
 		}
 		return []string{path}, nil
 	}

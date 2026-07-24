@@ -1,7 +1,9 @@
 package command
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -21,6 +23,8 @@ type benchUsage struct {
 	CacheReadTokens  int  `json:"cache_read_tokens"`
 	CacheMissTokens  int  `json:"cache_miss_tokens"`
 	CacheWriteTokens int  `json:"cache_write_tokens"`
+	ReasoningTokens  int  `json:"reasoning_tokens,omitempty"`
+	TotalTokens      int  `json:"total_tokens"`
 	Reported         bool `json:"reported"`
 }
 
@@ -43,18 +47,31 @@ type benchPairing struct {
 	Reported           bool     `json:"reported"`
 	PromptTokens       int      `json:"prompt_tokens,omitempty"`
 	CompletionTokens   int      `json:"completion_tokens,omitempty"`
+	ReasoningTokens    int      `json:"reasoning_tokens,omitempty"`
 }
 
 type benchSummary struct {
-	TaskClass     string          `json:"task_class"`
-	Completed     bool            `json:"completed"`
-	Turns         int             `json:"turns"`
-	Usage         benchUsage      `json:"usage"`
-	CostUSD       float64         `json:"cost_usd"`
-	CostEstimated bool            `json:"cost_estimated"`
-	Review        benchReview     `json:"review"`
-	Violations    benchViolations `json:"violations"`
-	PerPairing    []benchPairing  `json:"per_pairing,omitempty"`
+	Status           contract.BenchmarkStatus    `json:"status"`
+	StopCause        string                      `json:"stop_cause,omitempty"`
+	TerminatedReason string                      `json:"terminated_reason,omitempty"`
+	TaskClass        string                      `json:"task_class"`
+	Completed        bool                        `json:"completed"`
+	SessionID        string                      `json:"session_id,omitempty"`
+	TrajectoryPath   string                      `json:"trajectory_path,omitempty"`
+	DurationMS       int64                       `json:"duration_ms"`
+	Turns            int                         `json:"turns"`
+	ToolCalls        int                         `json:"tool_calls"`
+	ChecksRun        int                         `json:"checks_run"`
+	FilesChanged     []string                    `json:"files_changed,omitempty"`
+	Usage            benchUsage                  `json:"usage"`
+	CostUSD          float64                     `json:"cost_usd"`
+	CostEstimated    bool                        `json:"cost_estimated"`
+	Review           benchReview                 `json:"review"`
+	Verification     contract.VerificationResult `json:"verification"`
+	Errors           []string                    `json:"errors,omitempty"`
+	Violations       benchViolations             `json:"violations"`
+	PerPairing       []benchPairing              `json:"per_pairing,omitempty"`
+	Invalidations    []contract.InvalidationEvent `json:"invalidations,omitempty"`
 	// ReadGate counts the dispatch gate's outcomes for this task.
 	ReadGate struct {
 		Denied int `json:"denied,omitempty"`
@@ -69,6 +86,7 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 	usage := benchUsage{
 		PromptTokens:     stats.Usage.PromptTokens,
 		CompletionTokens: stats.Usage.CompletionTokens,
+		TotalTokens:      stats.Usage.TotalTokens,
 		Reported:         stats.Usage.PromptTokensAvailable || stats.Usage.CacheReadTokens != nil,
 	}
 	if stats.Usage.CacheReadTokens != nil {
@@ -76,6 +94,9 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 	}
 	if stats.Usage.CacheMissTokens != nil {
 		usage.CacheMissTokens = *stats.Usage.CacheMissTokens
+	}
+	if stats.Usage.ReasoningTokens != nil {
+		usage.ReasoningTokens = *stats.Usage.ReasoningTokens
 	}
 	review := benchReview{Tier: "none"}
 	if stats.ReviewTier != "" {
@@ -101,15 +122,27 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 		}
 	}
 	summary := benchSummary{
-		TaskClass: stats.TaskClass,
-		Completed: runErr == nil && stats.StopCause == "" && stats.TerminatedReason == "",
-		Turns:     stats.Turns,
-		Usage:     usage,
-		Review:    review,
+		Status:           benchmarkStatus(stats, runErr),
+		StopCause:        stats.StopCause,
+		TerminatedReason: stats.TerminatedReason,
+		TaskClass:        stats.TaskClass,
+		Completed:        runErr == nil && stats.StopCause == "" && stats.TerminatedReason == "",
+		DurationMS:       stats.DurationMS,
+		Turns:            stats.Turns,
+		ToolCalls:        stats.ToolCalls,
+		ChecksRun:        stats.ChecksRun,
+		FilesChanged:     append([]string(nil), stats.FilesChanged...),
+		Usage:            usage,
+		Review:           review,
+		Verification:     stats.Verification,
 		Violations: benchViolations{
 			TerminalReadWhenToolExists: stats.TerminalReadViolations,
 			DuplicateReads:             stats.DuplicateReadViolations,
 		},
+		Invalidations: stats.Invalidations,
+	}
+	if runErr != nil {
+		summary.Errors = []string{runErr.Error()}
 	}
 	if stats.CreditsUSD != nil {
 		summary.CostUSD = *stats.CreditsUSD
@@ -119,7 +152,7 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 		summary.PerPairing = append(summary.PerPairing, benchPairing{
 			Model: pairing.Model, Pin: pairing.Pin,
 			SteadyStateHitRate: pairing.SteadyStateHitRate, Reported: pairing.Reported,
-			PromptTokens: pairing.PromptTokens, CompletionTokens: pairing.CompletionTokens,
+			PromptTokens: pairing.PromptTokens, CompletionTokens: pairing.CompletionTokens, ReasoningTokens: pairing.ReasoningTokens,
 		})
 	}
 	payload, err := json.Marshal(map[string]benchSummary{"muhiya_bench": summary})
@@ -127,4 +160,25 @@ func emitBenchSummary(w io.Writer, stats contract.TaskStats, runErr error) {
 		return
 	}
 	fmt.Fprintln(w, string(payload))
+}
+
+func benchmarkStatus(stats contract.TaskStats, runErr error) contract.BenchmarkStatus {
+	switch {
+	case errors.Is(runErr, context.DeadlineExceeded), stats.StopCause == contract.StopCauseTimeout:
+		return contract.BenchmarkTimeout
+	case errors.Is(runErr, context.Canceled):
+		return contract.BenchmarkBlocked
+	case runErr != nil:
+		return contract.BenchmarkError
+	case stats.StopCause == contract.StopCauseUserStop:
+		return contract.BenchmarkBlocked
+	case stats.StopCause != "":
+		return contract.BenchmarkError
+	case strings.HasPrefix(stats.TerminatedReason, "stalled progress"):
+		return contract.BenchmarkBlocked
+	case stats.TerminatedReason != "":
+		return contract.BenchmarkFail
+	default:
+		return contract.BenchmarkPass
+	}
 }

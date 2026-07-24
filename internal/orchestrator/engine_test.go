@@ -135,6 +135,7 @@ func TestEngineHiTwiceKeepsStablePrefix(t *testing.T) {
 type scriptedProvider struct {
 	mu        sync.Mutex
 	responses []contract.ChatResponse
+	errors    []error
 	requests  []contract.ChatRequest
 }
 
@@ -142,6 +143,13 @@ func (p *scriptedProvider) Chat(_ context.Context, request contract.ChatRequest)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.requests = append(p.requests, request)
+	if len(p.errors) > 0 {
+		err := p.errors[0]
+		p.errors = p.errors[1:]
+		if err != nil {
+			return contract.ChatResponse{}, err
+		}
+	}
 	if len(p.responses) == 0 {
 		return contract.ChatResponse{Content: "done"}, nil
 	}
