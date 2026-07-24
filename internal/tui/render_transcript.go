@@ -29,7 +29,7 @@ func (m *Model) renderTranscript() string {
 	if len(items) == 0 {
 		m.transcriptChips = m.transcriptChips[:0]
 		m.transcriptContent = ""
-		return ""
+		return m.renderEmptyBanner()
 	}
 	// Reserve the left gutter and a small right margin so text never touches
 	// either edge of the terminal. T048: use the single shared contentWidth so
@@ -132,4 +132,20 @@ func indentLines(value, gutter string) string {
 // Arabic can appear. It is a byte-identical no-op for pure-LTR content (006).
 func (m *Model) rtl(s string) string {
 	return renderForDisplay(s, m.runtime.Settings.RTL.Mode, "left").Visual
+}
+
+func (m *Model) renderEmptyBanner() string {
+	ascii := []string{
+		"█▄ ▄█ █  █ █  █ ▀█▀ █  █ █▀▀█ █▀▀█ █▀▀█ █▀▀▄ █▀▀▀",
+		"█ ██ █ █  █ █▀▀█  █  █▄▄█ █▄▄█ █    █  █ █  █ █▀▀▀",
+		"▀    ▀  ▀▀▀ ▀  ▀ ▀▀▀    ▀ ▀  ▀ ▀▀▀▀ ▀▀▀▀ ▀▀▀  ▀▀▀▀",
+	}
+	ver := m.palette.faint.Render("v" + m.version)
+	brandTitle := m.palette.brand.Render("MuhiyaCode") + " " + ver
+	lines := make([]string, len(ascii)+1)
+	for i, l := range ascii {
+		lines[i] = m.palette.brand.Render(l)
+	}
+	lines[len(ascii)] = brandTitle
+	return "\n\n" + indentLines(strings.Join(lines, "\n"), transcriptGutter)
 }

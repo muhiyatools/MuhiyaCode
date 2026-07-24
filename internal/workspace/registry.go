@@ -24,7 +24,7 @@ func (t functionTool) Execute(ctx context.Context, input json.RawMessage) (strin
 func (w *Workspace) Tools() []contract.Tool {
 	return []contract.Tool{
 		w.tool("list_files", instructions.ToolListFilesDescription, object(map[string]any{"path": stringProp("Directory, default ."), "recursive": boolProp(), "maxEntries": intProp(1, 2000)}, nil), w.execList),
-		w.tool("read_file", instructions.ToolReadFileDescription, object(map[string]any{"path": stringProp("Workspace-relative path"), "offset": intProp(1, 0), "limit": intProp(1, MaxReadLines)}, []string{"path"}), w.execRead),
+		w.tool("read_file", instructions.ToolReadFileDescription, object(map[string]any{"path": stringProp("Workspace-relative path"), "offset": intProp(1, 0), "limit": intProp(1, MaxReadLines), "fullLines": boolProp()}, []string{"path"}), w.execRead),
 		w.tool("grep", instructions.ToolGrepDescription, object(map[string]any{"pattern": stringProp("Regex or literal"), "path": stringProp("File/directory, default ."), "glob": stringProp("Optional file glob"), "ignoreCase": boolProp(), "literal": boolProp(), "maxResults": intProp(1, 500)}, []string{"pattern"}), w.execGrep),
 		w.tool("search_text", instructions.ToolSearchTextDescription, object(map[string]any{"query": stringProp("Literal query"), "path": stringProp("File/directory, default ."), "maxResults": intProp(1, 500)}, []string{"query"}), w.execSearch),
 		w.tool("glob", instructions.ToolGlobDescription, object(map[string]any{"pattern": stringProp("Glob"), "path": stringProp("Directory, default ."), "maxResults": intProp(1, 2000)}, []string{"pattern"}), w.execGlob),
@@ -35,7 +35,7 @@ func (w *Workspace) Tools() []contract.Tool {
 		w.tool("run_shell", instructions.ToolRunShellDescription, object(map[string]any{"command": stringProp("Shell command"), "timeoutMs": intProp(1, 600000)}, []string{"command"}), w.execShell),
 		w.tool("git_status", instructions.ToolGitStatusDescription, object(map[string]any{}, nil), w.execGitStatus),
 		w.tool("git_diff", instructions.ToolGitDiffDescription, object(map[string]any{"staged": boolProp(), "path": stringProp("Optional path"), "context": intProp(1, 100)}, nil), w.execGitDiff),
-		w.tool("inspect_code", instructions.ToolInspectCodeDescription, object(map[string]any{"mode": map[string]any{"type": "string", "enum": []string{"outline", "definition", "references"}}, "path": stringProp("File or directory"), "symbol": stringProp("Symbol name (for definition/references)"), "testFiles": boolProp()}, []string{"mode", "path"}), w.execInspectCode),
+		w.tool("inspect_code", "[Go only] "+instructions.ToolInspectCodeDescription, object(map[string]any{"mode": map[string]any{"type": "string", "enum": []string{"outline", "definition", "references"}}, "path": stringProp("File or directory"), "symbol": stringProp("Symbol name (for definition/references)"), "testFiles": boolProp()}, []string{"mode", "path"}), w.execInspectCode),
 	}
 }
 

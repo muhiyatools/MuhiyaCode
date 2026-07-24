@@ -51,9 +51,16 @@ func (m *Model) View() tea.View {
 		dialog = strings.Join(rows, "\n")
 		m.recordModalTargets(im, lineCount(header), available, rows)
 		body := lipgloss.Place(m.width, available, lipgloss.Center, lipgloss.Center, dialog)
-		content = header + "\n" + body + "\n" + hint
+		if header != "" {
+			content = header + "\n" + body + "\n" + hint
+		} else {
+			content = body + "\n" + hint
+		}
 	} else {
-		parts := []string{header}
+		var parts []string
+		if header != "" {
+			parts = append(parts, header)
+		}
 		y := lineCount(header)
 		vp := m.viewport.View()
 		vpHeight := lineCount(vp)

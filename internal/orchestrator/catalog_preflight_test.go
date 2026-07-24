@@ -41,7 +41,7 @@ func TestCatalogPreflightSubstitutesAMissingModel(t *testing.T) {
 		},
 		"deepseek-v4-pro")
 
-	engine.reconcileCatalog()
+	_ = engine.reconcileCatalog()
 
 	if got := engine.settings.Provider.ActiveModelID; got == "deepseek-v4-pro" {
 		t.Fatal("the missing model was left configured — the first request will 404 mid-task")
@@ -66,7 +66,7 @@ func TestCatalogPreflightIsSilentWhenEverythingResolves(t *testing.T) {
 		},
 		"minimax-m3")
 
-	engine.reconcileCatalog()
+	_ = engine.reconcileCatalog()
 
 	if engine.settings.Provider.ActiveModelID != "minimax-m3" {
 		t.Fatal("a healthy catalog must not be rewritten")
@@ -92,7 +92,7 @@ func TestCatalogPreflightWillNotSwitchMidSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine.reconcileCatalog()
+	_ = engine.reconcileCatalog()
 
 	if got := engine.settings.Provider.ActiveModelID; got != "gone-model" {
 		t.Fatalf("the model was changed after the session had already spent a request (now %q)", got)

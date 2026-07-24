@@ -41,6 +41,7 @@ type UsageRecord struct {
 	Upstream           string           `json:"upstream,omitempty"`
 	PromptTokens       *int             `json:"prompt_tokens"`
 	CompletionTokens   *int             `json:"completion_tokens"`
+	ReasoningTokens    *int             `json:"reasoning_tokens,omitempty"`
 	CacheReadTokens    *int             `json:"cache_read_tokens"`
 	CacheMissTokens    *int             `json:"cache_miss_tokens"`
 	NewTailTokens      *int             `json:"new_tail_tokens,omitempty"`
@@ -87,6 +88,7 @@ type PairingRate struct {
 	// (retires the feature-011 whole-task review-spend approximation).
 	PromptTokens     int `json:"promptTokens,omitempty"`
 	CompletionTokens int `json:"completionTokens,omitempty"`
+	ReasoningTokens  int `json:"reasoningTokens,omitempty"`
 }
 
 // PerPairingRates aggregates usage records per (model, pin), preserving first-
@@ -117,6 +119,9 @@ func PerPairingRates(records []UsageRecord) []PairingRate {
 		}
 		if record.CompletionTokens != nil {
 			b.rate.CompletionTokens += *record.CompletionTokens
+		}
+		if record.ReasoningTokens != nil {
+			b.rate.ReasoningTokens += *record.ReasoningTokens
 		}
 		if record.CacheReadTokens == nil || record.CacheMissTokens == nil {
 			continue

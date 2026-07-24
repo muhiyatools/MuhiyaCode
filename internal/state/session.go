@@ -253,6 +253,9 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sk-[A-Za-z0-9_-]{12,}`),
 	regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{12,}`),
 	regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)\s*[:=]\s*[^\s,}]+`),
+	regexp.MustCompile(`(?i)(AKIA|ASIA)[A-Z0-9]{16}`),
+	regexp.MustCompile(`(?i)github_pat_[a-zA-Z0-9_]{22,}`),
+	regexp.MustCompile(`(?i)gh[po]_[a-zA-Z0-9_]{36}`),
 }
 
 func Redact(input string, secrets contract.Secrets, extra ...string) string {
