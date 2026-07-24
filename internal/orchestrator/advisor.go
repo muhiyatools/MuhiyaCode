@@ -77,12 +77,11 @@ func (e *Engine) utilityModelID() string {
 // remaining cost (a one-time cold start on the new model) is a price the
 // advisor is explicitly told to weigh rather than a reason to forbid the choice.
 func (e *Engine) shouldRunAdvisor() bool {
-	mode := strings.ToLower(strings.TrimSpace(e.settings.Provider.Advisor))
-	if mode == "off" || mode == "pinned" {
+	if strings.EqualFold(strings.TrimSpace(e.settings.Provider.Advisor), "off") {
 		return false
 	}
-	// A user-pinned model is never overridden unless explicitly routed.
-	if e.settings.Provider.RolesPinned && mode != "routed" {
+	// A user-pinned model is never overridden.
+	if e.settings.Provider.RolesPinned {
 		return false
 	}
 	// Nothing to choose between.
@@ -123,9 +122,9 @@ func advisorCatalog(models []contract.Model) string {
 // Substituting happens through the same applyModelSwitch the advisor uses, so
 // it runs before RolesPinned and before any cached bytes exist. Silent when the
 // catalog is fine, which is the overwhelmingly common case.
-func (e *Engine) reconcileCatalog() error {
+func (e *Engine) reconcileCatalog() {
 	if len(e.settings.Provider.Models) == 0 || e.UsageAggregate().Requests > 0 {
-		return nil // nothing to check against, or too late to change anything
+		return // nothing to check against, or too late to change anything
 	}
 	known := make(map[string]bool, len(e.settings.Provider.Models))
 	for _, model := range e.settings.Provider.Models {
@@ -133,24 +132,18 @@ func (e *Engine) reconcileCatalog() error {
 	}
 	configured := e.settings.Provider.ActiveModelID
 	if configured == "" || known[configured] {
-		return nil
+		return
 	}
-	
-	if strings.ToLower(strings.TrimSpace(e.settings.Provider.Advisor)) == "pinned" || e.settings.Provider.RolesPinned {
-		return fmt.Errorf("configured model %q is missing from the catalog and substitution is blocked", configured)
-	}
-
 	replacement := e.substituteFor()
 	if replacement.ID == "" {
 		e.callbacks.EmitNotice(fmt.Sprintf("The configured model %q is not available on this gateway and no substitute was found — requests will fail until the catalog or your config is corrected.", configured))
-		return nil
+		return
 	}
 	addendum := gateway.ResolveModelProfile(replacement.ID + " " + replacement.Name).PromptAddendum
 	if err := e.applyModelSwitch(context.Background(), "main", replacement.ID, replacement.Name, addendum); err != nil {
-		return nil
+		return
 	}
 	e.callbacks.EmitNotice(fmt.Sprintf("The configured model %q is not available on this gateway; using %s instead.", configured, replacement.Name))
-	return nil
 }
 
 // substituteFor picks the best available stand-in when the configured model is

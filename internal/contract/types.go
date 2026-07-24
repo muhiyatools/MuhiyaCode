@@ -24,30 +24,6 @@ const (
 	EffortMax    EffortLevel = "max"
 )
 
-// BenchmarkStatus describes the adapter lifecycle, not the external task
-// grader's verdict. A benchmark harness remains responsible for judging the
-// repository state after the agent exits.
-type BenchmarkStatus string
-
-const (
-	BenchmarkPass    BenchmarkStatus = "pass"
-	BenchmarkFail    BenchmarkStatus = "fail"
-	BenchmarkTimeout BenchmarkStatus = "timeout"
-	BenchmarkBlocked BenchmarkStatus = "blocked"
-	BenchmarkError   BenchmarkStatus = "error"
-)
-
-// VerificationResult captures the agent's generic project-marker verification
-// stage. It is intentionally separate from BenchmarkStatus because an external
-// benchmark grader remains the objective source of task success.
-type VerificationResult struct {
-	Ran             bool   `json:"ran"`
-	Command         string `json:"command,omitempty"`
-	Result          string `json:"result"`
-	FailureEffect   string `json:"failure_effect,omitempty"`
-	OutputTruncated string `json:"output_truncated,omitempty"`
-}
-
 type ReasoningTier string
 
 const (
@@ -205,7 +181,6 @@ type Usage struct {
 	PromptTokens              int    `json:"promptTokens,omitempty"`
 	CompletionTokens          int    `json:"completionTokens,omitempty"`
 	TotalTokens               int    `json:"totalTokens,omitempty"`
-	ReasoningTokens           *int   `json:"reasoningTokens,omitempty"`
 	CachedTokens              int    `json:"cachedTokens,omitempty"`
 	CacheReadTokens           *int   `json:"cacheReadTokens,omitempty"`
 	CacheMissTokens           *int   `json:"cacheMissTokens,omitempty"`
@@ -246,7 +221,6 @@ func (u Usage) Add(next Usage) Usage {
 		PromptTokens:              u.PromptTokens + next.PromptTokens,
 		CompletionTokens:          u.CompletionTokens + next.CompletionTokens,
 		TotalTokens:               u.TotalTokens + total,
-		ReasoningTokens:           addNullableInt(u.ReasoningTokens, next.ReasoningTokens),
 		CachedTokens:              u.CachedTokens + next.CachedTokens,
 		CacheReadTokens:           addNullableInt(u.CacheReadTokens, next.CacheReadTokens),
 		CacheMissTokens:           addNullableInt(u.CacheMissTokens, next.CacheMissTokens),
@@ -290,7 +264,6 @@ type ChatRequest struct {
 	MaxTokens   int
 	ToolChoice  string
 	Reasoning   ReasoningTier
-	Seed        *int
 	// SessionID is a routing pin derived once per session per stream and sent
 	// as the X-Muhiya-Session header. Long-lived providers key their cache by
 	// routing identity; without it, an upstream model flip silently invalidates
@@ -477,8 +450,6 @@ type TaskStats struct {
 	// friction (gate/tool/ui classes) recorded during THIS task. >0 appends a
 	// dimmed "⚠ N harness" marker to the task summary; 0 adds no noise.
 	HarnessEvents int `json:"harnessEvents,omitempty"`
-	// Verification records the outcome of the bounded verification stage.
-	Verification VerificationResult `json:"verification,omitempty"`
 }
 
 // StopCause values for TaskStats.StopCause (003, FR-013a).
@@ -486,8 +457,6 @@ const (
 	StopCauseUserStop   = "user stop"
 	StopCauseError      = "error"
 	StopCauseDisconnect = "disconnect"
-	StopCauseTimeout    = "timeout"
-	StopCauseBudget     = "budget"
 )
 
 type Callbacks struct {

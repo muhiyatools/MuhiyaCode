@@ -61,7 +61,7 @@ func NewRootCommand() *cobra.Command {
 	root.Flags().BoolVar(&simple, "simple", false, "use the line interface instead of the full TUI")
 	root.Flags().BoolVar(&fresh, "new", false, "start a new session instead of reopening the latest workspace session")
 	root.Flags().BoolVar(&noMCP, "no-mcp", false, "start without connecting MCP servers")
-	root.AddCommand(newLoginCommand(), newLogoutCommand(), newResumeCommand(), newSessionsCommand(), newConfigCommand(), newMCPCommand(), newDoctorCommand(), newBenchCommand())
+	root.AddCommand(newLoginCommand(), newLogoutCommand(), newResumeCommand(), newSessionsCommand(), newConfigCommand(), newMCPCommand(), newDoctorCommand())
 	return root
 }
 

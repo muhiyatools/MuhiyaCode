@@ -322,14 +322,3 @@ func TestExecInspectCode_MissingSymbol(t *testing.T) {
 		t.Errorf("expected error for missing symbol in definition mode")
 	}
 }
-
-func TestInspectCodePythonError(t *testing.T) {
-	root := t.TempDir()
-	path := filepath.Join(root, "test.py")
-	os.WriteFile(path, []byte(""), 0o644)
-	_, err := collectGoFiles(path, false)
-	if err == nil || !strings.Contains(err.Error(), "grep_search") {
-		t.Errorf("expected grep_search guidance in error, got: %v", err)
-	}
-}
-

@@ -83,12 +83,15 @@ func TestHeaderIsAFixedIdentityRow(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
 	header := m.renderHeader()
-	if header != "" {
-		t.Fatalf("topbar should be empty (0 rows), got:\n%q", header)
+	if !strings.HasPrefix(header, "\n") {
+		t.Fatalf("header lacks the top spacer row:\n%q", header)
 	}
-	modeLine := m.chromeModeLine()
-	if !strings.Contains(modeLine, "vtest") || !strings.Contains(modeLine, "context") {
-		t.Fatalf("mode line should carry the version and context meter:\n%q", modeLine)
+	if lineCount(header) != 3 {
+		t.Fatalf("header should be spacer + identity line + rule (3 rows), got %d:\n%q", lineCount(header), header)
+	}
+	rows := strings.Split(header, "\n")
+	if !strings.Contains(rows[1], "MuhiyaCode") || !strings.Contains(rows[1], "context") {
+		t.Fatalf("the identity row should carry the brand and the context meter:\n%q", rows[1])
 	}
 }
 

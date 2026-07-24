@@ -49,13 +49,13 @@ func RescueToolCalls(content string, knownTools []string) ([]contract.ToolCall, 
 		cleaned = wrapperRE.ReplaceAllString(cleaned, "")
 		return calls, strings.TrimSpace(cleaned)
 	}
-	if calls, ok := rescueJSON(content, known); ok {
-		return calls, ""
+	if call, ok := rescueJSON(content, known); ok {
+		return []contract.ToolCall{call}, ""
 	}
 	return nil, content
 }
 
-func rescueJSON(content string, known map[string]bool) ([]contract.ToolCall, bool) {
+func rescueJSON(content string, known map[string]bool) (contract.ToolCall, bool) {
 	text := strings.TrimSpace(content)
 	if strings.HasPrefix(text, "```") && strings.HasSuffix(text, "```") {
 		lines := strings.Split(text, "\n")
@@ -63,52 +63,10 @@ func rescueJSON(content string, known map[string]bool) ([]contract.ToolCall, boo
 			text = strings.TrimSpace(strings.Join(lines[1:len(lines)-1], "\n"))
 		}
 	}
-	if strings.HasPrefix(text, "[") {
-		var arr []json.RawMessage
-		if json.Unmarshal([]byte(text), &arr) == nil {
-			return extractCalls(arr, known)
-		}
-	}
 	var raw map[string]json.RawMessage
 	if !strings.HasPrefix(text, "{") || json.Unmarshal([]byte(text), &raw) != nil {
-		return nil, false
+		return contract.ToolCall{}, false
 	}
-	for _, key := range []string{"tool_calls", "calls"} {
-		if len(raw[key]) > 0 {
-			var arr []json.RawMessage
-			if json.Unmarshal(raw[key], &arr) == nil {
-				if calls, ok := extractCalls(arr, known); ok {
-					return calls, true
-				}
-			}
-		}
-	}
-	if call, ok := extractSingleCall(raw, known); ok {
-		return []contract.ToolCall{call}, true
-	}
-	return nil, false
-}
-
-func extractCalls(arr []json.RawMessage, known map[string]bool) ([]contract.ToolCall, bool) {
-	var calls []contract.ToolCall
-	for _, rawItem := range arr {
-		var obj map[string]json.RawMessage
-		if json.Unmarshal(rawItem, &obj) == nil {
-			if call, ok := extractSingleCall(obj, known); ok {
-				calls = append(calls, call)
-				if len(calls) == 10 {
-					break
-				}
-			}
-		}
-	}
-	if len(calls) > 0 {
-		return calls, true
-	}
-	return nil, false // Note: Empty array yields no rescued calls.
-}
-
-func extractSingleCall(raw map[string]json.RawMessage, known map[string]bool) (contract.ToolCall, bool) {
 	var name string
 	for _, key := range []string{"name", "tool"} {
 		if value := raw[key]; len(value) > 0 && json.Unmarshal(value, &name) == nil && name != "" {

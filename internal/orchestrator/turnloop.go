@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"github.com/muhiya/muhiyacode/internal/gateway"
 )
 
 type wireRequestNormalizer interface {
@@ -68,10 +67,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	// Catalog first: a model that is not in the catalog at all would 404 the
 	// first real request, so it must be substituted before the advisor reasons
 	// about the pairing.
-	if err := e.reconcileCatalog(); err != nil {
-		e.callbacks.EmitNotice(err.Error())
-		return "", contract.TaskStats{TerminatedReason: "Missing configured model"}, err
-	}
+	e.reconcileCatalog()
 	e.runTaskAdvisor(ctx, userPrompt, e.workspaceSignal())
 	e.maybeAdviseFreshSession(assessment, userPrompt)
 	modelPrompt := userPrompt
@@ -242,19 +238,8 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	autoReviewNudged := false // DG-7: the max-effort review nudge fires at most once per task
 	allFailedTurnStreak := 0  // B7: consecutive turns where EVERY tool call failed (reset at Run start via this local)
 	overBudgetNoted := false
-	providerFailures := make([]int, 0) // G2.2: provider-error sliding window
-	stalledProgressTurns := 0
-	lastLinesAdded, lastLinesRemoved, lastChecksRun := 0, 0, 0
-	explorationEscalations := 0
-	verificationRan := false
-	successfulToolCalls := make(map[string][]int)
+	turnRecovered := false // G2.2: the one provider-error retry this task gets
 	for {
-		if e.BudgetExceeded() {
-			terminateReason = "budget exceeded"
-			e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:budget", terminateReason)
-			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[breaker] " + terminateReason + ". Stop executing; give the final factual status."})
-			return e.finalize(ctx, fallbackAnswer("", filesChanged)), stats, nil
-		}
 		turns++
 		if err := ctx.Err(); err != nil {
 			return "", stats, fmt.Errorf("task stopped: %w", err)
@@ -282,17 +267,12 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// self-limiting: each step raises turnCap, so this goes quiet until the new
 		// cap is reached, and it only fires while files are genuinely changing.
 		// ClassEpic and hardTurnCeiling are the terminal bounds.
-		if turns >= turnCap && currentClass != ClassEpic {
-			if len(filesChanged) > 0 || explorationEscalations < 2 {
-				if len(filesChanged) == 0 {
-					explorationEscalations++
-				}
-				currentClass = EscalateClass(currentClass)
-				bigger := BudgetFor(Assessment{Class: currentClass, Risky: assessment.Risky, ScopeGuard: assessment.ScopeGuard}, live)
-				turnCap = min(ceiling, max(turnCap+6, bigger.MaxTurns))
-				convergeNoted, finalNoted = false, false
-				e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[governor] Task outgrew its brief; class=%s and runway extended. Keep going if work remains; otherwise complete, verify once, and report.", currentClass)})
-			}
+		if turns >= turnCap && len(filesChanged) > 0 && currentClass != ClassEpic {
+			currentClass = EscalateClass(currentClass)
+			bigger := BudgetFor(Assessment{Class: currentClass, Risky: assessment.Risky}, live)
+			turnCap = min(ceiling, max(turnCap+6, bigger.MaxTurns))
+			convergeNoted, finalNoted = false, false
+			e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[governor] Task outgrew its brief; class=%s and runway extended. Keep going if work remains; otherwise complete, verify once, and report.", currentClass)})
 		}
 		isFinal := turns >= turnCap
 		if isFinal && !finalNoted {
@@ -401,10 +381,8 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		messages := built.Messages
 		// Feature 006: project memory is a file the agent edits with its ordinary
 		// tools, so answers no longer carry a <project-memory> trailer to hide — live
-		// TB03 (tool_calls truncations) needs bounded reasoning + bounded visible content +
-		// a deterministic budget. DeepSeek R1 handles reasoning implicitly, but generic
-		// endpoints with effort mappings scale output probabilistically.
-		request := contract.ChatRequest{SessionID: sessionPinMain, Messages: messages, Tools: definitions, ModelID: e.settings.Provider.ActiveModelID, ToolChoice: "auto", Reasoning: ReasoningForEffort(e.effort()), MaxTokens: e.outputBudget(e.settings.Provider.ActiveModelID), PinUpstream: e.upstreamPin(), OnToken: e.callbacks.Token, OnReasoningToken: e.callbacks.ReasoningToken, Seed: e.seed}
+		// tokens stream straight through to display.
+		request := contract.ChatRequest{SessionID: sessionPinMain, Messages: messages, Tools: definitions, ModelID: e.settings.Provider.ActiveModelID, ToolChoice: "auto", Reasoning: ReasoningForEffort(e.effort()), MaxTokens: e.outputBudget(e.settings.Provider.ActiveModelID), PinUpstream: e.upstreamPin(), OnToken: e.callbacks.Token, OnReasoningToken: e.callbacks.ReasoningToken}
 		shapeRequest := request
 		if normalizer, ok := e.provider.(wireRequestNormalizer); ok {
 			normalizedMessages, normalizeErr := normalizer.StableRequestMessages(request)
@@ -455,31 +433,12 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			// A 429 needs its cause named before anything else: "slow down" and
 			// "out of budget" arrive as the same status, and only one of them is
 			// worth waiting through.
-			if gateway.IsRateLimited(err) {
-				explanation := e.explainRateLimit(ctx, err)
-				if explanation == "" {
-					explanation = "Rate limit reached (429). The provider is temporarily throttling requests."
-				}
+			if explanation := e.explainRateLimit(ctx, err); explanation != "" {
 				e.callbacks.EmitNotice(explanation)
-				e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:rate-limit", explanation)
-				e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[breaker] " + explanation + ". Stop retrying; give the final factual status."})
-				return e.finalize(ctx, fallbackAnswer("", filesChanged)), stats, nil
+				return "", stats, err
 			}
-			if ctx.Err() == nil && recoverableChatError(err) {
-				providerFailures = append(providerFailures, turns)
-				cutoff := turns - 15
-				windowFailures := 0
-				for _, t := range providerFailures {
-					if t > cutoff {
-						windowFailures++
-					}
-				}
-				if windowFailures > 3 {
-					terminateReason = fmt.Sprintf("repeated provider failures — %d failures in the last 15 turns; stopping to report", windowFailures)
-					e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:provider-failures", terminateReason)
-					e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[breaker] " + terminateReason + ". Stop retrying; give the final factual status."})
-					return e.finalize(ctx, fallbackAnswer("", filesChanged)), stats, nil
-				}
+			if !turnRecovered && ctx.Err() == nil && recoverableChatError(err) {
+				turnRecovered = true
 				e.callbacks.EmitStatus("Provider hiccup — retrying this step...")
 				e.recordHarnessEvent(ctx, contract.HarnessRecovery, "chat-retry", err.Error())
 				if sleepErr := sleepContext(ctx, turnRecoveryDelay); sleepErr != nil {
@@ -536,7 +495,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		if !isFinal && len(calls) == 0 && e.rescue != nil {
 			calls, assistantText = e.rescue(response.Content, toolNames(definitions))
 		}
-		if isFinal && len(calls) == 0 {
+		if isFinal {
 			if e.hasSteering() {
 				if strings.TrimSpace(assistantText) != "" {
 					_ = e.persistAssistant(ctx, assistantText)
@@ -551,11 +510,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				if trimmed != "" {
 					_ = e.persistAssistant(ctx, trimmed)
 				}
-				continue
-			}
-			if trimmed == "" && !sawToolCall && turns == 1 && emptyFinalRetries < 1 {
-				emptyFinalRetries++
-				e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[continue] You replied with an empty response. Please begin work on the task."})
 				continue
 			}
 			if trimmed == "" && sawToolCall && emptyFinalRetries < 2 {
@@ -621,15 +575,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		executable, cut := splitTruncatedCalls(calls, truncated)
 		e.history.Append(assistantReplayMessage(response, assistantText, sanitizeTruncatedCalls(calls, truncated)))
 		outcomes := e.truncatedOutcomes(e.mainScope(definitions), cut)
-		for _, call := range executable {
-			startTime := time.Now()
-			batch := e.executeBatch(ctx, []contract.ToolCall{call}, definitions, live)
-			if len(batch) > 0 {
-				outcome := batch[0]
-				outcome.DurationMS = time.Since(startTime).Milliseconds()
-				outcomes = append(outcomes, outcome)
-			}
-		}
+		outcomes = append(outcomes, e.executeBatch(ctx, executable, definitions, live)...)
 		for _, outcome := range outcomes {
 			toolCalls++
 			if outcome.Failed {
@@ -661,7 +607,6 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			// file-changing calls via the SAME shared diff parser the TUI rows use,
 			// so the session panel and the per-row counts can never drift.
 			if !outcome.Failed {
-				successfulToolCalls[outcome.Call.ToolName()] = append(successfulToolCalls[outcome.Call.ToolName()], turns)
 				if add, remove, ok := contract.DiffCounts(outcome.Output); ok {
 					taskLinesAdded += add
 					taskLinesRemoved += remove
@@ -673,7 +618,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			// so a reopened transcript row names WHAT the call acted on. Redacted
 			// like every persisted field.
 			toolTarget := e.redact(contract.ToolTarget(outcome.Call.ToolName(), []byte(outcome.Call.ArgumentsJSON())))
-			if err := e.persistMessage(ctx, "tool", outcome.Call.ToolName(), outcome.Output, toolTarget, map[string]any{"role": "tool", "name": outcome.Call.ToolName(), "input": outcome.Call.ArgumentsJSON(), "output": outcome.Output, "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "durationMs": outcome.DurationMS}); err != nil {
+			if err := e.persistMessage(ctx, "tool", outcome.Call.ToolName(), outcome.Output, toolTarget, map[string]any{"role": "tool", "name": outcome.Call.ToolName(), "input": outcome.Call.ArgumentsJSON(), "output": outcome.Output, "createdAt": time.Now().UTC().Format(time.RFC3339Nano)}); err != nil {
 				return "", stats, err
 			}
 			e.history.Append(contract.Message{Role: contract.RoleTool, ToolCallID: outcome.Call.ID, Content: outcome.Output})
@@ -706,68 +651,12 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[breaker] " + terminateReason + ". Stop retrying; give the final factual status and the genuine blocker."})
 			return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
 		}
-		// H6: distinct-argument loop coverage per tool.
-		for name, callTurns := range successfulToolCalls {
-			cutoff := turns - 15 // Window of 15 turns
-			count := 0
-			kept := callTurns[:0]
-			for _, t := range callTurns {
-				if t > cutoff {
-					kept = append(kept, t)
-					count++
-				}
-			}
-			successfulToolCalls[name] = kept
-			if count >= 15 {
-				terminateReason = fmt.Sprintf("repeated successful calls to %s without progress — %d calls in the last 15 turns", name, count)
-				e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:tool-loop", terminateReason)
-				e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[breaker] " + terminateReason + ". Stop repeating this action; give the final factual status."})
-				return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
-			}
-		}
-		if taskLinesAdded == lastLinesAdded && taskLinesRemoved == lastLinesRemoved && checksRun == lastChecksRun && sawToolCall {
-			stalledProgressTurns++
-		} else {
-			stalledProgressTurns = 0
-			lastLinesAdded = taskLinesAdded
-			lastLinesRemoved = taskLinesRemoved
-			lastChecksRun = checksRun
-		}
-		if stalledProgressTurns >= 15 {
-			terminateReason = "stalled progress: no meaningful changes or checks for 15 turns"
-			e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:stalled-progress", terminateReason)
-			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[breaker] " + terminateReason + ". Give the final factual status."})
-			return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
-		}
 		if toolCalls > budget.ToolCalls && !overBudgetNoted {
 			overBudgetNoted = true
 			e.taskMu.Lock()
 			e.taskOverBudget = toolCalls - budget.ToolCalls
 			e.taskMu.Unlock()
 			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[governor] The estimated tool budget is passed. Keep required work moving, but converge: avoid new exploration, finish the outstanding dispatch, and report."})
-		}
-		if isFinal {
-			if len(filesChanged) > 0 && checksRun == 0 && !verificationRan {
-				verificationRan = true
-				runCmd := func(c context.Context, cmd string) (string, error) {
-					escapedCmd, _ := json.Marshal(cmd)
-					call := contract.NewToolCall("verify", "run_shell", fmt.Sprintf(`{"command":%s}`, escapedCmd))
-					defs := append(definitions, contract.ToolDefinition{Function: contract.FunctionDefinition{Name: "run_shell"}})
-					return e.executeOne(c, call, defs)
-				}
-				e.callbacks.EmitNotice("Verifying workspace changes before finalization...")
-				verification := VerifyWorkspace(ctx, e.session.WorkspacePath, runCmd)
-				if verification.Result == "failure" {
-					verification.FailureEffect = "re-prompted"
-					stats.Verification = verification
-					isFinal = false
-					msg := fmt.Sprintf("[verification] Automatically ran %q to verify changes. The check FAILED. Review the output and fix the root cause before completing the task.\n\nOutput:\n```\n%s\n```", verification.Command, verification.OutputTruncated)
-					e.history.Append(contract.Message{Role: contract.RoleUser, Content: msg})
-					continue
-				}
-				stats.Verification = verification
-			}
-			return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
 		}
 	}
 }

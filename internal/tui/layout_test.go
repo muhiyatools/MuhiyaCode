@@ -17,8 +17,8 @@ func TestLayoutSnapshotReflectsPanes(t *testing.T) {
 	if ls.Width != 100 || ls.Height != 40 {
 		t.Fatalf("snapshot size %dx%d, want 100x40", ls.Width, ls.Height)
 	}
-	if ls.HeaderRows != 0 {
-		t.Fatalf("header rows = %d, want 0 (topbar removed)", ls.HeaderRows)
+	if ls.HeaderRows != 3 {
+		t.Fatalf("header rows = %d, want 3 (single identity row: spacer + line + rule)", ls.HeaderRows)
 	}
 	if ls.TranscriptHeight <= 0 {
 		t.Fatal("snapshot has an empty transcript band")

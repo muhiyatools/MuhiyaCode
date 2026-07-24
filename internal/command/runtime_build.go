@@ -30,18 +30,6 @@ type ApplicationOptions struct {
 	DisableMCP       bool
 	MCPDeadline      time.Duration
 	RawUsageObserver gateway.RawUsageObserver
-	BenchmarkMode    bool
-	Overrides        *BenchmarkOverrides
-}
-
-type BenchmarkOverrides struct {
-	Model        string
-	BaseURL      string
-	APIKey       string
-	Effort       string
-	AdvisorMode  string
-	ContextLimit int
-	Seed         *int
 }
 
 // Application is the composition root for one CLI process. Packages below it
@@ -68,9 +56,6 @@ type Application struct {
 	activeCheckpoint *workspace.CheckpointStore
 	activeMCP        *mcpclient.Manager
 	activeRegistry   *orchestrator.Registry
-	guard            *workspace.Guard
-	benchmarkMode    bool
-	seed             *int
 }
 
 type runtimeBundle struct {
@@ -80,7 +65,6 @@ type runtimeBundle struct {
 	checkpoint *workspace.CheckpointStore
 	mcp        *mcpclient.Manager
 	registry   *orchestrator.Registry
-	guard      *workspace.Guard
 }
 
 // openApplicationCore opens config, DB, probe store, provider, and resolves the
@@ -112,58 +96,16 @@ func openApplicationCore(options ApplicationOptions) (*Application, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if options.BenchmarkMode && options.Overrides != nil {
-		ov := options.Overrides
-		if ov.APIKey != "" {
-			secrets.ProviderAPIKey = ov.APIKey
-		}
-		if ov.BaseURL != "" {
-			settings.Provider.BaseURL = ov.BaseURL
-		}
-		if ov.Model != "" {
-			settings.Provider.ActiveModelID = ov.Model
-		}
-		if ov.Effort != "" {
-			settings.Effort = contract.EffortLevel(ov.Effort)
-		}
-		if ov.AdvisorMode != "" {
-			settings.Provider.Advisor = ov.AdvisorMode
-		}
-		if ov.ContextLimit > 0 {
-			for i, m := range settings.Provider.Models {
-				if m.ID == settings.Provider.ActiveModelID {
-					settings.Provider.Models[i].ContextLimit = ov.ContextLimit
-				}
-			}
-		}
-		if ov.Model != "" {
-			found := false
-			for _, m := range settings.Provider.Models {
-				if m.ID == ov.Model {
-					found = true
-					break
-				}
-			}
-			if !found {
-				_ = db.Close()
-				return nil, fmt.Errorf("configured benchmark model %q is missing from the local catalog", ov.Model)
-			}
-		}
-	}
-	var appSeed *int
-	if options.BenchmarkMode && options.Overrides != nil && options.Overrides.Seed != nil {
-		appSeed = options.Overrides.Seed
-	}
 	app := &Application{
 		ctx: ctx, paths: paths, db: db, sessions: store, settings: &settings,
 		secrets: secrets, callbacks: options.Callbacks, disableMCP: options.DisableMCP,
-		mcpWait: options.MCPDeadline, probeStore: probeStore, benchmarkMode: options.BenchmarkMode, seed: appSeed,
+		mcpWait: options.MCPDeadline, probeStore: probeStore,
 	}
 	if app.mcpWait <= 0 {
 		app.mcpWait = 900 * time.Millisecond
 	}
 	app.provider = gateway.NewOpenAICompatible(gateway.Config{Settings: settings, APIKey: secrets.ProviderAPIKey, RawUsageObserver: options.RawUsageObserver})
-	if secrets.ProviderAPIKey != "" && !options.BenchmarkMode {
+	if secrets.ProviderAPIKey != "" {
 		active, ok := state.ActiveModel(settings)
 		// Discover when there is nothing usable yet, OR when the catalog has gone
 		// stale. The staleness path matters now that the interactive refresh is
@@ -291,16 +233,6 @@ func (a *Application) currentSessionID() string {
 	return a.runtime.Session.ID
 }
 
-func (a *Application) PreTrustWorkspace(ctx context.Context) error {
-	a.mu.Lock()
-	guard := a.guard
-	a.mu.Unlock()
-	if guard == nil {
-		return nil
-	}
-	return guard.PreTrust(ctx)
-}
-
 // The interactive model switcher lived here until v1.1.0 removed /model: users
 // no longer manage models mid-session, and freezing the pairing for the whole
 // session is what keeps both prefix caches warm. Engine.SwitchModel remains the
@@ -319,7 +251,7 @@ func (a *Application) activate(bundle runtimeBundle) {
 	a.mu.Lock()
 	previous := a.activeMCP
 	a.runtime, a.recent = bundle.runtime, append([]contract.Event(nil), bundle.recent...)
-	a.activeWorkspace, a.activeCheckpoint, a.activeMCP, a.activeRegistry, a.guard = bundle.workspace, bundle.checkpoint, bundle.mcp, bundle.registry, bundle.guard
+	a.activeWorkspace, a.activeCheckpoint, a.activeMCP, a.activeRegistry = bundle.workspace, bundle.checkpoint, bundle.mcp, bundle.registry
 	a.mu.Unlock()
 	if previous != nil && previous != bundle.mcp {
 		_ = previous.Close()
@@ -453,7 +385,7 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	// session start (a deliberate boundary), which keeps the prefix byte-stable
 	// within the session and removes the mid-config probe-change invalidation.
 	webSupported := false
-	if !a.benchmarkMode && strings.TrimSpace(a.settings.Provider.BaseURL) != "" && strings.TrimSpace(a.secrets.ProviderAPIKey) != "" {
+	if strings.TrimSpace(a.settings.Provider.BaseURL) != "" && strings.TrimSpace(a.secrets.ProviderAPIKey) != "" {
 		fingerprint := state.ProbeFingerprint(a.settings.Provider.BaseURL, a.secrets.ProviderAPIKey)
 		if snap, ok := a.probeStore.Get(fingerprint); ok {
 			webSupported = snap.WebSearch == state.ProbeSupported
@@ -622,7 +554,6 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		},
 		InitialUsageRecords:  usageRecords,
 		InitialInvalidations: invalidationEvents,
-		Seed:                 a.seed,
 		BoundaryTools: func() (orchestrator.BoundaryToolChange, bool, error) {
 			if manager == nil {
 				return orchestrator.BoundaryToolChange{}, false, nil
@@ -652,7 +583,7 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		}
 		return runtimeBundle{}, err
 	}
-	return runtimeBundle{runtime: tui.Runtime{Engine: engine, Session: session, Settings: a.settings}, recent: recent, workspace: service, checkpoint: checkpoint, mcp: manager, registry: registry, guard: service.Guard()}, nil
+	return runtimeBundle{runtime: tui.Runtime{Engine: engine, Session: session, Settings: a.settings}, recent: recent, workspace: service, checkpoint: checkpoint, mcp: manager, registry: registry}, nil
 }
 
 func (a *Application) webSearchAvailable(ctx context.Context) (bool, bool, string, error) {

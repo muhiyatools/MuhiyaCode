@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"github.com/muhiya/muhiyacode/internal/gateway"
 	"github.com/muhiya/muhiyacode/internal/workspace"
 )
 
@@ -47,7 +45,6 @@ func (o recoveryOutcome) String() string {
 type faultCase struct {
 	name      string
 	responses []contract.ChatResponse
-	errors    []error
 	prompt    string
 	tools     []contract.Tool
 	want      recoveryOutcome
@@ -145,7 +142,7 @@ func truncateForLog(s string) string {
 
 func runFaultCase(t *testing.T, tc faultCase) {
 	t.Helper()
-	provider := &scriptedProvider{responses: tc.responses, errors: tc.errors}
+	provider := &scriptedProvider{responses: tc.responses}
 	settings := engineSettings()
 	tools := tc.tools
 	engine, err := NewEngine(EngineConfig{
@@ -374,66 +371,6 @@ func TestFaultInjectionCatalog(t *testing.T) {
 			responses: governorEscalationResponses(),
 			want:      outcomeRecordedDegradation,
 		},
-		{
-			name:  "empty-turn-bounded-retry",
-			tools: []contract.Tool{&recordingTool{name: "read_file"}},
-			responses: []contract.ChatResponse{
-				{Content: ""},
-				{Content: ""},
-				{Content: ""},
-				{Content: "finally recovered"},
-			},
-			prompt: "do empty turns",
-			want:   outcomeGuidedSuccess,
-		},
-		{
-			name:  "provider-timeout-sliding-breaker",
-			tools: []contract.Tool{&recordingTool{name: "read_file"}},
-			responses: []contract.ChatResponse{
-				{Content: "done"},
-			},
-			errors: []error{context.DeadlineExceeded, context.DeadlineExceeded, context.DeadlineExceeded, context.DeadlineExceeded},
-			prompt: "test timeout",
-			want:   outcomeRecordedDegradation,
-		},
-		{
-			name:  "provider-503-sliding-breaker",
-			tools: []contract.Tool{&recordingTool{name: "read_file"}},
-			responses: []contract.ChatResponse{
-				{Content: "done"},
-			},
-			errors: []error{&gateway.HTTPError{Status: 503}, &gateway.HTTPError{Status: 503}, &gateway.HTTPError{Status: 503}, &gateway.HTTPError{Status: 503}},
-			prompt: "test 503",
-			want:   outcomeRecordedDegradation,
-		},
-		{
-			name:  "provider-429-degrades",
-			tools: []contract.Tool{&recordingTool{name: "read_file"}},
-			responses: []contract.ChatResponse{
-				{Content: "done"},
-			},
-			errors: []error{&gateway.HTTPError{Status: 429}},
-			prompt: "test 429",
-			want:   outcomeRecordedDegradation,
-		},
-		{
-			name:  "stalled-progress-degrades",
-			tools: []contract.Tool{&recordingTool{name: "read_file"}},
-			responses: stalledProgressResponses(),
-			prompt: "test stalled progress",
-			want:   outcomeRecordedDegradation,
-		},
-		{
-			name:  "verification-failure-guided-success",
-			tools: []contract.Tool{&recordingTool{name: "read_file"}, &schemaTool{name: "run_shell"}},
-			responses: []contract.ChatResponse{
-				{ToolCalls: []contract.ToolCall{contract.NewToolCall("a", "read_file", `{"path":"a"}`)}},
-				{ToolCalls: []contract.ToolCall{contract.NewToolCall("b", "read_file", `{"path":"b"}`)}},
-				{Content: "Verification passed on second try"},
-			},
-			prompt: "test verification",
-			want:   outcomeGuidedSuccess,
-		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { runFaultCase(t, tc) })
@@ -453,14 +390,6 @@ func governorEscalationResponses() []contract.ChatResponse {
 		out = append(out, contract.ChatResponse{ToolCalls: []contract.ToolCall{contract.NewToolCall("r", "read_file", `{"path":"f.txt"}`)}})
 	}
 	out = append(out, repeatedFailingCalls(4)...)
-	return out
-}
-
-func stalledProgressResponses() []contract.ChatResponse {
-	var out []contract.ChatResponse
-	for i := 0; i < 16; i++ {
-		out = append(out, contract.ChatResponse{ToolCalls: []contract.ToolCall{contract.NewToolCall(fmt.Sprintf("r%d", i), "read_file", fmt.Sprintf(`{"path":"f%d.txt"}`, i))}})
-	}
 	return out
 }
 

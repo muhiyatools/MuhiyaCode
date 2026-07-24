@@ -146,8 +146,8 @@ func TestModeLineFooterLayout(t *testing.T) {
 		if strings.Contains(chips, "auto-accept") {
 			t.Fatalf("width %d: normal mode must not read as auto-accept: %q", width, chips)
 		}
-		if !strings.Contains(pane, "Shift + Tab to cycle") {
-			t.Fatalf("width %d: cycle hint missing: %q", width, pane)
+		if len(lines) < 2 || !strings.Contains(lines[1], "Shift + Tab to cycle") {
+			t.Fatalf("width %d: cycle hint missing beneath the chips: %q", width, pane)
 		}
 	}
 }

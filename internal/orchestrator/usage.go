@@ -161,7 +161,6 @@ func (e *Engine) appendUsage(ctx context.Context, record *contract.UsageRecord) 
 func usageRecord(input usageRecordInput) contract.UsageRecord {
 	prompt := nullableUsageValue(input.usage.PromptTokens, input.usage.PromptTokensAvailable)
 	completion := nullableUsageValue(input.usage.CompletionTokens, input.usage.CompletionTokensAvailable)
-	reasoning := cloneIntPointer(input.usage.ReasoningTokens)
 	read := cloneIntPointer(input.usage.CacheReadTokens)
 	miss := cloneIntPointer(input.usage.CacheMissTokens)
 	return contract.UsageRecord{
@@ -171,7 +170,6 @@ func usageRecord(input usageRecordInput) contract.UsageRecord {
 		Pin:                input.pin,
 		PromptTokens:       prompt,
 		CompletionTokens:   completion,
-		ReasoningTokens:    reasoning,
 		CacheReadTokens:    read,
 		CacheMissTokens:    miss,
 		MissDerived:        input.usage.MissDerived,

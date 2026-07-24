@@ -98,7 +98,6 @@ type EngineConfig struct {
 	// orchestrator must not import.
 	SkillCatalog []SkillListing
 	LoadSkill    SkillLoader
-	Seed         *int
 }
 
 type Engine struct {
@@ -123,10 +122,6 @@ type Engine struct {
 	// with what the model was shown. Never mutated after construction.
 	skills      *SkillCatalog
 	skillLoader SkillLoader
-	seed        *int
-
-	tokenBudget int
-	costBudget  float64
 
 	mu       sync.Mutex
 	cancel   context.CancelFunc
@@ -266,8 +261,6 @@ type toolOutcome struct {
 	GateRejected bool
 	// Err carries the underlying dispatch error when Failed is true.
 	Err error
-	// DurationMS captures the tool execution time for the transcript.
-	DurationMS int64
 }
 
 type pressureSnapshot struct {
@@ -349,7 +342,6 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		boundaryTools:         config.BoundaryTools,
 		skills:                NewSkillCatalog(config.SkillCatalog),
 		skillLoader:           config.LoadSkill,
-		seed:                  config.Seed,
 		sessionUsage:          usageFromAggregate(aggregate),
 		usageRecords:          usageRecords,
 		usageAggregate:        aggregate,
@@ -441,37 +433,6 @@ func (e *Engine) SetPermissionMode(mode contract.PermissionMode) {
 	e.liveSettingsMu.Lock()
 	e.settings.PermissionMode = mode
 	e.liveSettingsMu.Unlock()
-}
-
-func (e *Engine) SetBudgets(tokenBudget int, costBudget float64) {
-	e.mu.Lock()
-	e.tokenBudget = tokenBudget
-	e.costBudget = costBudget
-	e.mu.Unlock()
-}
-
-func (e *Engine) BudgetExceeded() bool {
-	e.mu.Lock()
-	tb := e.tokenBudget
-	cb := e.costBudget
-	e.mu.Unlock()
-
-	e.taskMu.Lock()
-	tokens := e.sessionUsage.TotalTokens
-	records := append([]contract.UsageRecord(nil), e.usageRecords...)
-	e.taskMu.Unlock()
-
-	if tb > 0 && tokens >= tb {
-		return true
-	}
-	if cb > 0 {
-		// B-8: only enforce cost budget when cost is actually known (non-nil sum)
-		credits := contract.SumCreditsUSD(records)
-		if credits.USD != nil && *credits.USD >= cb {
-			return true
-		}
-	}
-	return false
 }
 
 // permissionMode reads the live permission mode under liveSettingsMu.

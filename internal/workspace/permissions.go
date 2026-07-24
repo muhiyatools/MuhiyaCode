@@ -165,12 +165,7 @@ func (g *Guard) IsSensitive(path string) bool {
 }
 
 func (g *Guard) ApproveShell(ctx context.Context, command string) error {
-	var risk ShellRisk
-	if g.Mode() == contract.PermissionAutoAccept {
-		risk = ClassifyShellAutoAccept(command, g.root)
-	} else {
-		risk = ClassifyShell(command)
-	}
+	risk := ClassifyShell(command)
 	if risk.Blocked {
 		g.emit("Blocked shell command: " + risk.Reason)
 		return fmt.Errorf("%w: %s", ErrPermissionDenied, risk.Reason)
@@ -216,22 +211,6 @@ func (g *Guard) sensitiveShellReference(command string) (string, bool) {
 func (g *Guard) ensureTrusted(ctx context.Context, action Action) error {
 	g.trustMu.Lock()
 	defer g.trustMu.Unlock()
-	// B-1: in headless/auto-accept mode, auto-grant trust so non-TTY containers
-	// can perform mutations without an interactive confirm that will never arrive.
-	if g.Mode() == contract.PermissionAutoAccept {
-		if g.trust != nil {
-			retrusted, err := g.trust.IsTrusted(ctx, g.root)
-			if err != nil {
-				return err
-			}
-			if !retrusted {
-				if err := g.trust.Trust(ctx, g.root); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
 	trusted := false
 	if g.trust != nil {
 		var err error
@@ -259,15 +238,6 @@ func (g *Guard) ensureTrusted(ctx context.Context, action Action) error {
 	if g.trust == nil {
 		// Without a durable trust port, confirmation authorizes this operation
 		// only; it must never silently upgrade to persisted trust.
-		return nil
-	}
-	return g.trust.Trust(ctx, g.root)
-}
-
-func (g *Guard) PreTrust(ctx context.Context) error {
-	g.trustMu.Lock()
-	defer g.trustMu.Unlock()
-	if g.trust == nil {
 		return nil
 	}
 	return g.trust.Trust(ctx, g.root)

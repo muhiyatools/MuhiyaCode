@@ -118,9 +118,7 @@ func (w *Workspace) Read(ctx context.Context, options ReadOptions) (ReadResult, 
 		// multi-byte rune (em dash, arrow, CJK) emits an invalid UTF-8 fragment
 		// that marshals to U+FFFD, and a >500-byte line could never be retrieved
 		// in full for an exact edit oldString. Matches Grep's truncation (C-3).
-		if !options.FullLines {
-			selected[i] = contract.TruncateEllipsis(line, 500)
-		}
+		selected[i] = contract.TruncateEllipsis(line, 500)
 	}
 	w.readLedger.add(target)
 	return ReadResult{Path: relativeSlash(w.root, target), Offset: start + 1, TotalLines: len(lines), Lines: selected, Outline: buildOutline(lines), Remaining: len(lines) - end}, nil
@@ -265,36 +263,6 @@ func (w *Workspace) MultiEdit(ctx context.Context, path string, edits []Edit) (E
 	before := string(data)
 	current := before
 	result := EditResult{Path: relativeSlash(w.root, target)}
-	var failed bool
-	for index, edit := range edits {
-		if edit.Old == "" {
-			result.Skipped = append(result.Skipped, fmt.Sprintf("edit %d: %s", index+1, fmt.Sprintf(instructions.WorkspaceEditEmptyOldStringTmpl, index+1)))
-			continue
-		}
-		next, _, note, applyErr := applyEditText(current, edit)
-		if applyErr != nil {
-			result.Skipped = append(result.Skipped, fmt.Sprintf("edit %d: %v", index+1, applyErr))
-			continue
-		}
-		if note != "" {
-			result.Notes = append(result.Notes, fmt.Sprintf("edit %d: %s", index+1, note))
-			if strings.Contains(note, "not found") || (strings.Contains(note, "appears") && strings.Contains(note, "times")) {
-				failed = true
-			}
-		} else {
-			result.Notes = append(result.Notes, fmt.Sprintf("edit %d: applied successfully", index+1))
-		}
-		current = next
-	}
-
-	if failed {
-		return EditResult{}, fmt.Errorf("multi_edit failed (file unchanged). Status of edits:\n%s\n%s", strings.Join(result.Notes, "\n"), strings.Join(result.Skipped, "\n"))
-	}
-
-	// Reset current to before and do actual pass to collect precise stats since all passed
-	current = before
-	result.Notes = nil // Clear notes from dry run
-	result.Skipped = nil
 	for index, edit := range edits {
 		if edit.Old == "" {
 			result.Skipped = append(result.Skipped, fmt.Sprintf(instructions.WorkspaceEditEmptyOldStringTmpl, index+1))
@@ -306,7 +274,7 @@ func (w *Workspace) MultiEdit(ctx context.Context, path string, edits []Edit) (E
 			continue
 		}
 		if note != "" {
-			result.Notes = append(result.Notes, fmt.Sprintf("edit %d: %s", index+1, note))
+			result.Notes = append(result.Notes, note)
 		}
 		if next != current {
 			current = next

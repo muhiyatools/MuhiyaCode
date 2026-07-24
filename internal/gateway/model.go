@@ -92,7 +92,7 @@ var deepSeekBetaFeatures = []BetaFeature{
 // as documented on 2026-07-14 (audit-baseline.md §A). Deprecated params are never
 // emitted (contracts/capability-profile.md CP-2).
 var (
-	deepSeekSupportedParams  = []string{"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options", "stop", "tools", "tool_choice", "response_format", "thinking", "reasoning_effort", "logprobs", "top_logprobs", "user_id", "seed"}
+	deepSeekSupportedParams  = []string{"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options", "stop", "tools", "tool_choice", "response_format", "thinking", "reasoning_effort", "logprobs", "top_logprobs", "user_id"}
 	deepSeekDeprecatedParams = []string{"frequency_penalty", "presence_penalty"}
 )
 

@@ -1,9 +1,6 @@
 package workspace
 
-import (
-	"strings"
-	"testing"
-)
+import "testing"
 
 // I-2: the rm backstop used to anchor on a start/separator/space before `rm`, so
 // a path prefix (`/bin/rm`), an alias-bypass backslash (`\rm`), or a subshell
@@ -64,31 +61,3 @@ func TestClassifyShellDoesNotOverblockPartialDeleteSwitches(t *testing.T) {
 		})
 	}
 }
-
-func TestClassifyShellAutoAccept(t *testing.T) {
-	tests := []struct {
-		cmd     string
-		blocked bool
-		reason  string
-	}{
-		{"printenv", false, ""},
-		{"chmod 777 ./run.sh", false, ""},
-		{"git commit -m 'fix'", true, "benchmark mode"},
-		{"rm -rf /", true, "recursive force delete"},
-	}
-	for _, tt := range tests {
-		risk := ClassifyShellAutoAccept(tt.cmd, "/workspace")
-		if risk.Blocked != tt.blocked {
-			t.Errorf("%s: expected blocked=%v, got %v", tt.cmd, tt.blocked, risk.Blocked)
-		}
-		if tt.blocked && !strings.Contains(risk.Reason, tt.reason) {
-			t.Errorf("%s: expected reason to contain %q, got %q", tt.cmd, tt.reason, risk.Reason)
-		}
-	}
-
-	normalRisk := ClassifyShell("printenv")
-	if !normalRisk.Blocked {
-		t.Errorf("expected normal mode to block printenv")
-	}
-}
-

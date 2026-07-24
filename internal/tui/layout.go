@@ -53,7 +53,7 @@ func (m *Model) snapshotLayout() {
 // re-deriving them) guarantees the panes always sum to the terminal height, so
 // the command palette or plan can never push the input off-screen.
 func (m *Model) layout() {
-	m.input.SetWidth(max(10, m.width-10))
+	m.input.SetWidth(max(20, m.width-6))
 	// Set the viewport width before any chrome renders so the activity tail (whose
 	// width derives from the viewport) is measured correctly and the memoized chrome
 	// layout() sizes against is byte-identical to what View() draws (A5).

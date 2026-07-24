@@ -77,7 +77,7 @@ func TestValidateCallArgs(t *testing.T) {
 		{"numeric enum violation", `{"path":"x","level":9}`, true, "must be one of"},
 		{"string enum violation", `{"path":"x","mode":"z"}`, true, "must be one of"},
 		{"numeric enum valid (B8 regression)", `{"path":"x","level":3}`, false, ""},
-		{"extra unknown field rejected", `{"path":"x","surprise":true}`, true, "unknown property: surprise"},
+		{"extra unknown field ignored", `{"path":"x","surprise":true}`, false, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

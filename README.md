@@ -47,16 +47,6 @@ Check version:
 muhiyacode --version
 ```
 
-### Headless Benchmark Evaluation (`bench`)
-
-Run non-interactive benchmark evaluations:
-
-```bash
-muhiyacode bench --task task.txt --out result.json --model anthropic/claude-3-5-sonnet --task-timeout 600s
-```
-
-Supports inline CLI flags and environment overrides (`MUHIYA_API_KEY`, `MUHIYA_BASE_URL`, `MUHIYA_MODEL`) without creating or writing back to persistent settings. Emits standard JSON execution summary records.
-
 ---
 
 ## Available Tools & Capabilities

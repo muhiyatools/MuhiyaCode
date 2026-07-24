@@ -205,7 +205,6 @@ func TestAdvisorSkippedWhenOffOrPinned(t *testing.T) {
 		apply func(*contract.Settings)
 	}{
 		{"advisor off", func(s *contract.Settings) { s.Provider.Advisor = "off" }},
-		{"advisor pinned", func(s *contract.Settings) { s.Provider.Advisor = "pinned" }},
 		{"model pinned by the user", func(s *contract.Settings) { s.Provider.RolesPinned = true }},
 	} {
 		t.Run(row.name, func(t *testing.T) {
@@ -259,25 +258,5 @@ func TestAdvisorCatalogDescribesWhatMatters(t *testing.T) {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("advisor catalog missing %q:\n%s", want, rendered)
 		}
-	}
-}
-
-func TestAdvisorRunsWhenPinnedButRouted(t *testing.T) {
-	settings := advisorSettings()
-	settings.Provider.RolesPinned = true
-	settings.Provider.Advisor = "routed"
-	
-	engine, provider := advisorEngine(t, &settings,
-		contract.ChatResponse{Content: `{"model":"deepseek-v4-pro","why":"explicitly routed"}`},
-		contract.ChatResponse{Content: "done"},
-	)
-	if _, _, err := engine.Run(context.Background(), "do the work"); err != nil {
-		t.Fatal(err)
-	}
-	if len(provider.requests) < 2 {
-		t.Fatalf("advisor did not run despite routed mode")
-	}
-	if settings.Provider.ActiveModelID != "deepseek-v4-pro" {
-		t.Fatalf("model did not change: %q", settings.Provider.ActiveModelID)
 	}
 }

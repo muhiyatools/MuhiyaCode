@@ -161,13 +161,3 @@ func TestBetaFeaturesRecorded(t *testing.T) {
 		}
 	}
 }
-
-func TestGenericProfileStrictParams(t *testing.T) {
-	generic := ResolveModelProfile("unrecognized-provider-model")
-	if profileSupportsParam(generic, "reasoning_effort") {
-		t.Error("a generic profile must not support reasoning_effort by default")
-	}
-	if !profileSupportsParam(generic, "temperature") {
-		t.Error("a generic profile must support standard parameters by default")
-	}
-}

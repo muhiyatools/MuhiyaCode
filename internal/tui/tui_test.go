@@ -54,7 +54,7 @@ func TestModelRendersAtMinimumTerminalSize(t *testing.T) {
 	)
 	model.refreshViewport(true)
 	view := model.View()
-	if !strings.Contains(view.Content, "vtest") {
+	if !strings.Contains(view.Content, "MuhiyaCode") {
 		t.Fatalf("baseline view omitted core UI:\n%s", view.Content)
 	}
 	if model.viewport.Width() != 80 || model.viewport.Height() < 3 {
@@ -284,7 +284,7 @@ func TestHeaderIsModelFreeAndNoticeStaysOutOfTranscript(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "1.0.0", Notice: "Set an API key with /login."})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 90, Height: 30})
 	view := m.View().Content
-	for _, want := range []string{"MuhiyaCode", "context", "Set an API key"} {
+	for _, want := range []string{"MuhiyaCode", "context", "Esc stop", "Set an API key"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("view missing %q", want)
 		}
@@ -808,22 +808,15 @@ func TestUpdateAvailableSegment(t *testing.T) {
 func TestHeaderLayoutOrder(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "1.1.0"})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 100, Height: 30})
-	content := ansi.Strip(m.View().Content)
-	var identityLine string
-	for _, l := range strings.Split(content, "\n") {
-		if strings.Contains(l, "context") {
-			identityLine = l
-			break
-		}
-	}
-	versionAt := strings.Index(identityLine, "v1.1.0")
-	pathAt := strings.Index(identityLine, "muhiya")
-	contextAt := strings.Index(identityLine, "context")
+	line1 := strings.Split(ansi.Strip(m.View().Content), "\n")[1]
+	versionAt := strings.Index(line1, "v1.1.0")
+	pathAt := strings.Index(line1, "muhiya")
+	contextAt := strings.Index(line1, "context")
 	if versionAt < 0 || pathAt < 0 || contextAt < 0 {
-		t.Fatalf("identity line missing a segment (version=%d path=%d context=%d):\n%q", versionAt, pathAt, contextAt, identityLine)
+		t.Fatalf("header line 1 missing a segment (version=%d path=%d context=%d):\n%q", versionAt, pathAt, contextAt, line1)
 	}
 	if !(versionAt < pathAt && pathAt < contextAt) {
-		t.Fatalf("header order must be version → path → context:\n%q", identityLine)
+		t.Fatalf("header order must be version → path → context:\n%q", line1)
 	}
 }
 
@@ -832,19 +825,12 @@ func TestHeaderKeepsContextMeterOnNarrowTerminals(t *testing.T) {
 	runtime.Session.WorkspacePath = `C:\a\very\deeply\nested\workspace\path\that\keeps\going\and\going\project`
 	m := NewModel(Options{Runtime: runtime, Version: "1.1.0"})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 62, Height: 24})
-	content := ansi.Strip(m.View().Content)
-	var identityLine string
-	for _, l := range strings.Split(content, "\n") {
-		if strings.Contains(l, "context") {
-			identityLine = l
-			break
-		}
+	line1 := strings.Split(ansi.Strip(m.View().Content), "\n")[1]
+	if !strings.Contains(line1, "context") {
+		t.Fatalf("a long path pushed the context meter off line 1:\n%q", line1)
 	}
-	if !strings.Contains(identityLine, "context") {
-		t.Fatalf("a long path pushed the context meter off identity line:\n%q", identityLine)
-	}
-	if !strings.Contains(identityLine, "project") {
-		t.Fatalf("path truncation dropped the most-specific segment:\n%q", identityLine)
+	if !strings.Contains(line1, "project") {
+		t.Fatalf("path truncation dropped the most-specific segment:\n%q", line1)
 	}
 }
 
