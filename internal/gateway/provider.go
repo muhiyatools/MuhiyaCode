@@ -602,7 +602,13 @@ func normalizeModels(payload any) []contract.Model {
 	var result []contract.Model
 	for _, raw := range data {
 		item, _ := raw.(map[string]any)
-		id := stringValue(item["id"])
+		id := stringValue(item["virtual_name"])
+		if id == "" {
+			id = stringValue(item["alias"])
+		}
+		if id == "" {
+			id = stringValue(item["id"])
+		}
 		if id == "" {
 			id = stringValue(item["name"])
 		}
@@ -610,6 +616,9 @@ func normalizeModels(payload any) []contract.Model {
 			continue
 		}
 		name := stringValue(item["display_name"])
+		if name == "" {
+			name = stringValue(item["virtual_name"])
+		}
 		if name == "" {
 			name = stringValue(item["name"])
 		}
