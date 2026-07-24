@@ -211,3 +211,30 @@ func testSettings(base string) contract.Settings {
 	settings.Provider.Models = []contract.Model{{ID: "virtual-pro", Name: "Display Name", ContextLimit: 128000}}
 	return settings
 }
+
+func TestNormalizeModelsVirtualName(t *testing.T) {
+	payload := map[string]any{
+		"data": []any{
+			map[string]any{
+				"id":           "minimax/minimax-m3",
+				"virtual_name": "minimax-m3",
+				"display_name": "MiniMax M3",
+			},
+			map[string]any{
+				"id":           "google/gemini-2.5-flash-lite",
+				"alias":        "gemini-2.5-flash-lite",
+			},
+		},
+	}
+	models := normalizeModels(payload)
+	if len(models) != 2 {
+		t.Fatalf("expected 2 models, got %d", len(models))
+	}
+	if models[0].ID != "minimax-m3" || models[0].Name != "MiniMax M3" {
+		t.Errorf("model[0] = %+v, want ID minimax-m3, Name MiniMax M3", models[0])
+	}
+	if models[1].ID != "gemini-2.5-flash-lite" {
+		t.Errorf("model[1] = %+v, want ID gemini-2.5-flash-lite", models[1])
+	}
+}
+
