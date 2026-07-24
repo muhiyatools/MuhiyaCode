@@ -33,6 +33,6 @@ func main() {
 		if !errors.Is(err, context.Canceled) {
 			fmt.Fprintln(os.Stderr, "error:", err)
 		}
-		os.Exit(1)
+		os.Exit(command.ExitCode(err))
 	}
 }

@@ -53,7 +53,7 @@ func TestEditNotFoundIsFailure(t *testing.T) {
 		t.Fatalf("near-miss edit must be a failure, got success: %q", output)
 	}
 	msg := err.Error()
-	if !strings.HasPrefix(msg, "edit failed: ") {
+	if !strings.HasPrefix(msg, "multi_edit failed") {
 		t.Fatalf("error must carry the failure-classified prefix, got %q", msg)
 	}
 	if !strings.Contains(msg, "oldString not found") || !strings.Contains(msg, "closest region") {
@@ -91,9 +91,8 @@ func TestEditReplaceAllAmbiguousStaysSuccess(t *testing.T) {
 	}
 }
 
-func TestMultiEditPartialApplicationStaysSuccess(t *testing.T) {
-	// One edit lands, one misses: the file REALLY changed, so failing the call
-	// would invite a damaging re-apply of the whole batch (registry.go comment).
+func TestMultiEditPartialApplicationFails(t *testing.T) {
+	// One edit lands, one misses: since it's atomic now, it MUST fail.
 	w := mismatchWorkspace(t, "alpha\nbeta\n")
 	raw, err := json.Marshal(map[string]any{"path": "main.go", "edits": []map[string]any{
 		{"oldString": "alpha", "newString": "ALPHA"},
@@ -102,12 +101,12 @@ func TestMultiEditPartialApplicationStaysSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	output, execErr := w.execMultiEdit(context.Background(), raw)
-	if execErr != nil {
-		t.Fatalf("partially-applied multi_edit must stay a success, got %v", execErr)
+	_, execErr := w.execMultiEdit(context.Background(), raw)
+	if execErr == nil {
+		t.Fatalf("partially-applied multi_edit must fail due to atomicity, got success")
 	}
-	if !strings.Contains(output, "oldString not found") {
-		t.Fatalf("the miss note must still be visible in the output, got %q", output)
+	if !strings.Contains(execErr.Error(), "oldString not found") {
+		t.Fatalf("the miss note must still be visible in the output, got %q", execErr.Error())
 	}
 }
 
@@ -124,3 +123,45 @@ func TestMultiEditAllMissesIsFailure(t *testing.T) {
 		t.Fatal("an all-miss multi_edit must be a failure")
 	}
 }
+
+func TestMultiEditAtomicFailure(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "file.txt")
+	os.WriteFile(file, []byte("line1\nline2\n"), 0o644)
+	ws := patchWorkspace(t, root)
+	if _, err := ws.Read(context.Background(), ReadOptions{Path: "file.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := ws.MultiEdit(context.Background(), "file.txt", []Edit{
+		{Old: "line1", New: "new1"},
+		{Old: "missing", New: "new2"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "multi_edit failed") {
+		t.Errorf("expected atomic failure, got %v", err)
+	}
+	content, _ := os.ReadFile(file)
+	if string(content) != "line1\nline2\n" {
+		t.Errorf("file was modified: %s", content)
+	}
+}
+
+func TestMultiEditIdempotent(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "file.txt")
+	os.WriteFile(file, []byte("new1\nnew2\n"), 0o644)
+	ws := patchWorkspace(t, root)
+	if _, err := ws.Read(context.Background(), ReadOptions{Path: "file.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := ws.MultiEdit(context.Background(), "file.txt", []Edit{
+		{Old: "old1", New: "new1"},
+		{Old: "old2", New: "new2"},
+	})
+	if err != nil {
+		t.Errorf("expected success for idempotent, got %v", err)
+	}
+	if len(res.Notes) != 2 || !strings.Contains(res.Notes[0], "already present") {
+		t.Errorf("expected idempotent notes, got %v", res.Notes)
+	}
+}
+

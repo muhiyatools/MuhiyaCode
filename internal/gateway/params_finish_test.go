@@ -20,8 +20,8 @@ func TestReasoningEffortGatedBySupportedParams(t *testing.T) {
 	if profileSupportsParam(ModelProfile{SupportedParams: []string{"model", "messages", "reasoning_split"}}, "reasoning_effort") {
 		t.Error("a profile without reasoning_effort must not advertise it")
 	}
-	if !profileSupportsParam(ModelProfile{}, "reasoning_effort") {
-		t.Error("an empty (unprofiled) SupportedParams must be permissive")
+	if profileSupportsParam(ModelProfile{}, "reasoning_effort") {
+		t.Error("an empty (unprofiled) SupportedParams must be strict about reasoning_effort")
 	}
 }
 
