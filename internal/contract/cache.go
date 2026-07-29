@@ -16,29 +16,31 @@ const (
 type UsageStream string
 
 const (
-	UsageStreamMain     UsageStream = "main"
-	UsageStreamAux      UsageStream = "aux"
-	UsageStreamSubagent UsageStream = "subagent"
+	UsageStreamMain UsageStream = "main"
+	UsageStreamAux  UsageStream = "aux"
 )
 
 // UsageRecord is the append-only, provider-faithful accounting record for one
 // request. Pointer-valued token fields distinguish an unavailable value from a
 // provider-reported zero.
 type UsageRecord struct {
-	Seq    int         `json:"seq"`
-	At     time.Time   `json:"at"`
-	Model  string      `json:"model"`
-	Stream UsageStream `json:"stream,omitempty"`
+	Seq        int            `json:"seq"`
+	At         time.Time      `json:"at"`
+	Model      string         `json:"model"`
+	Stream     UsageStream    `json:"stream,omitempty"`
+	Purpose    RequestPurpose `json:"purpose,omitempty"`
+	CacheEpoch uint64         `json:"cache_epoch,omitempty"`
 	// Pin is the provider cache identity ROLE this request rode (":main",
-	// ":sub:<kind>", ":sub:onboarding", ":aux") — feature 011 D8. Per-(model,
-	// pin) aggregation is what makes mixed-model cache health measurable
-	// (SC-005). Empty on records persisted before feature 011.
+	// ":aux") — feature 011 D8. Per-(model, pin) aggregation is what makes
+	// mixed-model cache health measurable (SC-005). Empty on records persisted
+	// before feature 011.
 	Pin string `json:"pin,omitempty"`
 	// Upstream is the provider a routing layer actually served this request
 	// from (OpenRouter reports it; a direct connection does not). Persisted so
 	// a cache miss can be correlated against an upstream change after the fact
 	// — the one cause of a cold prefix that leaves no trace on our side.
 	Upstream           string           `json:"upstream,omitempty"`
+	PrefixHash         string           `json:"prefix_hash,omitempty"`
 	PromptTokens       *int             `json:"prompt_tokens"`
 	CompletionTokens   *int             `json:"completion_tokens"`
 	ReasoningTokens    *int             `json:"reasoning_tokens,omitempty"`
@@ -67,6 +69,22 @@ type UsageRecord struct {
 	// (feature 008 UD-6). nil = unknown (older persisted records, pre-send
 	// failures). Nullable JSON keeps usage.jsonl backward/forward compatible.
 	DurationMS *int64 `json:"duration_ms,omitempty"`
+	// Request-build diagnostics make context budgeting measurable without
+	// persisting request content. They are nullable because auxiliary requests
+	// and records written by older versions do not pass through History.
+	EstimatedPromptTokens       *int   `json:"estimated_prompt_tokens,omitempty"`
+	EstimatedMessageTokens      *int   `json:"estimated_message_tokens,omitempty"`
+	EstimatedToolTokens         *int   `json:"estimated_tool_definition_tokens,omitempty"`
+	EstimatedCoreToolTokens     *int   `json:"estimated_core_tool_definition_tokens,omitempty"`
+	EstimatedDeferredToolTokens *int   `json:"estimated_deferred_tool_definition_tokens,omitempty"`
+	PromptEstimateDelta         *int   `json:"prompt_estimate_delta,omitempty"`
+	PromptEstimateSource        string `json:"prompt_estimate_source,omitempty"`
+	SerializedMessageBytes      *int   `json:"serialized_message_bytes,omitempty"`
+	SerializedToolBytes         *int   `json:"serialized_tool_definition_bytes,omitempty"`
+	SerializedCoreToolBytes     *int   `json:"serialized_core_tool_definition_bytes,omitempty"`
+	SerializedDeferredToolBytes *int   `json:"serialized_deferred_tool_definition_bytes,omitempty"`
+	CompiledContextUnits        *int   `json:"compiled_context_units,omitempty"`
+	ContextCompilerCacheHit     *bool  `json:"context_compiler_cache_hit,omitempty"`
 }
 
 // PairingRate is the per-(model, pin) cache aggregate (feature 011 D8):
@@ -283,14 +301,13 @@ func AggregateUsageByModel(records []UsageRecord) []ModelUsageRow {
 // SessionUsageAggregate is derived from UsageRecords on every session load.
 // It is never persisted independently, so it cannot drift from the audit log.
 type SessionUsageAggregate struct {
-	Requests         int `json:"requests"`
-	MainRequests     int `json:"main_requests"`
-	AuxRequests      int `json:"aux_requests"`
-	SubagentRequests int `json:"subagent_requests"`
-	SumPrompt        int `json:"sum_prompt"`
-	SumCompletion    int `json:"sum_completion"`
-	SumCacheRead     int `json:"sum_cache_read"`
-	SumCacheMiss     int `json:"sum_cache_miss"`
+	Requests      int `json:"requests"`
+	MainRequests  int `json:"main_requests"`
+	AuxRequests   int `json:"aux_requests"`
+	SumPrompt     int `json:"sum_prompt"`
+	SumCompletion int `json:"sum_completion"`
+	SumCacheRead  int `json:"sum_cache_read"`
+	SumCacheMiss  int `json:"sum_cache_miss"`
 	// PairedCacheRead/PairedCacheMiss sum only records where BOTH operands were
 	// reported (any stream). Every rate — including the per-task delta the TUI
 	// summary divides — must consume these, never the one-sided display sums
@@ -330,8 +347,6 @@ func AggregateUsage(records []UsageRecord) SessionUsageAggregate {
 		switch record.Stream {
 		case UsageStreamAux:
 			aggregate.AuxRequests++
-		case UsageStreamSubagent:
-			aggregate.SubagentRequests++
 		default:
 			aggregate.MainRequests++
 		}
@@ -433,6 +448,7 @@ type PrefixShapeSnapshot struct {
 	SystemHash string `json:"systemHash"`
 	ToolsHash  string `json:"toolsHash"`
 	ModelID    string `json:"modelId"`
+	PrefixHash string `json:"prefixHash,omitempty"`
 	// Upstream is the routing-layer provider that last served this session
 	// (OpenRouter reports it; a direct connection does not). It rides here
 	// because it belongs to exactly the same question the rest of this snapshot

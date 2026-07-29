@@ -30,34 +30,29 @@ type ApplicationOptions struct {
 	DisableMCP       bool
 	MCPDeadline      time.Duration
 	RawUsageObserver gateway.RawUsageObserver
-	BenchmarkMode    bool
-	Overrides        *BenchmarkOverrides
-}
-
-type BenchmarkOverrides struct {
-	Model        string
-	BaseURL      string
-	APIKey       string
-	Effort       string
-	AdvisorMode  string
-	ContextLimit int
-	Seed         *int
+	Seed             *int
 }
 
 // Application is the composition root for one CLI process. Packages below it
 // remain independently testable; only this layer owns concrete lifetimes.
 type Application struct {
-	ctx        context.Context
-	paths      state.Paths
-	db         *state.DB
-	sessions   *state.Sessions
-	settings   *contract.Settings
-	secrets    contract.Secrets
-	provider   *gateway.OpenAICompatible
-	probeStore *state.ProbeStore
-	callbacks  contract.Callbacks
-	disableMCP bool
-	mcpWait    time.Duration
+	ctx      context.Context
+	paths    state.Paths
+	db       *state.DB
+	sessions *state.Sessions
+	settings *contract.Settings
+	// defaultModelID is the global default for newly created sessions. Active
+	// sessions use their persisted runtime model and never rewrite this value.
+	defaultModelID string
+	secrets        contract.Secrets
+	provider       *gateway.OpenAICompatible
+	probeStore     *state.ProbeStore
+	callbacks      contract.Callbacks
+	disableMCP     bool
+	mcpWait        time.Duration
+	seed           *int
+	catalogOnce    sync.Once
+	catalogCancel  context.CancelFunc
 
 	session contract.Session // resolved by openApplicationCore, hydrated by Hydrate
 
@@ -69,8 +64,6 @@ type Application struct {
 	activeMCP        *mcpclient.Manager
 	activeRegistry   *orchestrator.Registry
 	guard            *workspace.Guard
-	benchmarkMode    bool
-	seed             *int
 }
 
 type runtimeBundle struct {
@@ -98,6 +91,13 @@ func openApplicationCore(options ApplicationOptions) (*Application, error) {
 	if err != nil {
 		return nil, err
 	}
+	catalog, err := state.LoadModelCatalog(paths)
+	if err != nil {
+		return nil, err
+	}
+	if len(catalog.Models) > 0 {
+		addDiscoveredModels(&settings, append([]contract.Model(nil), catalog.Models...))
+	}
 	secrets, err := state.LoadSecrets(paths)
 	if err != nil {
 		return nil, err
@@ -112,74 +112,44 @@ func openApplicationCore(options ApplicationOptions) (*Application, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if options.BenchmarkMode && options.Overrides != nil {
-		ov := options.Overrides
-		if ov.APIKey != "" {
-			secrets.ProviderAPIKey = ov.APIKey
-		}
-		if ov.BaseURL != "" {
-			settings.Provider.BaseURL = ov.BaseURL
-		}
-		if ov.Model != "" {
-			settings.Provider.ActiveModelID = ov.Model
-		}
-		if ov.Effort != "" {
-			settings.Effort = contract.EffortLevel(ov.Effort)
-		}
-		if ov.AdvisorMode != "" {
-			settings.Provider.Advisor = ov.AdvisorMode
-		}
-		if ov.ContextLimit > 0 {
-			for i, m := range settings.Provider.Models {
-				if m.ID == settings.Provider.ActiveModelID {
-					settings.Provider.Models[i].ContextLimit = ov.ContextLimit
-				}
-			}
-		}
-		if ov.Model != "" {
-			found := false
-			for _, m := range settings.Provider.Models {
-				if m.ID == ov.Model {
-					found = true
-					break
-				}
-			}
-			if !found {
-				_ = db.Close()
-				return nil, fmt.Errorf("configured benchmark model %q is missing from the local catalog", ov.Model)
-			}
-		}
-	}
-	var appSeed *int
-	if options.BenchmarkMode && options.Overrides != nil && options.Overrides.Seed != nil {
-		appSeed = options.Overrides.Seed
-	}
 	app := &Application{
 		ctx: ctx, paths: paths, db: db, sessions: store, settings: &settings,
-		secrets: secrets, callbacks: options.Callbacks, disableMCP: options.DisableMCP,
-		mcpWait: options.MCPDeadline, probeStore: probeStore, benchmarkMode: options.BenchmarkMode, seed: appSeed,
+		defaultModelID: settings.Provider.ActiveModelID,
+		secrets:        secrets, callbacks: options.Callbacks, disableMCP: options.DisableMCP,
+		mcpWait: options.MCPDeadline, probeStore: probeStore, seed: options.Seed,
 	}
 	if app.mcpWait <= 0 {
 		app.mcpWait = 900 * time.Millisecond
 	}
 	app.provider = gateway.NewOpenAICompatible(gateway.Config{Settings: settings, APIKey: secrets.ProviderAPIKey, RawUsageObserver: options.RawUsageObserver})
-	if secrets.ProviderAPIKey != "" && !options.BenchmarkMode {
+	if secrets.ProviderAPIKey != "" {
 		active, ok := state.ActiveModel(settings)
 		// Discover when there is nothing usable yet, OR when the catalog has gone
 		// stale. The staleness path matters now that the interactive refresh is
 		// gone: without it the catalog would freeze at its first-run snapshot and
 		// a model added to the gateway later would never be selectable.
-		if !ok || active.ContextLimit <= 0 || catalogStale(settings.Provider.ModelsRefreshedAt) {
+		catalogRefreshedAt := ""
+		if !catalog.RefreshedAt.IsZero() {
+			catalogRefreshedAt = catalog.RefreshedAt.Format(time.RFC3339)
+		}
+		if !ok || active.ContextLimit <= 0 || catalogStale(catalogRefreshedAt) {
 			discoveryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			models, discoveryErr := app.provider.ListModels(discoveryCtx)
 			cancel()
 			if discoveryErr == nil && len(models) > 0 {
+				refreshed := state.ModelCatalogCache{
+					Version: 2, RefreshedAt: time.Now().UTC(), Models: models,
+				}
+				if saveErr := state.SaveModelCatalog(refreshed, paths); saveErr != nil {
+					_ = db.Close()
+					return nil, saveErr
+				}
 				addDiscoveredModels(app.settings, models)
-				app.settings.Provider.ModelsRefreshedAt = time.Now().UTC().Format(time.RFC3339)
 				if saveErr := state.SaveSettings(*app.settings, paths); saveErr != nil {
 					_ = db.Close()
 					return nil, saveErr
 				}
+				app.defaultModelID = app.settings.Provider.ActiveModelID
 				app.provider.UpdateConfig(*app.settings, secrets.ProviderAPIKey)
 			}
 			// A failed refresh is silent: a stale catalog still works, and an
@@ -213,6 +183,12 @@ func openApplicationCore(options ApplicationOptions) (*Application, error) {
 		return nil, err
 	}
 	app.session = session
+	session, err = app.hydrateSessionRuntime(session)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	app.session = session
 	return app, nil
 }
 
@@ -240,6 +216,7 @@ func (a *Application) Hydrate(ctx context.Context) error {
 		return err
 	}
 	a.activate(bundle)
+	a.startCatalogPoller()
 	return nil
 }
 
@@ -260,9 +237,16 @@ func (a *Application) Settings() *contract.Settings { return a.settings }
 func (a *Application) Close() error {
 	a.mu.Lock()
 	manager := a.activeMCP
+	activeWorkspace := a.activeWorkspace
 	runtime := a.runtime
 	a.activeMCP = nil
+	a.activeWorkspace = nil
+	catalogCancel := a.catalogCancel
+	a.catalogCancel = nil
 	a.mu.Unlock()
+	if catalogCancel != nil {
+		catalogCancel()
+	}
 	var errs []error
 	if runtime.Engine != nil {
 		runtime.Engine.Cancel()
@@ -274,6 +258,11 @@ func (a *Application) Close() error {
 	}
 	if manager != nil {
 		if err := manager.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if activeWorkspace != nil {
+		if err := activeWorkspace.Close(); err != nil {
 			errs = append(errs, err)
 		}
 	}
@@ -301,12 +290,12 @@ func (a *Application) PreTrustWorkspace(ctx context.Context) error {
 	return guard.PreTrust(ctx)
 }
 
-// The interactive model switcher lived here until v1.1.0 removed /model: users
-// no longer manage models mid-session, and freezing the pairing for the whole
-// session is what keeps both prefix caches warm. Engine.SwitchModel remains the
-// entry point for the CLI config path and the session advisor.
-
 func (a *Application) switchSession(ctx context.Context, session contract.Session) (tui.Runtime, []contract.Event, error) {
+	var err error
+	session, err = a.hydrateSessionRuntime(session)
+	if err != nil {
+		return tui.Runtime{}, nil, err
+	}
 	bundle, err := a.buildRuntime(ctx, session)
 	if err != nil {
 		return tui.Runtime{}, nil, err
@@ -318,11 +307,15 @@ func (a *Application) switchSession(ctx context.Context, session contract.Sessio
 func (a *Application) activate(bundle runtimeBundle) {
 	a.mu.Lock()
 	previous := a.activeMCP
+	previousWorkspace := a.activeWorkspace
 	a.runtime, a.recent = bundle.runtime, append([]contract.Event(nil), bundle.recent...)
 	a.activeWorkspace, a.activeCheckpoint, a.activeMCP, a.activeRegistry, a.guard = bundle.workspace, bundle.checkpoint, bundle.mcp, bundle.registry, bundle.guard
 	a.mu.Unlock()
 	if previous != nil && previous != bundle.mcp {
 		_ = previous.Close()
+	}
+	if previousWorkspace != nil && previousWorkspace != bundle.workspace {
+		_ = previousWorkspace.Close()
 	}
 }
 
@@ -367,9 +360,23 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	if _, err := os.Stat(session.WorkspacePath); err != nil {
 		return runtimeBundle{}, fmt.Errorf("open session workspace %s: %w", session.WorkspacePath, err)
 	}
+	runtimeSettings := *a.settings
+	runtimeSettings.Provider.Models = append([]contract.Model(nil), a.settings.Provider.Models...)
+	runtimeSettings.Provider.ActiveModelID = session.ModelID
+	// UMI-06: the session runtime record is the permission authority, not the
+	// global settings. A resumed session restores its saved mode; a new session
+	// inherited the global default at hydration. runtimeSettings carries it into
+	// the engine/workspace/MCP consumers that read from settings.
+	runtimeSettings.PermissionMode = session.PermissionMode
+	settings := &runtimeSettings
 	var historySnapshot orchestrator.HistorySnapshot
-	if err := a.sessions.ReadJSON(session.ID, "history.json", orchestrator.HistorySnapshot{Version: 1}, &historySnapshot); err != nil {
+	historyReadErr := a.sessions.ReadJSON(session.ID, "history.json", orchestrator.HistorySnapshot{Version: 1}, &historySnapshot)
+	historySnapshot, err := a.loadJournalHistory(ctx, session, historySnapshot, historyReadErr)
+	if err != nil {
 		return runtimeBundle{}, err
+	}
+	if err := a.sessions.WriteJSON(session.ID, "history.json", historySnapshot); err != nil {
+		return runtimeBundle{}, fmt.Errorf("repair history projection: %w", err)
 	}
 	var inspectionSnapshot orchestrator.InspectionSnapshot
 	if err := a.sessions.ReadJSON(session.ID, "inspection.json", orchestrator.InspectionSnapshot{Version: 3, Signatures: map[string]orchestrator.InspectionEntry{}, Coverage: map[string]orchestrator.InspectionCoverage{}}, &inspectionSnapshot); err != nil {
@@ -379,9 +386,13 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	if err := a.sessions.ReadJSON(session.ID, "knowledge.json", orchestrator.KnowledgeSnapshot{Version: 1, Files: map[string]string{}}, &knowledgeSnapshot); err != nil {
 		return runtimeBundle{}, err
 	}
-	usageRecords, err := a.sessions.UsageRecords(session.ID)
+	legacyUsageRecords, usageReadErr := a.sessions.UsageRecords(session.ID)
+	usageRecords, err := a.loadJournalUsage(ctx, session, legacyUsageRecords, usageReadErr)
 	if err != nil {
 		return runtimeBundle{}, fmt.Errorf("load session usage: %w", err)
+	}
+	if err := a.sessions.WriteUsageRecords(session.ID, usageRecords); err != nil {
+		return runtimeBundle{}, fmt.Errorf("repair usage projection: %w", err)
 	}
 	invalidationEvents, err := a.sessions.InvalidationEvents(session.ID)
 	if err != nil {
@@ -410,28 +421,32 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	if err != nil {
 		return runtimeBundle{}, err
 	}
-	checkpoint := &workspace.CheckpointStore{SessionID: session.ID, SessionDir: sessionDir, Workspace: session.WorkspacePath, Metadata: a.db}
+	checkpoint := &workspace.CheckpointStore{
+		SessionID: session.ID, SessionDir: sessionDir, Workspace: session.WorkspacePath, Metadata: a.db,
+		Retention: workspace.CheckpointRetention{MaxCount: 50, MaxAge: 30 * 24 * time.Hour},
+	}
+	var engineRef *orchestrator.Engine
 	approver := workspace.ApproverFunc(func(ctx context.Context, request workspace.ApprovalRequest) (bool, error) {
-		if a.callbacks.Confirm == nil {
-			return false, nil
+		if engineRef == nil {
+			return false, errors.New("approval requested before execution journal was ready")
 		}
-		return a.callbacks.Confirm(ctx, approvalMessage(request))
+		return a.confirmWorkspaceApproval(ctx, engineRef, request)
 	})
 	// engineRef is bound after NewEngine below; the shell-output closure captures
 	// it (a var, so the later assignment is visible) to route run_shell streaming
 	// through the engine's scope — a subagent's shell to its own card, the main
 	// loop's to the transcript (D2).
-	var engineRef *orchestrator.Engine
 	service, err := workspace.New(session.WorkspacePath, workspace.Options{
-		PermissionMode: a.settings.PermissionMode,
-		Trust:          a.db,
-		Approver:       approver,
-		KnownFile:      inspection.Known,
-		PreferredShell: a.settings.Shell.Preferred,
-		ShellTimeout:   time.Duration(a.settings.Shell.TimeoutMS) * time.Millisecond,
-		OutputLimit:    a.settings.Shell.OutputLimit,
-		Checkpoints:    checkpoint,
-		Status:         a.callbacks.Status,
+		PermissionMode:  settings.PermissionMode,
+		Trust:           a.db,
+		Approver:        approver,
+		KnownFile:       inspection.Known,
+		PreferredShell:  settings.Shell.Preferred,
+		ShellTimeout:    time.Duration(settings.Shell.TimeoutMS) * time.Millisecond,
+		OutputLimit:     settings.Shell.OutputLimit,
+		Checkpoints:     checkpoint,
+		ProcessRegistry: filepath.Join(sessionDir, "processes.json"),
+		Status:          a.callbacks.Status,
 		ShellOutput: func(chunk string) {
 			if engineRef != nil {
 				engineRef.RouteShellOutput(chunk)
@@ -445,18 +460,23 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	if err != nil {
 		return runtimeBundle{}, err
 	}
-	// T022 (US1): do not block interactive launch on a network probe. Reuse the
-	// persisted probe snapshot for the exact provider config (fingerprint); only
-	// when there is no snapshot for this config — a first run, or a deliberate
-	// config change that already minted a new fingerprint — do a one-time
-	// synchronous probe and persist it. The tool surface is therefore fixed once at
-	// session start (a deliberate boundary), which keeps the prefix byte-stable
-	// within the session and removes the mid-config probe-change invalidation.
+	// T022 (US1): reuse a fresh probe snapshot for the exact provider
+	// fingerprint. Missing, unknown, or expired snapshots get one bounded probe
+	// at session startup; a transient failure preserves the prior definitive
+	// value. The selected tool surface is then fixed for the session, keeping the
+	// request prefix byte-stable.
 	webSupported := false
-	if !a.benchmarkMode && strings.TrimSpace(a.settings.Provider.BaseURL) != "" && strings.TrimSpace(a.secrets.ProviderAPIKey) != "" {
-		fingerprint := state.ProbeFingerprint(a.settings.Provider.BaseURL, a.secrets.ProviderAPIKey)
+	if strings.TrimSpace(settings.Provider.BaseURL) != "" && strings.TrimSpace(a.secrets.ProviderAPIKey) != "" {
+		fingerprint := state.ProbeFingerprint(settings.Provider.BaseURL, a.secrets.ProviderAPIKey)
 		if snap, ok := a.probeStore.Get(fingerprint); ok {
 			webSupported = snap.WebSearch == state.ProbeSupported
+			if !webProbeSnapshotFresh(snap, time.Now()) {
+				supported, _, _, probeErr := a.webSearchAvailable(ctx)
+				if probeErr != nil {
+					return runtimeBundle{}, probeErr
+				}
+				webSupported = supported
+			}
 		} else {
 			supported, _, _, probeErr := a.webSearchAvailable(ctx)
 			if probeErr != nil {
@@ -467,13 +487,13 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	}
 	registry := orchestrator.NewRegistry(service.Tools()...)
 	if webSupported {
-		registry.Add(gateway.WebSearchTool{Searcher: gateway.WebSearch{BaseURL: a.settings.Provider.BaseURL, APIKey: a.secrets.ProviderAPIKey, Client: &http.Client{Timeout: 30 * time.Second}}})
+		registry.Add(gateway.WebSearchTool{Searcher: gateway.WebSearch{BaseURL: settings.Provider.BaseURL, APIKey: a.secrets.ProviderAPIKey, Client: &http.Client{Timeout: 30 * time.Second}}})
 	}
 
 	var manager *mcpclient.Manager
 	if !a.disableMCP {
 		manager = mcpclient.New(a.paths, &http.Client{Timeout: 2 * time.Minute}, func(ctx context.Context, message string) (bool, error) {
-			if a.settings.PermissionMode == contract.PermissionAutoAccept {
+			if settings.PermissionMode == contract.PermissionAutoAccept {
 				return true, nil
 			}
 			if a.callbacks.Confirm == nil {
@@ -481,6 +501,11 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			}
 			return a.callbacks.Confirm(ctx, message)
 		}, nil)
+		manager.SetProcessSandbox(
+			service.SandboxBackend(),
+			session.WorkspacePath,
+			settings.PermissionMode == contract.PermissionAutoAccept,
+		)
 		pinned, err := manager.PinnedTools()
 		if err != nil {
 			return runtimeBundle{}, err
@@ -498,9 +523,9 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		}
 	}
 
-	active, _ := state.ActiveModel(*a.settings)
+	active, _ := state.ActiveModel(*settings)
 	profile := gateway.ResolveModelProfile(active.ID + " " + active.Name)
-	shell, _ := workspace.ChooseShell(a.settings.Shell.Preferred)
+	shell, _ := workspace.ChooseShell(settings.Shell.Preferred)
 	// 005 US3: compose (new session) or restore (resume) the project-context boot
 	// snapshot BEFORE NewEngine, which sends no provider request — so the boot
 	// block rides the first user submit in one send. On resume the persisted
@@ -562,8 +587,17 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	if shape, ok, _ := a.sessions.ReadPrefixShape(session.ID); ok {
 		priorPrefixShape = &shape
 	}
+	initialTaskGraph, err := a.loadTaskGraph(ctx, session.ID)
+	if err != nil {
+		return runtimeBundle{}, fmt.Errorf("load task graph: %w", err)
+	}
+	journalHealth, err := a.db.ExecutionJournalHealth(ctx, session.ID)
+	if err != nil {
+		return runtimeBundle{}, fmt.Errorf("inspect execution journal: %w", err)
+	}
+	recoveryNotice := executionRecoveryNotice(journalHealth)
 	engine, err := orchestrator.NewEngine(orchestrator.EngineConfig{
-		Settings:   a.settings,
+		Settings:   settings,
 		Secrets:    a.secrets,
 		Session:    session,
 		MemoryDir:  memoryDir,
@@ -577,11 +611,23 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 			AddEvent: func(ctx context.Context, role, kind, content, target string) error {
 				return a.db.AddEvent(ctx, session.ID, role, kind, content, target)
 			},
+			AppendExecutionEvent: func(ctx context.Context, event contract.ExecutionEvent) error {
+				event.SessionID = session.ID
+				_, err := a.db.AppendExecutionEvent(ctx, event)
+				return err
+			},
+			AppendExecutionEvents: func(ctx context.Context, events []contract.ExecutionEvent) error {
+				for index := range events {
+					events[index].SessionID = session.ID
+				}
+				_, err := a.db.AppendExecutionEvents(ctx, events)
+				return err
+			},
 			AppendTranscript: func(_ context.Context, value map[string]any) error {
 				return a.sessions.AppendTranscript(session.ID, value)
 			},
 			AppendUsage: func(_ context.Context, record contract.UsageRecord) error {
-				return a.sessions.AppendUsage(session.ID, record)
+				return a.persistUsageAndLineage(session.ID, record)
 			},
 			AppendInvalidation: func(_ context.Context, event contract.InvalidationEvent) error {
 				return a.sessions.AppendInvalidation(session.ID, event)
@@ -590,14 +636,17 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 				return a.sessions.WriteProjectContext(session.ID, snapshot)
 			},
 			WritePrefixShape: func(_ context.Context, snapshot contract.PrefixShapeSnapshot) error {
-				return a.sessions.WritePrefixShape(session.ID, snapshot)
+				return a.persistPrefixShapeAndLineage(session.ID, snapshot)
+			},
+			WriteSessionModel: func(_ context.Context, modelID string, cacheEpoch uint64) error {
+				return a.persistSessionModelLineage(session.ID, modelID, cacheEpoch)
 			},
 		},
 		Prompt: orchestrator.PromptContext{
 			Workspace: session.WorkspacePath, Shell: shell,
 			Model: active.Name, ModelAddendum: profile.PromptAddendum,
 			Skills:              skills,
-			ProjectMemory:       true,
+			ProjectMemory:       false,
 			ProjectContextBlock: projectContext.RenderedBootContext,
 		},
 		// 013 US1: the same listing the prompt advertises backs read_skill's
@@ -622,7 +671,12 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 		},
 		InitialUsageRecords:  usageRecords,
 		InitialInvalidations: invalidationEvents,
+		InitialTaskGraph:     initialTaskGraph,
 		Seed:                 a.seed,
+		RecoveryBlockReason:  recoveryNotice,
+		WorkspaceFingerprint: func(ctx context.Context) (string, error) {
+			return workspace.VerificationFingerprint(ctx, session.WorkspacePath)
+		},
 		BoundaryTools: func() (orchestrator.BoundaryToolChange, bool, error) {
 			if manager == nil {
 				return orchestrator.BoundaryToolChange{}, false, nil
@@ -645,14 +699,15 @@ func (a *Application) buildRuntime(ctx context.Context, session contract.Session
 	// Legacy note: sessions created before the unified-session change may still
 	// hold agents/<runID>.json sidecars. Nothing reads them now; they are inert
 	// and are removed with the session directory.
-	recent, err := a.db.Events(ctx, session.ID, 300)
+	legacyRecent, recentReadErr := a.db.Events(ctx, session.ID, recentProjectionLimit)
+	recent, err := a.loadJournalRecent(ctx, session, legacyRecent, recentReadErr)
 	if err != nil {
 		if manager != nil {
 			_ = manager.Close()
 		}
 		return runtimeBundle{}, err
 	}
-	return runtimeBundle{runtime: tui.Runtime{Engine: engine, Session: session, Settings: a.settings}, recent: recent, workspace: service, checkpoint: checkpoint, mcp: manager, registry: registry, guard: service.Guard()}, nil
+	return runtimeBundle{runtime: tui.Runtime{Engine: engine, Session: session, Settings: settings, RecoveryNotice: recoveryNotice}, recent: recent, workspace: service, checkpoint: checkpoint, mcp: manager, registry: registry, guard: service.Guard()}, nil
 }
 
 func (a *Application) webSearchAvailable(ctx context.Context) (bool, bool, string, error) {
@@ -668,7 +723,7 @@ func (a *Application) webSearchAvailable(ctx context.Context) (bool, bool, strin
 		if exists {
 			return previous.WebSearch == state.ProbeSupported, false, "", nil
 		}
-		if err := a.probeStore.Put(state.ProbeSnapshot{Fingerprint: fingerprint, WebSearch: state.ProbeUnsupported, CheckedAt: time.Now().UTC()}); err != nil {
+		if err := a.probeStore.Put(state.ProbeSnapshot{Fingerprint: fingerprint, WebSearch: state.ProbeUnknown, CheckedAt: time.Now().UTC()}); err != nil {
 			return false, false, "", err
 		}
 		return false, false, "", nil
@@ -684,12 +739,30 @@ func (a *Application) webSearchAvailable(ctx context.Context) (bool, bool, strin
 	return current == state.ProbeSupported, changed, fmt.Sprintf("web_search probe changed from %s to %s", previous.WebSearch, current), nil
 }
 
+const webSearchProbeTTL = 6 * time.Hour
+
+func webProbeSnapshotFresh(snapshot state.ProbeSnapshot, now time.Time) bool {
+	if snapshot.WebSearch != state.ProbeSupported && snapshot.WebSearch != state.ProbeUnsupported {
+		return false
+	}
+	if snapshot.CheckedAt.IsZero() || snapshot.CheckedAt.After(now) {
+		return false
+	}
+	return now.Sub(snapshot.CheckedAt) <= webSearchProbeTTL
+}
+
 func (a *Application) setAPIKey(ctx context.Context, key string) error {
+	candidateKey := strings.TrimSpace(key)
+	if candidateKey != "" {
+		if _, err := authenticatedGatewayUserID(ctx, *a.settings, candidateKey); err != nil {
+			return fmt.Errorf("API key rejected: %w", err)
+		}
+	}
 	// M3: the render loop reads a.secrets through IsLoggedIn under a.mu, so the
 	// write must take the same lock (the I/O below stays outside it to avoid
 	// blocking the UI during disk/network work).
 	a.mu.Lock()
-	a.secrets.ProviderAPIKey = strings.TrimSpace(key)
+	a.secrets.ProviderAPIKey = candidateKey
 	a.sessions.Secrets = a.secrets
 	secretsSnapshot := a.secrets
 	a.mu.Unlock()
@@ -707,29 +780,15 @@ func (a *Application) setAPIKey(ctx context.Context, key string) error {
 		}
 		return nil
 	}
+	if err := state.SaveModelCatalog(state.ModelCatalogCache{
+		Version: 2, RefreshedAt: time.Now().UTC(), Models: models,
+	}, a.paths); err != nil {
+		return err
+	}
 	addDiscoveredModels(a.settings, models)
 	if err := state.SaveSettings(*a.settings, a.paths); err != nil {
 		return err
 	}
 	a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
 	return nil
-}
-
-// catalogRefreshTTL bounds how long a discovered model catalog is trusted.
-// One day keeps a newly added gateway model reachable by the next session
-// without paying a network round trip at every start.
-const catalogRefreshTTL = 24 * time.Hour
-
-// catalogStale reports whether the recorded discovery time is missing or older
-// than the TTL. An unparseable timestamp is treated as stale so a corrupted
-// value self-heals on the next start.
-func catalogStale(refreshedAt string) bool {
-	if strings.TrimSpace(refreshedAt) == "" {
-		return true
-	}
-	at, err := time.Parse(time.RFC3339, refreshedAt)
-	if err != nil {
-		return true
-	}
-	return time.Since(at) > catalogRefreshTTL
 }

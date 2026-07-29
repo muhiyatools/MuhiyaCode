@@ -46,15 +46,16 @@ func (t WebSearchTool) Definition() contract.ToolDefinition {
 	}}
 }
 
-func (t WebSearchTool) Execute(ctx context.Context, raw json.RawMessage) (string, error) {
+func (t WebSearchTool) Execute(ctx context.Context, raw json.RawMessage) contract.ToolResult {
 	var arguments map[string]any
 	if len(raw) == 0 {
 		raw = json.RawMessage(`{}`)
 	}
 	if err := json.Unmarshal(raw, &arguments); err != nil {
-		return "", fmt.Errorf("web_search: invalid arguments: %w", err)
+		return contract.AdaptToolResult("", contract.ToolNotStarted(fmt.Errorf("web_search: invalid arguments: %w", err)))
 	}
-	return t.Searcher.Search(ctx, arguments)
+	output, err := t.Searcher.Search(ctx, arguments)
+	return contract.AdaptToolResult(output, err)
 }
 
 func (w WebSearch) Supported(ctx context.Context) bool {
@@ -105,7 +106,7 @@ func (w WebSearch) Probe(ctx context.Context) (WebSearchProbeResult, bool, error
 func (w WebSearch) Search(ctx context.Context, args map[string]any) (string, error) {
 	query, _ := args["query"].(string)
 	if strings.TrimSpace(query) == "" {
-		return "", fmt.Errorf("web_search: query is required")
+		return "", contract.ToolNotStarted(fmt.Errorf("web_search: query is required"))
 	}
 	if w.Client == nil {
 		w.Client = &http.Client{}

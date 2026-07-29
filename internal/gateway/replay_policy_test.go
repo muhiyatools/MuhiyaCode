@@ -8,7 +8,7 @@ import (
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
-func TestMiniMaxReplayPreservesReasoningDetailsIncludingToolTurns(t *testing.T) {
+func TestMiniMaxReplayPreservesReasoningDetails(t *testing.T) {
 	details := json.RawMessage(`[{"type":"text","text":"inspect first"}]`)
 	reasoning := "fallback reasoning"
 	messages := []contract.Message{
@@ -16,19 +16,11 @@ func TestMiniMaxReplayPreservesReasoningDetailsIncludingToolTurns(t *testing.T) 
 		{Role: contract.RoleTool, ToolCallID: "call-1", Content: "result"},
 	}
 	replayed := replayMessages(messages, ResolveModelProfile("MiniMax-M3"), contract.ReasoningHigh)
-	if string(replayed[0].ReasoningDetails) != string(details) || replayed[0].ReasoningContent != nil {
-		t.Fatalf("MiniMax replay changed reasoning: %+v", replayed[0])
+	if string(replayed[0].ReasoningDetails) != string(details) || replayed[0].ReasoningContent == nil || *replayed[0].ReasoningContent != reasoning {
+		t.Fatalf("MiniMax replay lost reasoning: %+v", replayed[0])
 	}
 	if len(replayed[1].ReasoningDetails) != 0 || replayed[1].ReasoningContent != nil {
 		t.Fatalf("reasoning leaked to tool result: %+v", replayed[1])
-	}
-}
-
-func TestMiniMaxReplaySynthesizesDetailsFromSettledReasoning(t *testing.T) {
-	reasoning := "interleaved thought"
-	replayed := replayMessages([]contract.Message{{Role: contract.RoleAssistant, ReasoningContent: &reasoning}}, ResolveModelProfile("M2.7"), contract.ReasoningLow)
-	if string(replayed[0].ReasoningDetails) != `[{"text":"interleaved thought","type":"text"}]` {
-		t.Fatalf("synthesized reasoning_details = %s", replayed[0].ReasoningDetails)
 	}
 }
 

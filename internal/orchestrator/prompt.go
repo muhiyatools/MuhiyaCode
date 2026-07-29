@@ -59,13 +59,9 @@ func renderSkillsSection(skills []SkillListing) string {
 	}
 	var b strings.Builder
 	b.WriteString(instructions.SkillsHeaderBody + "\n")
-	b.WriteString(instructions.SkillsHintBody)
+	b.WriteString("Load a relevant skill with read_skill before using it.")
 	for _, skill := range skills {
-		if skill.Description == "" {
-			b.WriteString(fmt.Sprintf("\n- %s", skill.Name))
-		} else {
-			b.WriteString(fmt.Sprintf("\n- %s: %s", skill.Name, skill.Description))
-		}
+		b.WriteString(fmt.Sprintf("\n- %s", skill.Name))
 	}
 	return b.String()
 }
@@ -84,27 +80,20 @@ func SystemPrompt(c PromptContext) string {
 	}
 	sections := []string{
 		instructions.PromptIdentityBody,
-		instructions.PromptOperatingContractBody,
-		instructions.PromptContextEditDisciplineBody,
-		instructions.PromptCacheDisciplineBody,
-		instructions.PromptPlanningBody,
-		instructions.PromptToolsAndRecoveryBody,
-		instructions.PromptModelBody,
-		instructions.PromptCommunicationBody,
-		instructions.PromptSafetyBody,
+		instructions.PromptCoreBody,
 		fmt.Sprintf(instructions.PromptEnvironmentTemplate, c.Workspace, c.OS, c.Shell, c.Model, instructions.ShellCommandGuidance(c.Shell), c.ModelAddendum, web),
 	}
 	base := strings.TrimSpace(strings.Join(sections, "\n\n"))
 	if section := renderSkillsSection(c.Skills); section != "" {
 		base += "\n\n" + section
 	}
+	if c.ProjectMemory {
+		base += "\n\n" + projectMemoryInstruction
+	}
 	// 006: the project-memory instruction is a fixed byte-stable paragraph; the
 	// project-context boot block is session-stable (restored verbatim on resume).
 	// Both are deterministic functions of PromptContext, so two constructions with
 	// identical inputs stay byte-identical (constitution III upgrade break).
-	if c.ProjectMemory {
-		base += "\n\n" + projectMemoryInstruction
-	}
 	if block := strings.TrimRight(c.ProjectContextBlock, "\n"); strings.TrimSpace(block) != "" {
 		base += "\n\n" + block
 	}

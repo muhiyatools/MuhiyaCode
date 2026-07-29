@@ -27,7 +27,7 @@ func hasHarnessEvent(events []contract.HarnessEvent, class contract.HarnessEvent
 func TestHarnessEmissionsCoverClasses(t *testing.T) {
 	// recovery: the H5 distinct-failure breaker force-finalizing a task.
 	settings := engineSettings()
-	rec, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "rec", WorkspacePath: t.TempDir()}, Provider: &scriptedProvider{responses: repeatedFailingCalls(20)}, Registry: NewRegistry(&failingTool{name: "write_file"})})
+	rec, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{ID: "rec", WorkspacePath: t.TempDir()}, Provider: &scriptedProvider{responses: repeatedFailingCalls(20)}, Registry: NewRegistry(&failingTool{name: "read_file"})})
 	if err != nil {
 		t.Fatal(err)
 	}

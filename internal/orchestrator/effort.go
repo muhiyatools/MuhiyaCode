@@ -5,59 +5,45 @@ package orchestrator
 import "github.com/muhiya/muhiyacode/internal/contract"
 
 type EffortProfile struct {
-	Level   contract.EffortLevel
-	Rank    int
-	Summary string
-	// Effort selects reasoning depth, turn runway, and output trims — never a
-	// number of subagent runs. (The per-effort agent ceiling went with the
-	// budgets in v1.1.0; ParallelAgents went with feature 014, because subagents
-	// run one at a time, always — serial chains reuse each other's cached
-	// streams and never interleave workspace edits.)
-	// Formerly: lets independent run_subagent calls execute concurrently;
-	// AutoReview makes the engine nudge one review-subagent pass at the end of
-	// substantial file-changing work (feature 008 DG-7). The former
-	// Directives/PlanBeforeEdit fields were dead (populated, never consumed) — their
-	// intent now lives in the static DELEGATION prompt section (feature 008 R1/D2).
-	AutoReview             bool
+	Level                  contract.EffortLevel
+	Rank                   int
+	Summary                string
 	MaxTurns               int
-	AgentTurnScale         float64
 	KeepFullToolOutputs    int
 	TrimmedToolOutputChars int
 	ToolOutputCap          int
 	CompactThreshold       float64
-	Onboarding             bool
 	Reasoning              contract.ReasoningTier
-	AgentReasoning         contract.ReasoningTier
 }
 
 var effortProfiles = map[contract.EffortLevel]EffortProfile{
 	contract.EffortLow: {
 		Level: contract.EffortLow, Rank: 0,
-		Summary:  "Fast, direct work with the lightest useful checks.",
-		MaxTurns: 16, AgentTurnScale: .75,
+		Summary:             "Fast, direct work with the lightest useful checks.",
+		MaxTurns:            16,
 		KeepFullToolOutputs: 4, TrimmedToolOutputChars: 500, ToolOutputCap: 8_000, CompactThreshold: .80,
-		Reasoning: contract.ReasoningLow, AgentReasoning: contract.ReasoningLow,
+		Reasoning: contract.ReasoningLow,
 	},
 	contract.EffortMedium: {
 		Level: contract.EffortMedium, Rank: 1,
-		Summary:  "Balanced speed, cost, and care for everyday engineering.",
-		MaxTurns: 24, AgentTurnScale: 1,
+		Summary:             "Balanced speed, cost, and care for everyday engineering.",
+		MaxTurns:            24,
 		KeepFullToolOutputs: 5, TrimmedToolOutputChars: 600, ToolOutputCap: 10_000, CompactThreshold: .85,
-		Onboarding: true, Reasoning: contract.ReasoningMedium, AgentReasoning: contract.ReasoningLow,
+		Reasoning: contract.ReasoningMedium,
 	},
 	contract.EffortHigh: {
 		Level: contract.EffortHigh, Rank: 2,
-		Summary:  "Deep work with broad exploration and thorough checks.",
-		MaxTurns: 36, AgentTurnScale: 1.1,
+		Summary:             "Deep work with broad exploration and thorough checks.",
+		MaxTurns:            36,
 		KeepFullToolOutputs: 6, TrimmedToolOutputChars: 700, ToolOutputCap: 16_000, CompactThreshold: .87,
-		Onboarding: true, Reasoning: contract.ReasoningHigh, AgentReasoning: contract.ReasoningMedium,
+		Reasoning: contract.ReasoningHigh,
 	},
 	contract.EffortMax: {
 		Level: contract.EffortMax, Rank: 3,
-		Summary:    "Production-critical migrations, audits, and architecture work.",
-		AutoReview: true, MaxTurns: 48, AgentTurnScale: 1.4,
+		Summary:             "Production-critical migrations, audits, and architecture work.",
+		MaxTurns:            48,
 		KeepFullToolOutputs: 8, TrimmedToolOutputChars: 900, ToolOutputCap: 24_000, CompactThreshold: .90,
-		Onboarding: true, Reasoning: contract.ReasoningMax, AgentReasoning: contract.ReasoningHigh,
+		Reasoning: contract.ReasoningMax,
 	},
 }
 
@@ -99,5 +85,38 @@ func ReasoningForEffort(level contract.EffortLevel) contract.ReasoningTier {
 		return contract.ReasoningMax
 	default:
 		return contract.ReasoningLow
+	}
+}
+
+// ReasoningForTask prevents a high session setting from making trivial work
+// reason like an architecture migration. Effort remains authoritative within
+// the ceiling appropriate to the classified task.
+func ReasoningForTask(class TaskClass, level contract.EffortLevel) contract.ReasoningTier {
+	requested := ReasoningForEffort(level)
+	ceiling := contract.ReasoningMax
+	switch class {
+	case ClassChat, ClassTiny:
+		ceiling = contract.ReasoningLow
+	case ClassSmall:
+		ceiling = contract.ReasoningMedium
+	case ClassStandard:
+		ceiling = contract.ReasoningHigh
+	}
+	if reasoningRank(requested) > reasoningRank(ceiling) {
+		return ceiling
+	}
+	return requested
+}
+
+func reasoningRank(tier contract.ReasoningTier) int {
+	switch tier {
+	case contract.ReasoningMedium:
+		return 1
+	case contract.ReasoningHigh:
+		return 2
+	case contract.ReasoningMax:
+		return 3
+	default:
+		return 0
 	}
 }

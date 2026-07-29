@@ -1,6 +1,7 @@
 package orchestrator
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -150,19 +151,34 @@ func (e *Engine) refreshChecklist() {
 		return
 	}
 	data, err := os.ReadFile(path)
+	e.mu.Lock()
+	previousGraph := cloneTaskGraph(e.taskGraph)
+	e.mu.Unlock()
+	if err != nil && len(previousGraph.Nodes) > 0 {
+		return
+	}
 	plan := contract.Plan{}
 	if err == nil {
 		plan = ParseChecklist(string(data))
 	}
+	graph := graphFromPlan(plan, path, previousGraph)
 	e.mu.Lock()
 	changed := !sameChecklist(e.checklist, plan)
 	e.checklist = plan
+	if changed {
+		e.taskGraph = graph
+	}
 	e.mu.Unlock()
 	// Only publish real changes: a re-read that finds the same items (or no
 	// checklist at all, as at session open in a project that has none) must not
 	// wake the UI.
 	if changed && e.callbacks.PlanUpdate != nil {
 		e.callbacks.PlanUpdate(plan)
+	}
+	if changed {
+		if persistErr := e.persistTaskGraph(context.Background(), graph); persistErr != nil && e.callbacks.Status != nil {
+			e.callbacks.Status("Warning: failed to persist task graph: " + persistErr.Error())
+		}
 	}
 }
 

@@ -110,18 +110,19 @@ func (m *Model) renderModal(budgetRows int) string {
 		start := max(0, min(selected-visible/2, len(modal.choices)-visible))
 		for index := start; index < start+visible; index++ {
 			choice := modal.choices[index]
-			marker := "  "
+			numTag := fmt.Sprintf("%d. ", index+1)
+			marker := "  " + numTag
 			if modal.multi {
-				marker = "[ ]"
+				marker = "[" + fmt.Sprintf("%d", index+1) + "] "
 				if modal.checked[index] {
-					marker = "[×]"
+					marker = "[×] "
 				}
 			}
 			style := m.palette.text
 			if index == selected {
 				style, marker = m.palette.brandSoft, "› "+marker
 			}
-			label := style.Render(marker + " " + m.rtl(oneLineEllipsis(choice.Label, width-10)))
+			label := style.Render(marker + m.rtl(oneLineEllipsis(choice.Label, width-12)))
 			if choice.Recommended {
 				label += " " + m.palette.brand.Render("recommended")
 			}
@@ -133,9 +134,9 @@ func (m *Model) renderModal(budgetRows int) string {
 				lines = append(lines, m.palette.faint.Render("    "+oneLineEllipsis(choice.Description, width-10)))
 			}
 		}
-		hint := "↑/↓ choose · Enter confirms · Esc cancels"
+		hint := "1-9/↑/↓ choose · Enter confirms · Esc cancels"
 		if modal.multi {
-			hint = "↑/↓ choose · Space toggles · Enter confirms"
+			hint = "1-9 toggle · Space toggles · Enter confirms"
 		}
 		if len(modal.choices) > visible {
 			hint = fmt.Sprintf("%d/%d · ", selected+1, len(modal.choices)) + hint

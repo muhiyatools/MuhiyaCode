@@ -27,6 +27,8 @@ type HistorySnapshot struct {
 	RewriteVersion    int                `json:"rewriteVersion,omitempty"`
 	LastWindowStart   int                `json:"lastWindowStart,omitempty"`
 	WindowInitialized bool               `json:"windowInitialized,omitempty"`
+	TokensPerChar     float64            `json:"tokensPerChar,omitempty"`
+	Compactions       []CompactionRecord `json:"compactions,omitempty"`
 }
 
 type History struct {
@@ -45,7 +47,16 @@ type History struct {
 	// tokPerChar (T038) is the tokens/char ratio calibrated from real provider
 	// usage. 0 means uncalibrated → the estimator falls back to the fixed 0.25
 	// heuristic. Guarded by mu.
-	tokPerChar float64
+	tokPerChar        float64
+	compiledUnits     []requestUnit
+	requestUnitsValid bool
+	compactions       []CompactionRecord
+}
+
+type requestUnit struct {
+	start int
+	end   int
+	cost  int
 }
 
 type PressureInput struct {
@@ -61,9 +72,23 @@ type MaintenanceResult struct {
 }
 
 type RequestBuild struct {
-	Messages      []contract.Message
-	WindowDropped bool
-	DroppedUnits  int
+	Messages                    []contract.Message
+	WindowDropped               bool
+	DroppedUnits                int
+	EstimatedPromptTokens       int
+	EstimatedWireTokens         int
+	EstimatedToolTokens         int
+	EstimatedCoreToolTokens     int
+	EstimatedDeferredToolTokens int
+	PromptBudgetTokens          int
+	OverBudget                  bool
+	EstimateSource              string
+	SerializedMessageBytes      int
+	SerializedToolBytes         int
+	SerializedCoreToolBytes     int
+	SerializedDeferredToolBytes int
+	CompiledUnits               int
+	CompilerCacheHit            bool
 }
 
 func NewHistory(snapshot HistorySnapshot, persist func(HistorySnapshot) error) *History {
@@ -78,6 +103,8 @@ func NewHistory(snapshot HistorySnapshot, persist func(HistorySnapshot) error) *
 		rewriteVersion:    max(0, snapshot.RewriteVersion),
 		lastWindowStart:   max(0, snapshot.LastWindowStart),
 		windowInitialized: snapshot.WindowInitialized,
+		tokPerChar:        validTokenRatio(snapshot.TokensPerChar),
+		compactions:       append([]CompactionRecord(nil), snapshot.Compactions...),
 		superseded:        make(map[string]struct{}),
 		persist:           persist,
 	}
@@ -107,7 +134,10 @@ func (h *History) MarkTaskStart() {
 
 func (h *History) Append(message contract.Message) {
 	h.mu.Lock()
-	h.messages = append(h.messages, message)
+	index := len(h.messages)
+	owned := cloneMessages([]contract.Message{message})[0]
+	h.messages = append(h.messages, owned)
+	h.appendRequestUnitLocked(index, owned)
 	h.saveLocked()
 	h.mu.Unlock()
 }
@@ -164,6 +194,12 @@ func (h *History) TokensForChars(chars int) int {
 
 func EstimateMessageTokens(message contract.Message) int {
 	total := EstimateTokens(message.Content)
+	if message.ReasoningContent != nil {
+		total += EstimateTokens(*message.ReasoningContent)
+	}
+	if len(message.ReasoningDetails) > 0 {
+		total += EstimateTokens(string(message.ReasoningDetails))
+	}
 	for _, call := range message.ToolCalls {
 		total += EstimateTokens(call.ToolName()) + EstimateTokens(call.ArgumentsJSON())
 	}
@@ -177,7 +213,9 @@ func (h *History) BuildRequest(system string, contextLimit, reserve int) []contr
 func (h *History) BuildRequestWithMetadata(system string, contextLimit, reserve int) RequestBuild {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	request, start, _ := assembleRequestWithStart(h.messages, h.compactSummary, system, contextLimit, reserve)
+	compilerCacheHit := h.requestUnitsValid
+	request, start, used := h.assembleRequestLocked(system, contextLimit, reserve)
+	budget := max(0, contextLimit-reserve)
 	changed := !h.windowInitialized || start != h.lastWindowStart
 	dropped := h.windowInitialized && start > h.lastWindowStart
 	droppedUnits := 0
@@ -192,7 +230,20 @@ func (h *History) BuildRequestWithMetadata(system string, contextLimit, reserve 
 	if changed {
 		h.saveLocked()
 	}
-	return RequestBuild{Messages: request, WindowDropped: dropped, DroppedUnits: droppedUnits}
+	serialized, _ := json.Marshal(request)
+	return RequestBuild{
+		Messages:               request,
+		WindowDropped:          dropped,
+		DroppedUnits:           droppedUnits,
+		EstimatedPromptTokens:  used,
+		EstimatedWireTokens:    used,
+		PromptBudgetTokens:     budget,
+		OverBudget:             used > budget,
+		EstimateSource:         h.estimateSourceLocked(),
+		SerializedMessageBytes: len(serialized),
+		CompiledUnits:          len(h.compiledUnits),
+		CompilerCacheHit:       compilerCacheHit,
+	}
 }
 
 func (h *History) MarkSuperseded(callIDs []string) {
@@ -216,7 +267,11 @@ func (h *History) TrimAged(keepFull, trimmedChars, minBatch int) bool {
 }
 
 func (h *History) trimAgedLocked(keepFull, trimmedChars, minBatch int) int {
-	return trimAgedMessages(h.messages, h.superseded, keepFull, trimmedChars, minBatch)
+	trimmed := trimAgedMessages(h.messages, h.superseded, keepFull, trimmedChars, minBatch)
+	if trimmed > 0 {
+		h.invalidateRequestUnitsLocked()
+	}
+	return trimmed
 }
 
 // trimAgedMessages trims aged/superseded tool results to head+tail in place.
@@ -352,6 +407,7 @@ func (h *History) FoldCompletedTasks() int {
 	if !h.foldCompletedLocked() {
 		return 0
 	}
+	h.invalidateRequestUnitsLocked()
 	h.rewriteVersion++
 	h.saveLocked()
 	return max(0, before-h.estimatedLocked())
@@ -406,6 +462,7 @@ func (h *History) Maintain(keepFull, trimmedChars, minBatch int) MaintenanceResu
 	if !folded && trimmed == 0 {
 		return MaintenanceResult{}
 	}
+	h.invalidateRequestUnitsLocked()
 	if originals != nil {
 		h.archiveChangedLocked(originals)
 	}
@@ -459,34 +516,6 @@ func (h *History) IsToolResultIntact(callID string) bool {
 	return false
 }
 
-func (h *History) CompactTo(summary string, keepRecentUnits int) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	units := GroupUnits(h.messages)
-	if keepRecentUnits > len(units) {
-		keepRecentUnits = len(units)
-	}
-	var kept []contract.Message
-	for _, unit := range units[len(units)-keepRecentUnits:] {
-		kept = append(kept, unit...)
-	}
-	removed := len(h.messages) - len(kept)
-	h.messages = cloneMessages(kept)
-	// T042: digests ACCUMULATE — a new digest is appended to prior digests
-	// (which stay byte-identical) rather than replacing them, so repeated
-	// compaction is not lossy re-summarization that drops earlier facts.
-	if strings.TrimSpace(h.compactSummary) == "" {
-		h.compactSummary = summary
-	} else {
-		h.compactSummary = h.compactSummary + "\n\n" + summary
-	}
-	h.lastTaskStart = max(0, h.lastTaskStart-removed)
-	h.rewriteVersion++
-	h.lastWindowStart = 0
-	h.windowInitialized = false
-	h.saveLocked()
-}
-
 func GroupUnits(messages []contract.Message) [][]contract.Message {
 	var units [][]contract.Message
 	var current []contract.Message
@@ -503,34 +532,65 @@ func GroupUnits(messages []contract.Message) [][]contract.Message {
 	return units
 }
 
-func assembleRequestWithStart(messages []contract.Message, summary, system string, contextLimit, reserve int) ([]contract.Message, int, int) {
-	budget := max(8_000, contextLimit-reserve)
+func (h *History) appendRequestUnitLocked(index int, message contract.Message) {
+	if !h.requestUnitsValid {
+		return
+	}
+	h.appendCompiledUnitLocked(index, message)
+}
+
+func (h *History) requestUnitsLocked() []requestUnit {
+	if h.requestUnitsValid {
+		return h.compiledUnits
+	}
+	h.compiledUnits = h.compiledUnits[:0]
+	for index, message := range h.messages {
+		h.appendCompiledUnitLocked(index, message)
+	}
+	h.requestUnitsValid = true
+	return h.compiledUnits
+}
+
+func (h *History) appendCompiledUnitLocked(index int, message contract.Message) {
+	cost := h.estimateMessageLocked(message)
+	if message.Role == contract.RoleUser || len(h.compiledUnits) == 0 {
+		h.compiledUnits = append(h.compiledUnits, requestUnit{start: index, end: index + 1, cost: cost})
+		return
+	}
+	last := &h.compiledUnits[len(h.compiledUnits)-1]
+	last.end = index + 1
+	last.cost += cost
+}
+
+func (h *History) invalidateRequestUnitsLocked() {
+	h.compiledUnits = nil
+	h.requestUnitsValid = false
+}
+
+func (h *History) assembleRequestLocked(system string, contextLimit, reserve int) ([]contract.Message, int, int) {
+	budget := max(0, contextLimit-reserve)
 	header := []contract.Message{{Role: contract.RoleSystem, Content: system}}
-	if summary != "" {
-		header = append(header, contract.Message{Role: contract.RoleSystem, Content: "Summary of earlier conversation:\n" + summary})
+	if h.compactSummary != "" {
+		header = append(header, contract.Message{Role: contract.RoleSystem, Content: "Summary of earlier conversation:\n" + h.compactSummary})
 	}
 	used := 0
 	for _, message := range header {
-		used += EstimateMessageTokens(message)
+		used += h.estimateMessageLocked(message)
 	}
-	units := GroupUnits(messages)
+	units := h.requestUnitsLocked()
 	start := len(units)
-	for i := len(units) - 1; i >= 0; i-- {
-		cost := 0
-		for _, message := range units[i] {
-			cost += EstimateMessageTokens(message)
-		}
-		if used+cost > budget && start < len(units) {
+	for index := len(units) - 1; index >= 0; index-- {
+		if used+units[index].cost > budget && start < len(units) {
 			break
 		}
-		start = i
-		used += cost
+		start = index
+		used += units[index].cost
 	}
 	result := cloneMessages(header)
 	for _, unit := range units[start:] {
-		result = append(result, cloneMessages(unit)...)
+		result = append(result, cloneMessages(h.messages[unit.start:unit.end])...)
 	}
-	return result, start, len(units)
+	return result, start, used
 }
 
 func foldCalls(calls []contract.ToolCall) []contract.ToolCall {
@@ -571,7 +631,25 @@ func cloneMessages(value []contract.Message) []contract.Message {
 	result := make([]contract.Message, len(value))
 	copy(result, value)
 	for i := range result {
-		result[i].ToolCalls = append([]contract.ToolCall(nil), value[i].ToolCalls...)
+		result[i].ToolCalls = cloneToolCalls(value[i].ToolCalls)
+		result[i].ReasoningDetails = append(json.RawMessage(nil), value[i].ReasoningDetails...)
+		if value[i].ReasoningContent != nil {
+			reasoning := *value[i].ReasoningContent
+			result[i].ReasoningContent = &reasoning
+		}
+	}
+	return result
+}
+
+func cloneToolCalls(calls []contract.ToolCall) []contract.ToolCall {
+	result := make([]contract.ToolCall, len(calls))
+	copy(result, calls)
+	for i := range result {
+		result[i].Arguments = append(json.RawMessage(nil), calls[i].Arguments...)
+		if calls[i].Function != nil {
+			function := *calls[i].Function
+			result[i].Function = &function
+		}
 	}
 	return result
 }
@@ -587,55 +665,80 @@ func (h *History) estimatedLocked() int {
 	return total
 }
 
-// estimateMessageLocked (T038) estimates one message's tokens using the
-// calibrated tokens/char ratio when available, else the 0.25 fallback. Framing
-// is +4 per message and +8 per tool call (Reasonix constants); reasoning content
-// is excluded because it is never re-sent to the provider.
+// estimateMessageLocked estimates one message's tokens using the calibrated
+// tokens/char ratio when available, else the conservative heuristic. Provider
+// prompt usage already includes message/tool framing, so calibrated ratios must
+// not add a second framing surcharge.
 func (h *History) estimateMessageLocked(m contract.Message) int {
 	if h.tokPerChar <= 0 {
 		return EstimateMessageTokens(m)
 	}
 	chars := len(m.Content)
+	if m.ReasoningContent != nil {
+		chars += len(*m.ReasoningContent)
+	}
+	chars += len(m.ReasoningDetails)
 	for _, call := range m.ToolCalls {
 		chars += len(call.ToolName()) + len(call.ArgumentsJSON())
 	}
-	return int(float64(chars)*h.tokPerChar) + 4 + 8*len(m.ToolCalls)
+	return int(float64(chars) * h.tokPerChar)
 }
 
 func (h *History) estimateTextLocked(text string) int {
 	if h.tokPerChar <= 0 {
-		return EstimateTokens(text)
+		return int(float64(len(text))*0.28) + 1
 	}
-	return int(float64(len(text))*h.tokPerChar) + 4
+	return int(float64(len(text)) * h.tokPerChar)
 }
 
-// Calibrate (T038) updates the tokens/char ratio from a real provider usage:
-// promptTokens / (systemChars + all message chars), clamped to (0.05, 2). An
-// out-of-range ratio, zero prompt tokens, or zero chars leaves the previous
-// ratio (or the 0.25 fallback) in place, so a bad sample never poisons the
-// estimator. systemChars is passed in because the system prompt is not stored in
-// the message log but IS counted in promptTokens.
-func (h *History) Calibrate(promptTokens, systemChars int) {
-	if promptTokens <= 0 {
+func (h *History) estimateSourceLocked() string {
+	if h.tokPerChar > 0 {
+		return "provider-calibrated"
+	}
+	return "heuristic"
+}
+
+func validTokenRatio(ratio float64) float64 {
+	if ratio < 0.05 || ratio > 2 {
+		return 0
+	}
+	return ratio
+}
+
+// Calibrate updates the estimator from the exact semantic characters sent in
+// the measured request. Windowed-out history must not dilute the ratio.
+func (h *History) Calibrate(promptTokens, sentChars int) {
+	if promptTokens <= 0 || sentChars <= 0 {
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	chars := systemChars + len(h.compactSummary)
-	for _, m := range h.messages {
-		chars += len(m.Content)
-		for _, call := range m.ToolCalls {
+	ratio := float64(promptTokens) / float64(sentChars)
+	if validTokenRatio(ratio) == 0 {
+		return
+	}
+	if h.tokPerChar != ratio {
+		h.invalidateRequestUnitsLocked()
+	}
+	h.tokPerChar = ratio
+}
+
+func requestCalibrationChars(messages []contract.Message, definitions []contract.ToolDefinition) int {
+	chars := 0
+	for _, message := range messages {
+		chars += len(message.Content)
+		if message.ReasoningContent != nil {
+			chars += len(*message.ReasoningContent)
+		}
+		chars += len(message.ReasoningDetails)
+		for _, call := range message.ToolCalls {
 			chars += len(call.ToolName()) + len(call.ArgumentsJSON())
 		}
 	}
-	if chars <= 0 {
-		return
+	if encoded, err := json.Marshal(definitions); err == nil {
+		chars += len(encoded)
 	}
-	ratio := float64(promptTokens) / float64(chars)
-	if ratio < 0.05 || ratio > 2 {
-		return
-	}
-	h.tokPerChar = ratio
+	return chars
 }
 
 func (h *History) snapshotLocked() HistorySnapshot {
@@ -647,6 +750,8 @@ func (h *History) snapshotLocked() HistorySnapshot {
 		RewriteVersion:    h.rewriteVersion,
 		LastWindowStart:   h.lastWindowStart,
 		WindowInitialized: h.windowInitialized,
+		TokensPerChar:     h.tokPerChar,
+		Compactions:       append([]CompactionRecord(nil), h.compactions...),
 	}
 }
 

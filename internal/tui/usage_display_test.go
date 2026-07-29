@@ -16,7 +16,7 @@ func TestMixedProviderUsageRowsAndUnavailableCache(t *testing.T) {
 	deepCost, miniCost := 0.002, 0.001
 	records := []contract.UsageRecord{
 		{Model: "deepseek-v4-pro", Stream: contract.UsageStreamMain, PromptTokens: &prompt, CompletionTokens: &output, CacheReadTokens: &deepRead, CacheMissTokens: &deepMiss, CostUSD: &deepCost},
-		{Model: "minimax-m3", Stream: contract.UsageStreamSubagent, PromptTokens: &miniPrompt, CompletionTokens: &miniOutput, CacheReadTokens: nil, CacheMissTokens: nil, CostUSD: &miniCost},
+		{Model: "minimax-m3", Stream: contract.UsageStreamAux, PromptTokens: &miniPrompt, CompletionTokens: &miniOutput, CacheReadTokens: nil, CacheMissTokens: nil, CostUSD: &miniCost},
 	}
 	rows := contract.AggregateUsageByModel(records)
 	if len(rows) != 2 || rows[0].Model != "deepseek-v4-pro" || rows[1].Model != "minimax-m3" {

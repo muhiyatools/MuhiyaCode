@@ -90,11 +90,65 @@ func TestEngineChatUsesStablePromptAndTools(t *testing.T) {
 	if len(provider.requests[0].Tools) == 0 {
 		t.Fatal("chat turn should carry the full stable tool set for cache stability")
 	}
-	if !strings.Contains(provider.requests[0].Messages[0].Content, "OPERATING CONTRACT") {
-		t.Fatal("chat turn did not use the full session system prompt")
+	if !strings.Contains(provider.requests[0].Messages[0].Content, "Work directly in the supplied workspace") {
+		t.Fatal("chat turn did not use the stable compact system prompt")
 	}
-	if provider.requests[0].Reasoning != contract.ReasoningMedium {
-		t.Fatalf("reasoning should be the user's effort level sent raw, got %q", provider.requests[0].Reasoning)
+	if provider.requests[0].Reasoning != contract.ReasoningLow {
+		t.Fatalf("chat should use task-adaptive low reasoning, got %q", provider.requests[0].Reasoning)
+	}
+}
+
+func TestEngineContinuesAfterTruncatedTextResponse(t *testing.T) {
+	provider := &scriptedProvider{responses: []contract.ChatResponse{
+		{Content: "Partial answer that was cut", FinishReason: "length"},
+		{Content: "Complete answer."},
+	}}
+	settings := engineSettings()
+	engine, err := NewEngine(EngineConfig{
+		Settings: &settings,
+		Session:  contract.Session{ID: "truncated-text", WorkspacePath: t.TempDir()},
+		Provider: provider,
+		Registry: NewRegistry(&recordingTool{name: "read_file"}),
+		Prompt:   PromptContext{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	answer, stats, err := engine.Run(context.Background(), "explain this")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if answer != "Complete answer." || stats.Status != contract.TaskStatusSucceeded {
+		t.Fatalf("truncated response was accepted as final: answer=%q stats=%+v", answer, stats)
+	}
+	if len(provider.requests) != 2 {
+		t.Fatalf("truncated text should trigger one continuation request, got %d", len(provider.requests))
+	}
+}
+
+func TestToolCallRescueTracksActiveModelProfile(t *testing.T) {
+	settings := engineSettings()
+	settings.Provider.Models = []contract.Model{
+		{ID: "generic", Name: "Generic", ContextLimit: 128_000},
+		{ID: "minimax-m3", Name: "MiniMax M3", ContextLimit: 1_000_000},
+	}
+	settings.Provider.ActiveModelID = "generic"
+	engine, err := NewEngine(EngineConfig{
+		Settings: &settings,
+		Session:  contract.Session{ID: "rescue-profile", WorkspacePath: t.TempDir()},
+		Provider: &scriptedProvider{},
+		Registry: NewRegistry(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if engine.needsToolCallRescue() {
+		t.Fatal("generic model must not enable text tool-call rescue")
+	}
+	settings.Provider.ActiveModelID = "minimax-m3"
+	if !engine.needsToolCallRescue() {
+		t.Fatal("rescue capability must follow a task-boundary model switch")
 	}
 }
 
@@ -177,9 +231,9 @@ func (t *recordingTool) Definition() contract.ToolDefinition {
 	return definition(t.name, "test", map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}}, nil)
 }
 
-func (t *recordingTool) Execute(_ context.Context, raw json.RawMessage) (string, error) {
+func (t *recordingTool) Execute(_ context.Context, raw json.RawMessage) contract.ToolResult {
 	t.calls++
-	return "Wrote a.txt.", nil
+	return contract.AdaptToolResult("Wrote a.txt.", nil)
 }
 
 // TestAllFailedTurnsInjectsLoopGuard (T027 / REV B7) verifies that two
@@ -223,6 +277,5 @@ func engineSettings() contract.Settings {
 	// request on the first task of a session, which would consume a scripted
 	// response in every fixture that is not about model selection. advisor_test.go
 	// turns it back on explicitly.
-	settings.Provider.Advisor = "off"
 	return settings
 }

@@ -29,15 +29,15 @@ func TestValidateCallArgsNestedSchemas(t *testing.T) {
 		t.Fatalf("valid nested args rejected: %v", err)
 	}
 	badItem := contract.NewToolCall("c2", "demo", `{"steps":["a",3]}`)
-	if err := validateCallArgs(badItem, definitions); err == nil || !strings.Contains(err.Error(), "steps[1]") {
+	if err := validateCallArgs(badItem, definitions); err == nil || !strings.Contains(err.Error(), "/properties/steps/items") {
 		t.Fatalf("bad array item not caught: %v", err)
 	}
 	missingKey := contract.NewToolCall("c3", "demo", `{"options":{"count":1}}`)
-	if err := validateCallArgs(missingKey, definitions); err == nil || !strings.Contains(err.Error(), `required key "mode"`) {
+	if err := validateCallArgs(missingKey, definitions); err == nil || !strings.Contains(err.Error(), `"mode"`) {
 		t.Fatalf("missing nested required key not caught: %v", err)
 	}
 	badNestedType := contract.NewToolCall("c4", "demo", `{"options":{"mode":"fast","count":"two"}}`)
-	if err := validateCallArgs(badNestedType, definitions); err == nil || !strings.Contains(err.Error(), "options.count") {
+	if err := validateCallArgs(badNestedType, definitions); err == nil || !strings.Contains(err.Error(), "/options/properties/count") {
 		t.Fatalf("bad nested type not caught: %v", err)
 	}
 }
@@ -65,8 +65,8 @@ func TestValidationTightening(t *testing.T) {
 		args string
 		err  string
 	}{
-		{"Unknown property", `{"path": "a", "oldString": "b", "newString": "c", "unknown": "d"}`, `{"error": "unknown property: unknown", "gateRejected": true}`},
-		{"Empty string in required field", `{"path": "a", "oldString": "", "newString": "c"}`, `{"error": "required string field oldString is empty", "gateRejected": true}`},
+		{"Unknown property", `{"path": "a", "oldString": "b", "newString": "c", "unknown": "d"}`, `additional properties ["unknown"]`},
+		{"Empty string in required field", `{"path": "a", "oldString": "", "newString": "c"}`, `required string field oldString is empty`},
 		{"Valid call", `{"path": "a", "oldString": "b", "newString": "c"}`, ""},
 	}
 	for _, tt := range tests {
@@ -85,4 +85,3 @@ func TestValidationTightening(t *testing.T) {
 		})
 	}
 }
-

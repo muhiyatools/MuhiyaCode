@@ -142,6 +142,20 @@ func ResolveModelProfile(name string) ModelProfile {
 		}
 	case strings.Contains(lower, "glm") || strings.Contains(lower, "zhipu"):
 		return ModelProfile{Family: "glm", Temperature: .1, TopP: .9, MaxOutputTokens: 32_000, DefaultContextWindow: 128_000, NeedsToolCallRescue: true, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGLMAddendumBody}
+	case strings.Contains(lower, "grok") || strings.Contains(lower, "xai"):
+		limit := 128_000
+		if strings.Contains(lower, "grok-4") || strings.Contains(lower, "grok-3") || strings.Contains(lower, "grok") {
+			limit = 1_000_000
+		}
+		return ModelProfile{
+			Family: "grok", Temperature: .1, TopP: .95,
+			MaxOutputTokens: 32_000, OutputTokenLimit: 128_000,
+			DefaultContextWindow: limit, ContextWindowLimit: 1_000_000,
+			NeedsToolCallRescue: true, ParsesReasoning: true,
+			ReasoningReplay:     ReasoningReplayStrip,
+			ContinuationLinking: ContinuationSupported,
+			SupportedParams:     []string{"model", "messages", "temperature", "top_p", "max_tokens", "stream", "stream_options", "tools", "tool_choice", "reasoning_effort"},
+		}
 	default:
 		return ModelProfile{Family: "generic", Temperature: .1, TopP: .95, MaxOutputTokens: 32_000, DefaultContextWindow: 128_000, ContinuationLinking: ContinuationDigestOnly, PromptAddendum: instructions.GatewayGenericAddendumBody}
 	}
@@ -163,6 +177,16 @@ func (p ModelProfile) OutputBudget(catalogMaxOutput int) int {
 	}
 	value, _ := p.ClampOutputTokens(budget)
 	return value
+}
+
+// ContextOutputReserve is the portion of the output budget that must fit inside
+// the model's shared prompt+completion window. DeepSeek documents output as a
+// separate window; other families stay conservative and reserve the full cap.
+func (p ModelProfile) ContextOutputReserve(catalogMaxOutput int) int {
+	if p.Family == "deepseek" {
+		return 0
+	}
+	return p.OutputBudget(catalogMaxOutput)
 }
 
 func isMiniMaxModelName(lower string) bool {

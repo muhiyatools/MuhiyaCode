@@ -63,14 +63,19 @@ func TestRemovedCommandsAreUnknown(t *testing.T) {
 	}
 }
 
-// Shift+Tab remains the one way to change the mode, so it must keep working
-// with the command gone.
+// Shift+Tab remains the entry point, but unsafe mode requires confirmation.
 func TestShiftTabRemainsTheModeSwitch(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 	m = mustUpdate(t, m, testSize())
 	m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if m.runtime.Settings.PermissionMode != contract.PermissionNormal || m.modal == nil {
+		t.Fatalf("shift+tab must require confirmation, got mode=%q modal=%v", m.runtime.Settings.PermissionMode, m.modal)
+	}
+	callback := m.modal.onSelect
+	m.closeModal(1)
+	callback(1)
 	if m.runtime.Settings.PermissionMode != contract.PermissionAutoAccept {
-		t.Fatalf("shift+tab did not cycle to auto-accept, got %q", m.runtime.Settings.PermissionMode)
+		t.Fatalf("confirmed full access was not applied, got %q", m.runtime.Settings.PermissionMode)
 	}
 }
 
@@ -90,5 +95,38 @@ func TestSessionAliasesMatchCanonicalCommand(t *testing.T) {
 		if m.flash.text != wantNotice {
 			t.Fatalf("%s notice = %q, want %q", command, m.flash.text, wantNotice)
 		}
+	}
+}
+
+func TestModelSlashCommandDirectAndModal(t *testing.T) {
+	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
+	m = mustUpdate(t, m, testSize())
+	m.runtime.Settings.Provider.Models = []contract.Model{
+		{ID: "main", Name: "Main Model", ContextLimit: 128000},
+		{ID: "fast-model", Name: "Fast Model", ContextLimit: 200000},
+	}
+
+	// Test /model without args -> opens choice modal
+	m.runSlash("/model")
+	if m.modal == nil || !strings.Contains(m.modal.title, "Select Model") || len(m.modal.choices) != 2 {
+		t.Fatalf("/model did not open model selection modal with 2 choices: %v", m.modal)
+	}
+	callback := m.modal.onSelect
+	m.closeModal(-1)
+	cmd := callback(1) // Pick index 1 ("fast-model")
+	if cmd != nil {
+		m = mustUpdate(t, m, cmd())
+	}
+	if m.runtime.Settings.Provider.ActiveModelID != "fast-model" {
+		t.Fatalf("model choice selection failed: activeModelID=%q", m.runtime.Settings.Provider.ActiveModelID)
+	}
+
+	// Test /model <id> direct switch
+	cmd = m.runSlash("/model main")
+	if cmd != nil {
+		m = mustUpdate(t, m, cmd())
+	}
+	if m.runtime.Settings.Provider.ActiveModelID != "main" {
+		t.Fatalf("/model main direct switch failed: activeModelID=%q", m.runtime.Settings.Provider.ActiveModelID)
 	}
 }

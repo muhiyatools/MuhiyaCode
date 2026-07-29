@@ -1,0 +1,10 @@
+.git
+.agents
+.claude
+.github
+*.exe
+*.exe~
+coverage
+dist
+node_modules
+tmp

@@ -28,7 +28,7 @@ type Config struct {
 	MaxRetries      int
 	// StreamRetryObserver, when set, is called once per mid-stream retry so the
 	// harness can telemeter transport friction that would otherwise be invisible
-	// (the retry itself is silent to the user by design — a 2s recovery should
+	// (the retry itself is silent to the user by design â€” a 2s recovery should
 	// not become a notification).
 	StreamRetryObserver func(error)
 	RawUsageObserver    RawUsageObserver
@@ -50,15 +50,25 @@ type RawUsagePayload struct {
 type RawUsageObserver func(RawUsagePayload) error
 
 type OpenAICompatible struct {
-	mu     sync.RWMutex
-	config Config
-	client *http.Client
+	mu            sync.RWMutex
+	config        Config
+	client        *http.Client
+	catalogETag   string
+	catalogModels []contract.Model
 	// pinRejected latches when an upstream-affinity request came back with a
-	// non-retryable status. The pin is a pure optimization — it buys a warm
-	// cache — so the moment a route proves it cannot accept the field, we stop
+	// non-retryable status. The pin is a pure optimization â€” it buys a warm
+	// cache â€” so the moment a route proves it cannot accept the field, we stop
 	// sending it for the rest of the process rather than failing every task on
 	// a caching nicety. See the retry loop in Chat.
-	pinRejected bool
+	// No process-global routing capability latch: request routing is driven by
+	// the documented session identifier and remains independent per session.
+}
+
+type chatAttempt struct {
+	model   contract.Model
+	profile ModelProfile
+	input   contract.ChatRequest
+	number  int
 }
 
 func NewOpenAICompatible(config Config) *OpenAICompatible {
@@ -67,8 +77,8 @@ func NewOpenAICompatible(config Config) *OpenAICompatible {
 	}
 	// These are PAIRED with the gateway's own bounds (gateway repo
 	// proxy/handler.go:22 httpClient.Timeout, :49 streamIdleTimeout). Each CLI
-	// value sits just INSIDE its gateway counterpart so the CLI — the side that
-	// can actually recover, via the stream retry in Chat below — is the one that
+	// value sits just INSIDE its gateway counterpart so the CLI â€” the side that
+	// can actually recover, via the stream retry in Chat below â€” is the one that
 	// times out first. Inverting this would surface the gateway's hard close as
 	// an unrecoverable transport error instead of a retried turn.
 	if config.IdleTimeout <= 0 {
@@ -78,7 +88,12 @@ func NewOpenAICompatible(config Config) *OpenAICompatible {
 		config.RequestLifetime = 14 * time.Minute // gateway's total upstream bound is 15m
 	}
 	if config.MaxRetries <= 0 {
-		config.MaxRetries = 3
+		// P0-W3 (UMI-08): one transport retry maximum. With MaxRetries=1 the
+		// provider makes at most two upstream calls per logical turn (initial +
+		// one pre-byte retry, or initial + one mid-stream retry). The previous
+		// default of 3 allowed up to five upstream calls (4 pre-byte + 1
+		// mid-stream), multiplying cost on a bad key or malformed request.
+		config.MaxRetries = 1
 	}
 	return &OpenAICompatible{config: config, client: config.Client}
 }
@@ -98,16 +113,12 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 	if err != nil {
 		return contract.ChatResponse{}, err
 	}
-	profile := ResolveModelProfile(model.ID + " " + model.Name)
-	// The upstream pin is an optimization, and an optimization must never be
-	// able to fail a task. If any route has already rejected it, it is off.
-	if p.upstreamPinRejected() {
-		input.PinUpstream = ""
-	}
+	profile := ResolveCatalogModelProfile(model)
 	var last error
 	streamRetried := false
 	for attempt := 0; attempt <= cfg.MaxRetries; attempt++ {
-		response, streamed, retryAfter, err := p.chatOnce(ctx, cfg, model, profile, input)
+		current := chatAttempt{model: model, profile: profile, input: input, number: attempt + 1}
+		response, streamed, retryAfter, err := p.chatOnce(ctx, cfg, current)
 		if err == nil {
 			return response, nil
 		}
@@ -115,32 +126,17 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 		var httpErr *HTTPError
 		isStatusError := errors.As(err, &httpErr)
 		retryable := isStatusError && httpErr.Retryable
-		// A pinned request that was refused OUTRIGHT — a 400 for an unrecognized
-		// routing field, say — is the one failure this feature could cause that
-		// the user did not have before. A 4xx is terminal here, so without this
-		// branch a gateway that does not forward `provider` would turn every
-		// single task into a hard failure.
-		//
-		// Drop the pin, latch it off for the process, and retry immediately. The
-		// cost of being wrong is one cold prefix; the cost of not checking is the
-		// whole session.
-		if isStatusError && !retryable && !streamed && input.PinUpstream != "" {
-			p.rejectUpstreamPin()
-			input.PinUpstream = ""
-			log.Printf("[gateway] upstream affinity refused (%v); continuing without it — expect cold prefixes on re-routes", err)
-			continue
-		}
 		// A TRANSPORT failure before any bytes arrived is retryable. The
 		// !isStatusError term matters: isNetworkError only excludes cancellation,
 		// so without it an explicitly non-retryable status (400, 401, 404) was
-		// promoted back to retryable and re-sent three times — a bad API key
+		// promoted back to retryable and re-sent three times â€” a bad API key
 		// hammered the gateway, and a malformed request burned the user's clock
 		// reproducing the same 400.
 		if !retryable && !streamed && !isStatusError && isNetworkError(err) {
 			retryable = true
 		}
 		// A stream that DIED after headers is retried exactly once. It used to be
-		// terminal, which meant one dropped connection killed the whole task —
+		// terminal, which meant one dropped connection killed the whole task â€”
 		// the turn loop's only move on a Chat error is to abort.
 		//
 		// The retry is close to free: the partial is discarded, the request bytes
@@ -151,6 +147,9 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 		// re-sending would just repeat it).
 		if streamed && !streamRetried && !isStatusError && isNetworkError(err) && ctx.Err() == nil {
 			streamRetried = true
+			if input.OnStreamReset != nil {
+				input.OnStreamReset()
+			}
 			if cfg.StreamRetryObserver != nil {
 				cfg.StreamRetryObserver(err)
 			}
@@ -160,6 +159,9 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 			continue
 		}
 		if streamed || !retryable || attempt == cfg.MaxRetries || ctx.Err() != nil {
+			if streamed && input.OnStreamReset != nil {
+				input.OnStreamReset()
+			}
 			return contract.ChatResponse{}, err
 		}
 		delay := retryAfter
@@ -173,7 +175,10 @@ func (p *OpenAICompatible) Chat(ctx context.Context, input contract.ChatRequest)
 	return contract.ChatResponse{}, last
 }
 
-func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model contract.Model, profile ModelProfile, input contract.ChatRequest) (contract.ChatResponse, bool, time.Duration, error) {
+func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, attempt chatAttempt) (contract.ChatResponse, bool, time.Duration, error) {
+	model := attempt.model
+	profile := attempt.profile
+	input := attempt.input
 	// Timeout model (feature 007 R1): RequestLifetime is a FIRST-BYTE deadline. It
 	// bounds connect + TLS + the wait for response headers, during which DeepSeek may
 	// queue a request for up to ~10 minutes behind keep-alive traffic. Once headers
@@ -215,23 +220,23 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	// Upstream affinity (OpenRouter). A model slug on OpenRouter is served by
 	// several upstream providers (minimax-m3 lists NINE), and each keeps its OWN
 	// prompt cache. Without a preference OpenRouter is free to re-route between
-	// turns, and the next request re-reads the entire conversation uncached —
+	// turns, and the next request re-reads the entire conversation uncached â€”
 	// with byte-identical input, so nothing on our side can detect or prevent it.
 	//
-	// order+allow_fallbacks is deliberate rather than "only": a hard restriction
-	// converts an upstream outage into a failed task, which is a far worse trade
-	// than one cold prefix. We express a strong preference and stay alive if it
-	// cannot be honored; the orchestrator notices the flip from the response and
-	// re-pins to whoever actually served it.
+	// allow_fallbacks is set to false to lock prompt cache affinity to the learned
+	// upstream provider and prevent silent cache-destroying re-routes. If an
+	// upstream outage or 4xx rejection occurs, the gateway client latches
+	// rejectUpstreamPin() off for the process and retries without the pin, ensuring
+	// tasks continue safely even during provider outages.
 	//
 	// The field is passed through to OpenRouter verbatim by the gateway and
 	// ignored by every provider that does not understand it, so it is safe on
 	// any route.
-	if input.PinUpstream != "" {
-		body["provider"] = map[string]any{
-			"order":           upstreamOrderCandidates(input.PinUpstream),
-			"allow_fallbacks": true,
-		}
+	if input.SessionID != "" && supportsSessionIDBody(cfg.Settings.Provider.BaseURL) {
+		body["session_id"] = input.SessionID
+	}
+	if profile.Family == "minimax" && profileSupportsParam(profile, "reasoning_split") {
+		body["reasoning_split"] = true
 	}
 	if input.Reasoning != "" && profileSupportsParam(profile, "reasoning_effort") {
 		// Send the raw effort level. The gateway (X-Muhiya-Effort header, which
@@ -252,15 +257,29 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 	req.Header.Set("X-Client-App", "MuhiyaCode")
+	req.Header.Set("HTTP-Referer", "https://muhiya.com")
+	req.Header.Set("X-Title", "MuhiyaCode")
 	if input.Reasoning != "" {
 		req.Header.Set("X-Muhiya-Effort", string(input.Reasoning))
 	}
-	// X-Muhiya-Session is a per-stream pin; derived once and stable across the
-	// whole session so the gateway keeps a stable upstream model routing for
-	// the cache namespace. The orchestrator threads it from e.session.ID with
-	// a per-stream suffix (":main" / ":sub" / ":aux"). Never regenerated here.
+	// X-Session-Id is the OpenRouter cache/routing identity. The legacy
+	// X-Muhiya-Session header remains for the Muhiya gateway during migration.
 	if input.SessionID != "" {
+		req.Header.Set("X-Session-Id", input.SessionID)
 		req.Header.Set("X-Muhiya-Session", input.SessionID)
+	}
+	// RequestID groups every attempt for one logical turn. The attempt header
+	// keeps transport retries independently observable.
+	// Replaying one attempt remains idempotent at the gateway.
+	if input.RequestID != "" {
+		req.Header.Set("X-Muhiya-Request-ID", input.RequestID)
+	}
+	req.Header.Set("X-Muhiya-Attempt", strconv.Itoa(attempt.number))
+	req.Header.Set("X-Muhiya-Cache-Epoch", strconv.FormatUint(input.CacheEpoch, 10))
+	if model.RecordID != "" {
+		req.Header.Set("X-Muhiya-Expected-Model-Record", model.RecordID)
+		req.Header.Set("X-Muhiya-Expected-Target-Model", model.TargetModel)
+		req.Header.Set("X-Muhiya-Compatibility-Epoch", strconv.Itoa(model.CompatibilityEpoch))
 	}
 	response, err := cfg.Client.Do(req)
 	if err != nil {
@@ -278,6 +297,20 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 		httpErr := &HTTPError{Status: response.StatusCode, Body: strings.TrimSpace(string(body)), Retryable: response.StatusCode == 408 || response.StatusCode == 429 || response.StatusCode >= 500}
 		return contract.ChatResponse{}, false, retryAfter(response.Header.Get("Retry-After")), httpErr
 	}
+	if model.RecordID != "" {
+		resolvedRecord := strings.TrimSpace(response.Header.Get("X-Muhiya-Resolved-Model-Record"))
+		resolvedTarget := strings.TrimSpace(response.Header.Get("X-Muhiya-Resolved-Target-Model"))
+		if resolvedRecord != model.RecordID || resolvedTarget != model.TargetModel {
+			return contract.ChatResponse{}, false, 0, &HTTPError{
+				Status: http.StatusConflict,
+				Body: fmt.Sprintf(
+					"model resolution receipt mismatch: expected record=%s target=%s, got record=%s target=%s",
+					model.RecordID, model.TargetModel, resolvedRecord, resolvedTarget,
+				),
+				Retryable: false,
+			}
+		}
+	}
 
 	// Streaming begins: headers are in, so retire the first-byte deadline and let the
 	// rolling idle timeout govern the stream. Keep-alive comment/empty lines reset
@@ -292,7 +325,7 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 	// 003 (D1): the gateway emits a non-standard final chunk carrying muhiya_log
 	// {cost, log_id, usage_estimated} for allowlisted client apps (MuhiyaCode is
 	// on the allowlist). Capture the last one; absence is normal (generic/older
-	// gateways) and simply leaves cost unavailable — never estimated locally.
+	// gateways) and simply leaves cost unavailable â€” never estimated locally.
 	var costMeta *muhiyaLogMeta
 	scanner := bufio.NewScanner(response.Body)
 	scanner.Buffer(make([]byte, 64*1024), 2*1024*1024)
@@ -377,7 +410,7 @@ func (p *OpenAICompatible) chatOnce(parent context.Context, cfg Config, model co
 // it prefers, so gating reasoning_effort out of the body loses nothing.
 func profileSupportsParam(profile ModelProfile, param string) bool {
 	if len(profile.SupportedParams) == 0 {
-		return true
+		return param != "reasoning_effort"
 	}
 	for _, supported := range profile.SupportedParams {
 		if supported == param {
@@ -385,6 +418,11 @@ func profileSupportsParam(profile ModelProfile, param string) bool {
 		}
 	}
 	return false
+}
+
+func supportsSessionIDBody(baseURL string) bool {
+	host := strings.ToLower(baseURL)
+	return strings.Contains(host, "openrouter.ai") || strings.Contains(host, "muhiya.com")
 }
 
 // muhiyaLogMeta is the parsed muhiya_log object from a gateway meta chunk.
@@ -423,18 +461,13 @@ func replayMessages(messages []contract.Message, profile ModelProfile, _ contrac
 	result := make([]contract.Message, len(messages))
 	copy(result, messages)
 	for index := range result {
-		if profile.ReasoningReplay == ReasoningReplayPreserve && result[index].Role == contract.RoleAssistant {
-			if len(result[index].ReasoningDetails) == 0 && result[index].ReasoningContent != nil && strings.TrimSpace(*result[index].ReasoningContent) != "" {
-				result[index].ReasoningDetails = reasoningDetailsFromText(*result[index].ReasoningContent)
-			}
-			// MiniMax consumes reasoning_details, never DeepSeek's reasoning_content.
+		// Historical reasoning output is used for single-turn output generation,
+		// never multi-turn context replay. Retaining large reasoning payloads in past
+		// assistant turns bloats request size and invalidates upstream prompt caches.
+		if profile.ReasoningReplay != ReasoningReplayPreserve {
 			result[index].ReasoningContent = nil
-			continue
+			result[index].ReasoningDetails = nil
 		}
-		// Today's default and DeepSeek policy strip captured reasoning. DeepSeek
-		// thinking-mode tool-call turns retain its required empty key.
-		result[index].ReasoningContent = nil
-		result[index].ReasoningDetails = nil
 		if profile.Family == "deepseek" && result[index].Role == contract.RoleAssistant && len(result[index].ToolCalls) > 0 {
 			empty := ""
 			result[index].ReasoningContent = &empty
@@ -489,11 +522,6 @@ func repairToolMessageSequence(messages []contract.Message) []contract.Message {
 	return result
 }
 
-func reasoningDetailsFromText(text string) json.RawMessage {
-	details, _ := json.Marshal([]map[string]string{{"type": "text", "text": text}})
-	return details
-}
-
 // StableRequestMessages exposes the provider's final replay representation so
 // the orchestrator hashes the same bytes the gateway serializes.
 func (p *OpenAICompatible) StableRequestMessages(input contract.ChatRequest) ([]contract.Message, error) {
@@ -502,7 +530,7 @@ func (p *OpenAICompatible) StableRequestMessages(input contract.ChatRequest) ([]
 	if err != nil {
 		return nil, err
 	}
-	return replayMessages(input.Messages, ResolveModelProfile(model.ID+" "+model.Name), input.Reasoning), nil
+	return replayMessages(input.Messages, ResolveCatalogModelProfile(model), input.Reasoning), nil
 }
 
 func rawUsageFromSSELine(line string) (json.RawMessage, bool) {
@@ -523,116 +551,6 @@ func rawUsageFromSSELine(line string) (json.RawMessage, bool) {
 		return nil, false
 	}
 	return append(json.RawMessage(nil), usage...), true
-}
-
-func (p *OpenAICompatible) ListModels(ctx context.Context) ([]contract.Model, error) {
-	cfg := p.snapshot()
-	if strings.TrimSpace(cfg.Settings.Provider.BaseURL) == "" || strings.TrimSpace(cfg.APIKey) == "" {
-		return nil, errors.New("provider base URL and API key are required")
-	}
-	base := strings.TrimSuffix(strings.TrimRight(cfg.Settings.Provider.BaseURL, "/"), "/chat/completions")
-	candidates := []string{}
-	if strings.HasSuffix(base, "/v1") {
-		candidates = append(candidates, base+"/models", strings.TrimSuffix(base, "/v1")+"/models")
-	} else {
-		candidates = append(candidates, base+"/v1/models", base+"/models")
-	}
-	var messages []string
-	for _, endpoint := range unique(candidates) {
-		models, err := fetchModels(ctx, cfg, endpoint)
-		if err == nil {
-			return models, nil
-		}
-		messages = append(messages, err.Error())
-	}
-	return nil, fmt.Errorf("model discovery failed: %s", strings.Join(messages, "; "))
-}
-
-// UpdateConfig applies credentials and model settings for future requests. A
-// request already in flight keeps its original immutable configuration.
-func (p *OpenAICompatible) UpdateConfig(settings contract.Settings, apiKey string) {
-	p.mu.Lock()
-	p.config.Settings = settings
-	p.config.APIKey = apiKey
-	p.mu.Unlock()
-}
-
-func fetchModels(parent context.Context, cfg Config, endpoint string) ([]contract.Model, error) {
-	ctx, cancel := context.WithTimeout(parent, 20*time.Second)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
-	req.Header.Set("X-Client-App", "MuhiyaCode")
-	// Note: fetchModels has no ChatRequest. The session pin is meaningful only
-	// for chat calls (which carry the cached prefix); model discovery never
-	// participates in upstream cache routing.
-	response, err := cfg.Client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer response.Body.Close()
-	if response.StatusCode < 200 || response.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(response.Body, 1024))
-		return nil, fmt.Errorf("%s returned %d: %s", endpoint, response.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var payload any
-	if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
-		return nil, err
-	}
-	return normalizeModels(payload), nil
-}
-
-func normalizeModels(payload any) []contract.Model {
-	container, _ := payload.(map[string]any)
-	data, _ := container["data"].([]any)
-	if data == nil {
-		data, _ = payload.([]any)
-	}
-	var result []contract.Model
-	for _, raw := range data {
-		item, _ := raw.(map[string]any)
-		id := stringValue(item["virtual_name"])
-		if id == "" {
-			id = stringValue(item["alias"])
-		}
-		if id == "" {
-			id = stringValue(item["id"])
-		}
-		if id == "" {
-			id = stringValue(item["name"])
-		}
-		if id == "" {
-			continue
-		}
-		name := stringValue(item["display_name"])
-		if name == "" {
-			name = stringValue(item["virtual_name"])
-		}
-		if name == "" {
-			name = stringValue(item["name"])
-		}
-		if name == "" {
-			name = id
-		}
-		info, _ := item["info"].(map[string]any)
-		limit, _ := numberValue(item["context_window"])
-		if limit == 0 && info != nil {
-			limit, _ = numberValue(info["context_window"])
-		}
-		maxOutput, _ := numberValue(item["max_output_tokens"])
-		if maxOutput == 0 {
-			maxOutput, _ = numberValue(item["max_tokens"])
-		}
-		if maxOutput == 0 && info != nil {
-			maxOutput, _ = numberValue(info["max_output_tokens"])
-		}
-		provider := stringValue(item["owned_by"])
-		if provider == "" && info != nil {
-			provider = stringValue(info["provider"])
-		}
-		result = append(result, contract.Model{ID: id, Name: name, Description: stringValue(item["description"]), ContextLimit: limit, MaxOutput: maxOutput, Provider: provider, Source: "endpoint"})
-	}
-	return result
 }
 
 type HTTPError struct {
@@ -656,14 +574,22 @@ func resolveModel(cfg Config, id string) (contract.Model, error) {
 		id = cfg.Settings.Provider.ActiveModelID
 	}
 	for _, model := range cfg.Settings.Provider.Models {
-		if model.ID == id {
+		if model.ID == id || strings.EqualFold(model.ID, id) {
 			if model.ContextLimit <= 0 {
-				return contract.Model{}, errors.New("model context limit is not configured")
+				profile := ResolveCatalogModelProfile(model)
+				model.ContextLimit = profile.DefaultContextWindow
 			}
 			return model, nil
 		}
 	}
-	return contract.Model{}, fmt.Errorf("unknown model id %q", id)
+	profile := ResolveModelProfile(id)
+	return contract.Model{
+		ID:           id,
+		Name:         id,
+		ContextLimit: profile.DefaultContextWindow,
+		MaxOutput:    profile.MaxOutputTokens,
+		Source:       "dynamic",
+	}, nil
 }
 
 func endpoint(cfg Config, suffix string) string {
@@ -721,11 +647,11 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 var errStreamStalled = errors.New("provider stream stalled")
 
 // StalledError marks a request that OUR OWN idle or first-byte (lifetime) timer
-// aborted because the provider went silent — NOT a user cancel. It is
+// aborted because the provider went silent â€” NOT a user cancel. It is
 // deliberately not context.Canceled/DeadlineExceeded: isNetworkError, Recoverable,
 // and FriendlyRequestError each special-case it as a RETRYABLE stall, whereas a
 // raw context.Canceled reads as "the user stopped" and is never retried. That
-// distinction is the whole fix — a half-open TCP stall used to surface as
+// distinction is the whole fix â€” a half-open TCP stall used to surface as
 // context.Canceled and kill the task with a misleading "stopped."
 type StalledError struct {
 	Phase string // "waiting for the first byte" or "mid-stream", for diagnostics

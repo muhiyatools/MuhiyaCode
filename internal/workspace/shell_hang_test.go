@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -17,10 +18,7 @@ import (
 // should have returned.
 func backgroundHolderShell() (preferred, command, marker string) {
 	if runtime.GOOS == "windows" {
-		// Start-Process -NoNewWindow makes the child inherit our stdout handle, then
-		// the launching PowerShell exits — exactly the Start-Process ... http.server
-		// case from the bug report, minus the network bind.
-		return "powershell", "Start-Process -NoNewWindow -FilePath powershell -ArgumentList '-NoProfile','-Command','Start-Sleep -Seconds 20'; Write-Output holder-started", "holder-started"
+		return "powershell", "$s = New-Object System.Diagnostics.ProcessStartInfo 'powershell', '-NoProfile -Command Start-Sleep -Seconds 20'; $s.UseShellExecute = $false; [System.Diagnostics.Process]::Start($s) | Out-Null; Write-Output holder-started", "holder-started"
 	}
 	return "sh", "sleep 20 & echo holder-started", "holder-started"
 }
@@ -30,7 +28,10 @@ func backgroundHolderShell() (preferred, command, marker string) {
 // return promptly (bounded by the kill grace), not block until the child exits.
 func TestRunShellDoesNotHangOnBackgroundChild(t *testing.T) {
 	preferred, command, marker := backgroundHolderShell()
-	runner := &ShellRunner{Preferred: preferred, Timeout: 2 * time.Minute, OutputLimit: 1 << 16}
+	registry := filepath.Join(t.TempDir(), "processes.json")
+	manager := newProcessManager(registry)
+	runner := &ShellRunner{Preferred: preferred, Timeout: 2 * time.Minute, OutputLimit: 1 << 16, Processes: manager}
+	defer manager.Close()
 	// Deliberately NOT t.TempDir(): the surviving background child inherits this as
 	// its working directory, and t.TempDir()'s auto-cleanup would fail trying to
 	// remove a directory a live process still holds. The shared temp root is never
@@ -49,6 +50,25 @@ func TestRunShellDoesNotHangOnBackgroundChild(t *testing.T) {
 	}
 	if !result.BackgroundLeft {
 		t.Fatalf("expected BackgroundLeft to flag the surviving child, got %+v", result)
+	}
+	if result.BackgroundProcessID == "" {
+		t.Fatalf("background process was not assigned an owned ID: %+v", result)
+	}
+	if listed := manager.List(); len(listed) != 1 || listed[0].ID != result.BackgroundProcessID {
+		t.Fatalf("owned process list = %+v", listed)
+	}
+	if payload, readErr := os.ReadFile(registry); readErr != nil || !strings.Contains(string(payload), result.BackgroundProcessID) {
+		t.Fatalf("durable process registry missing ownership: payload=%q err=%v", payload, readErr)
+	}
+	recovered := newProcessManager(registry)
+	if listed := recovered.List(); len(listed) != 1 || listed[0].ID != result.BackgroundProcessID {
+		t.Fatalf("durably recovered process list = %+v", listed)
+	}
+	if err := recovered.Stop(result.BackgroundProcessID); err != nil {
+		t.Fatalf("stop owned process: %v", err)
+	}
+	if listed := recovered.List(); len(listed) != 0 {
+		t.Fatalf("stopped process remained listed: %+v", listed)
 	}
 	if !strings.Contains(result.Output, marker) {
 		t.Fatalf("expected the foreground output %q, got %q", marker, result.Output)

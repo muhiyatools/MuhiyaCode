@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
@@ -54,9 +55,11 @@ func (s *DB) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS trusted_workspaces (path TEXT PRIMARY KEY, created_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, workspace_path TEXT NOT NULL, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, role TEXT NOT NULL, type TEXT NOT NULL, content TEXT NOT NULL, target TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE)`,
+		`CREATE TABLE IF NOT EXISTS execution_events (sequence INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, task_id TEXT NOT NULL, version INTEGER NOT NULL, kind TEXT NOT NULL, payload BLOB NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE)`,
 		`CREATE TABLE IF NOT EXISTS checkpoints (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, description TEXT NOT NULL, created_at TEXT NOT NULL, FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_workspace_updated ON sessions(workspace_path, updated_at DESC)`,
 		`CREATE INDEX IF NOT EXISTS idx_events_session_id ON events(session_id, id)`,
+		`CREATE INDEX IF NOT EXISTS idx_execution_events_session_sequence ON execution_events(session_id, sequence)`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -69,7 +72,48 @@ func (s *DB) migrate(ctx context.Context) error {
 	if err := ensureEventsTargetColumn(ctx, tx); err != nil {
 		return fmt.Errorf("migrate events.target: %w", err)
 	}
+	for _, column := range []tableColumn{
+		{Table: "sessions", Name: "archived_at", Definition: `TEXT NOT NULL DEFAULT ''`},
+		{Table: "sessions", Name: "parent_session_id", Definition: `TEXT NOT NULL DEFAULT ''`},
+		{Table: "checkpoints", Name: "event_cursor", Definition: `INTEGER NOT NULL DEFAULT 0`},
+	} {
+		if err := ensureColumn(ctx, tx, column); err != nil {
+			return fmt.Errorf("migrate %s.%s: %w", column.Table, column.Name, err)
+		}
+	}
 	return tx.Commit()
+}
+
+type tableColumn struct {
+	Table      string
+	Name       string
+	Definition string
+}
+
+func ensureColumn(ctx context.Context, tx *sql.Tx, column tableColumn) error {
+	rows, err := tx.QueryContext(ctx, `PRAGMA table_info(`+column.Table+`)`)
+	if err != nil {
+		return err
+	}
+	present := false
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &defaultValue, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		present = present || name == column.Name
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if present {
+		return nil
+	}
+	_, err = tx.ExecContext(ctx, `ALTER TABLE `+column.Table+` ADD COLUMN `+column.Name+` `+column.Definition)
+	return err
 }
 
 // ensureEventsTargetColumn adds the events.target column to a pre-existing DB
@@ -144,7 +188,7 @@ func (s *DB) CreateSession(ctx context.Context, workspace, title string) (contra
 }
 
 func (s *DB) Session(ctx context.Context, id string) (contract.Session, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, workspace_path, title, created_at, updated_at FROM sessions WHERE id=?`, id)
+	row := s.db.QueryRowContext(ctx, sessionSelect+` WHERE id=?`, id)
 	session, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return contract.Session{}, false, nil
@@ -153,7 +197,7 @@ func (s *DB) Session(ctx context.Context, id string) (contract.Session, bool, er
 }
 
 func (s *DB) LatestSession(ctx context.Context, workspace string) (contract.Session, bool, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, workspace_path, title, created_at, updated_at FROM sessions WHERE workspace_path=? ORDER BY updated_at DESC LIMIT 1`, workspace)
+	row := s.db.QueryRowContext(ctx, sessionSelect+` WHERE workspace_path=? AND archived_at='' ORDER BY updated_at DESC LIMIT 1`, workspace)
 	session, err := scanSession(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return contract.Session{}, false, nil
@@ -165,11 +209,13 @@ func (s *DB) ListSessions(ctx context.Context, workspace string, limit int) ([]c
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
-	query := `SELECT id, workspace_path, title, created_at, updated_at FROM sessions`
+	query := sessionSelect
 	args := []any{}
 	if workspace != "" {
-		query += ` WHERE workspace_path=?`
+		query += ` WHERE workspace_path=? AND archived_at=''`
 		args = append(args, workspace)
+	} else {
+		query += ` WHERE archived_at=''`
 	}
 	query += ` ORDER BY updated_at DESC LIMIT ?`
 	args = append(args, limit)
@@ -195,6 +241,117 @@ func (s *DB) UpdateSessionTitle(ctx context.Context, id, title string) error {
 	}
 	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET title=?, updated_at=? WHERE id=?`, title, nowText(), id)
 	return err
+}
+
+func (s *DB) ForkSessionAt(ctx context.Context, sourceID, title string, cursor int64, cutoff time.Time) (contract.Session, error) {
+	source, ok, err := s.Session(ctx, sourceID)
+	if err != nil {
+		return contract.Session{}, err
+	}
+	if !ok {
+		return contract.Session{}, fmt.Errorf("session not found: %s", sourceID)
+	}
+	id, err := randomID(6)
+	if err != nil {
+		return contract.Session{}, err
+	}
+	if title == "" {
+		title = source.Title + " (rewind)"
+	}
+	if len(title) > 80 {
+		title = title[:80]
+	}
+	now := time.Now().UTC()
+	session := contract.Session{
+		ID: id, WorkspacePath: source.WorkspacePath, Title: title,
+		CreatedAt: now, UpdatedAt: now, ParentID: sourceID,
+	}
+	sourceExecutionEvents, err := s.allExecutionEvents(ctx, sourceID)
+	if err != nil {
+		return contract.Session{}, fmt.Errorf("read source execution journal: %w", err)
+	}
+	forkedExecutionEvents := make([]contract.ExecutionEvent, 0, len(sourceExecutionEvents))
+	oldProjectionTaskPrefix := "session:" + sourceID + ":"
+	newProjectionTaskPrefix := "session:" + id + ":"
+	for _, event := range sourceExecutionEvents {
+		if event.Sequence > cursor {
+			break
+		}
+		event.Sequence = 0
+		event.SessionID = id
+		if strings.HasPrefix(event.TaskID, oldProjectionTaskPrefix) {
+			event.TaskID = newProjectionTaskPrefix + strings.TrimPrefix(event.TaskID, oldProjectionTaskPrefix)
+		}
+		forkedExecutionEvents = append(forkedExecutionEvents, event)
+	}
+	preparedExecutionEvents := make([]preparedExecutionEvent, 0, len(forkedExecutionEvents))
+	for _, event := range forkedExecutionEvents {
+		prepared, prepareErr := prepareExecutionEvent(event)
+		if prepareErr != nil {
+			return contract.Session{}, fmt.Errorf("prepare forked execution journal: %w", prepareErr)
+		}
+		preparedExecutionEvents = append(preparedExecutionEvents, prepared)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return contract.Session{}, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO sessions(id, workspace_path, title, created_at, updated_at, parent_session_id) VALUES(?,?,?,?,?,?)`,
+		id, source.WorkspacePath, title, formatTime(now), formatTime(now), sourceID); err != nil {
+		return contract.Session{}, err
+	}
+	if cutoff.IsZero() {
+		cutoff = now
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO events(session_id, role, type, content, target, created_at)
+		SELECT ?, role, type, content, target, created_at FROM events WHERE session_id=? AND created_at<=? ORDER BY id`,
+		id, sourceID, formatTime(cutoff)); err != nil {
+		return contract.Session{}, err
+	}
+	for _, prepared := range preparedExecutionEvents {
+		if _, err := insertExecutionEvent(ctx, tx, prepared); err != nil {
+			return contract.Session{}, fmt.Errorf("copy execution journal: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return contract.Session{}, err
+	}
+	return session, nil
+}
+
+func (s *DB) ArchiveSession(ctx context.Context, id string, archived bool) error {
+	value := ""
+	if archived {
+		value = nowText()
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE sessions SET archived_at=?, updated_at=? WHERE id=?`, value, nowText(), id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	return nil
+}
+
+func (s *DB) DeleteSession(ctx context.Context, id string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	return nil
 }
 
 func (s *DB) AddEvent(ctx context.Context, sessionID, role, kind, content, target string) error {
@@ -354,8 +511,19 @@ func trimToByteBudget(entries []contract.TranscriptEvent, budget int, direction 
 }
 
 func (s *DB) AddCheckpoint(ctx context.Context, id, sessionID, description string) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO checkpoints(id, session_id, description, created_at) VALUES(?,?,?,?)`, id, sessionID, description, nowText())
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var cursor int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(sequence), 0) FROM execution_events WHERE session_id=?`, sessionID).Scan(&cursor); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO checkpoints(id, session_id, description, created_at, event_cursor) VALUES(?,?,?,?,?)`, id, sessionID, description, nowText(), cursor); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *DB) LatestCheckpoint(ctx context.Context, sessionID string) (id, description string, ok bool, err error) {
@@ -366,18 +534,62 @@ func (s *DB) LatestCheckpoint(ctx context.Context, sessionID string) (id, descri
 	return id, description, err == nil, err
 }
 
+func (s *DB) Checkpoint(ctx context.Context, sessionID, id string) (contract.CheckpointInfo, bool, error) {
+	var checkpoint contract.CheckpointInfo
+	var created string
+	err := s.db.QueryRowContext(ctx, `SELECT id, session_id, description, created_at, event_cursor FROM checkpoints WHERE session_id=? AND id=?`, sessionID, id).
+		Scan(&checkpoint.ID, &checkpoint.SessionID, &checkpoint.Description, &created, &checkpoint.EventCursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return contract.CheckpointInfo{}, false, nil
+	}
+	checkpoint.CreatedAt, _ = parseTime(created)
+	return checkpoint, err == nil, err
+}
+
+func (s *DB) ListCheckpoints(ctx context.Context, sessionID string, limit int) ([]contract.CheckpointInfo, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, session_id, description, created_at, event_cursor FROM checkpoints WHERE session_id=? ORDER BY created_at DESC LIMIT ?`, sessionID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var checkpoints []contract.CheckpointInfo
+	for rows.Next() {
+		var checkpoint contract.CheckpointInfo
+		var created string
+		if err := rows.Scan(&checkpoint.ID, &checkpoint.SessionID, &checkpoint.Description, &created, &checkpoint.EventCursor); err != nil {
+			return nil, err
+		}
+		checkpoint.CreatedAt, _ = parseTime(created)
+		checkpoints = append(checkpoints, checkpoint)
+	}
+	return checkpoints, rows.Err()
+}
+
+func (s *DB) DeleteCheckpoint(ctx context.Context, sessionID, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM checkpoints WHERE session_id=? AND id=?`, sessionID, id)
+	return err
+}
+
 type rowScanner interface{ Scan(...any) error }
 
 func scanSession(row rowScanner) (contract.Session, error) {
 	var session contract.Session
-	var created, updated string
-	if err := row.Scan(&session.ID, &session.WorkspacePath, &session.Title, &created, &updated); err != nil {
+	var created, updated, archived string
+	if err := row.Scan(&session.ID, &session.WorkspacePath, &session.Title, &created, &updated, &archived, &session.ParentID); err != nil {
 		return contract.Session{}, err
 	}
 	session.CreatedAt, _ = parseTime(created)
 	session.UpdatedAt, _ = parseTime(updated)
+	if archived != "" {
+		session.ArchivedAt, _ = parseTime(archived)
+	}
 	return session, nil
 }
+
+const sessionSelect = `SELECT id, workspace_path, title, created_at, updated_at, archived_at, parent_session_id FROM sessions`
 
 func randomID(bytes int) (string, error) {
 	buffer := make([]byte, bytes)

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"sort"
@@ -16,7 +17,9 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/processenv"
 	"github.com/muhiya/muhiyacode/internal/state"
+	workspacepolicy "github.com/muhiya/muhiyacode/internal/workspace"
 )
 
 // ErrAuthExpired (M6) is the sentinel returned by oauthAccessToken when the
@@ -39,6 +42,9 @@ type Manager struct {
 	httpClient *http.Client
 	confirm    ConfirmFunc
 	onTool     func(contract.Tool)
+	sandbox    workspacepolicy.SandboxBackend
+	workspace  string
+	unsafeHost bool
 
 	mu             sync.RWMutex
 	refreshMu      sync.Mutex
@@ -57,6 +63,16 @@ type Manager struct {
 	pendingSurface bool
 	pendingForce   bool
 	pendingScopes  []string
+}
+
+// SetProcessSandbox binds stdio MCP children to the same session sandbox as
+// shell execution. unsafeHost is the explicit full-access escape hatch.
+func (m *Manager) SetProcessSandbox(backend workspacepolicy.SandboxBackend, workspace string, unsafeHost bool) {
+	m.mu.Lock()
+	m.sandbox = backend
+	m.workspace = workspace
+	m.unsafeHost = unsafeHost
+	m.mu.Unlock()
 }
 
 type connection struct {
@@ -283,26 +299,20 @@ func (m *Manager) connect(parent context.Context, server state.MCPServer, secret
 	client := mcp.NewClient(&mcp.Implementation{Name: "MuhiyaCode", Version: "1.0.0"}, nil)
 	var transport mcp.Transport
 	if server.Transport == "stdio" {
-		cmd := exec.Command(server.Command, server.Args...)
-		cmd.Dir = server.CWD
-		cmd.Env = os.Environ()
-		for key, value := range server.Env {
-			cmd.Env = append(cmd.Env, key+"="+value)
+		cmd, commandErr := m.stdioCommand(server)
+		if commandErr != nil {
+			return nil, commandErr
 		}
-		for key, value := range secrets.Env[server.Name] {
-			cmd.Env = append(cmd.Env, key+"="+value)
-		}
+		cmd.Env = processenv.Sanitized(os.Environ(), server.Env, secrets.Env[server.Name])
 		transport = &mcp.CommandTransport{Command: cmd, TerminateDuration: 3 * time.Second}
 	} else {
-		httpClient := m.httpClient
 		token, tokenErr := m.oauthAccessToken(ctx, server.Name, secrets.OAuth[server.Name])
 		if tokenErr != nil {
 			return nil, tokenErr
 		}
-		if token != "" {
-			clone := *m.httpClient
-			clone.Transport = bearerTransport{base: transportOf(m.httpClient), token: token}
-			httpClient = &clone
+		httpClient, scopeErr := destinationScopedClient(m.httpClient, server.URL, token)
+		if scopeErr != nil {
+			return nil, scopeErr
 		}
 		transport = &mcp.StreamableClientTransport{Endpoint: server.URL, HTTPClient: httpClient, MaxRetries: 1, DisableStandaloneSSE: true}
 	}
@@ -350,6 +360,86 @@ func (m *Manager) connect(parent context.Context, server state.MCPServer, secret
 	}
 	m.mu.Unlock()
 	return connection, nil
+}
+
+func (m *Manager) stdioCommand(server state.MCPServer) (*exec.Cmd, error) {
+	m.mu.RLock()
+	backend, workspaceRoot, unsafeHost := m.sandbox, m.workspace, m.unsafeHost
+	m.mu.RUnlock()
+	cwd := server.CWD
+	if cwd == "" {
+		cwd = workspaceRoot
+	}
+	arguments := append([]string{server.Command}, server.Args...)
+	if backend != nil && !unsafeHost {
+		capability := backend.Capability()
+		if !capability.Enforced {
+			return nil, fmt.Errorf("%w for MCP %s: %s", workspacepolicy.ErrSandboxUnavailable, server.Name, capability.Reason)
+		}
+		wrapped, err := backend.Wrap(workspacepolicy.SandboxRequest{Arguments: arguments, CWD: cwd})
+		if err != nil {
+			return nil, fmt.Errorf("sandbox MCP %s: %w", server.Name, err)
+		}
+		arguments = wrapped
+	}
+	if len(arguments) == 0 {
+		return nil, fmt.Errorf("MCP %s has an empty command", server.Name)
+	}
+	command := exec.Command(arguments[0], arguments[1:]...)
+	command.Dir = cwd
+	return command, nil
+}
+
+type destinationTransport struct {
+	allowed *url.URL
+	base    http.RoundTripper
+}
+
+func destinationScopedClient(client *http.Client, endpoint, token string) (*http.Client, error) {
+	allowed, err := url.Parse(endpoint)
+	if err != nil || allowed.Scheme == "" || allowed.Host == "" {
+		return nil, fmt.Errorf("invalid MCP endpoint %q", endpoint)
+	}
+	base := transportOf(client)
+	if token != "" {
+		base = bearerTransport{base: base, token: token}
+	}
+	scope := destinationTransport{allowed: allowed, base: base}
+	clone := *client
+	clone.Transport = scope
+	clone.CheckRedirect = func(request *http.Request, _ []*http.Request) error {
+		return scope.authorize(request.URL)
+	}
+	return &clone, nil
+}
+
+func (transport destinationTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if err := transport.authorize(request.URL); err != nil {
+		return nil, err
+	}
+	return transport.base.RoundTrip(request)
+}
+
+func (transport destinationTransport) authorize(target *url.URL) error {
+	if !strings.EqualFold(target.Scheme, transport.allowed.Scheme) ||
+		!strings.EqualFold(target.Hostname(), transport.allowed.Hostname()) ||
+		effectivePort(target) != effectivePort(transport.allowed) {
+		return fmt.Errorf("MCP network policy denied destination %s", target.Redacted())
+	}
+	return nil
+}
+
+func effectivePort(target *url.URL) string {
+	if target.Port() != "" {
+		return target.Port()
+	}
+	if strings.EqualFold(target.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(target.Scheme, "http") {
+		return "80"
+	}
+	return ""
 }
 
 func (m *Manager) Tools() []contract.Tool {

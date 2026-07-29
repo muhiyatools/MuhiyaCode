@@ -14,6 +14,9 @@ import (
 // not.
 func TestInspectCodeDedup(t *testing.T) {
 	root := t.TempDir()
+	if err := writeWorkspaceFile(root, "foo.go", "package foo\n\nfunc Baz() {}\n"); err != nil {
+		t.Fatal(err)
+	}
 	ledger := NewInspection(InspectionSnapshot{Version: 3}, nil, root)
 	intact := func(string) bool { return true }
 

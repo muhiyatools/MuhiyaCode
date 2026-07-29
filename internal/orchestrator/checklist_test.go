@@ -103,7 +103,7 @@ func checklistScope(engine *Engine) dispatchScope {
 	}
 	return dispatchScope{
 		counters: newCallCounters(),
-		dispatch: func(ctx context.Context, call contract.ToolCall) (string, error) {
+		dispatch: func(ctx context.Context, call contract.ToolCall) contract.ToolResult {
 			return engine.registry.Execute(ctx, call.ToolName(), json.RawMessage(call.ArgumentsJSON()), allowed)
 		},
 	}
@@ -118,7 +118,7 @@ func TestChecklistWriteFeedsThePanel(t *testing.T) {
 	body := "- [x] Read the loader\n- [ ] Add validation\n"
 	args, _ := json.Marshal(map[string]any{"path": "tasks.md", "content": body})
 	outcome := engine.gatedExecute(context.Background(), contract.NewToolCall("c1", "write_file", string(args)), definitions, Profile(contract.EffortLow), scope)
-	if outcome.Failed {
+	if outcome.IsFailure() {
 		t.Fatalf("write failed: %s", outcome.Output)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "tasks.md")); err != nil {
@@ -143,7 +143,7 @@ func TestChecklistFeedIgnoresUnrelatedWrites(t *testing.T) {
 	scope := checklistScope(engine)
 	definitions := engine.registry.Definitions(map[string]bool{"write_file": true})
 	args, _ := json.Marshal(map[string]any{"path": "main.go", "content": "package main\n"})
-	if outcome := engine.gatedExecute(context.Background(), contract.NewToolCall("c1", "write_file", string(args)), definitions, Profile(contract.EffortLow), scope); outcome.Failed {
+	if outcome := engine.gatedExecute(context.Background(), contract.NewToolCall("c1", "write_file", string(args)), definitions, Profile(contract.EffortLow), scope); outcome.IsFailure() {
 		t.Fatalf("write failed: %s", outcome.Output)
 	}
 	if len(*pushed) != 0 {

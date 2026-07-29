@@ -26,7 +26,7 @@ package orchestrator
 //	execution role gate          ✓  ✓  ✓  ✓  ✓   v1.1.0: main-loop mutations delegate; escalates after 3 (never repeats one line forever)
 //	continuation review mask     ✓  ✓  ✓  ✓  ✓   R-D2: review continuations carry the implementer's tool array but refuse mutations
 //	repeat limiter               ✓  ✓  ✓  ✓  ✓   blocks a specific repeated call, never the task (T033)
-//	duplicate-read dedupe        ✓  ✓  ✓  n/a ✓   benign optimization (Failed:false), NOT telemetered as friction (T033)
+//	duplicate-read dedupe        ✓  ✓  ✓  n/a ✓   benign successful optimization, NOT telemetered as friction (T033)
 //	dispatch arg-validation      ✓  ✓  ✓  ✓  ✓   H1: re-emit with well-formed args
 //	failed-call short-circuit    ✓  ✓  ✓  ✓  ✓   H2: change approach; telemetered as gate/repeat-failed-call
 //	subagent turn-cap            ✓  ✓  ✓  ✓  ✓   forced wrap-up, never a fatal error (INV-3/T035)

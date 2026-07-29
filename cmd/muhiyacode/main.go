@@ -12,6 +12,7 @@ import (
 
 	"github.com/muhiya/muhiyacode/internal/buildinfo"
 	"github.com/muhiya/muhiyacode/internal/command"
+	"github.com/muhiya/muhiyacode/internal/secrecy"
 )
 
 func main() {
@@ -22,7 +23,8 @@ func main() {
 	defer func() {
 		if r := recover(); r != nil {
 			path := filepath.Join(os.TempDir(), fmt.Sprintf("muhiyacode-crash-%d.log", os.Getpid()))
-			_ = os.WriteFile(path, []byte(fmt.Sprintf("MuhiyaCode %s (commit %s, built %s)\npanic: %v\n\n%s\n", buildinfo.Version, buildinfo.Commit, buildinfo.Date, r, debug.Stack())), 0o644)
+			report := fmt.Sprintf("MuhiyaCode %s (commit %s, built %s)\npanic: %v\n\n%s\n", buildinfo.Version, buildinfo.Commit, buildinfo.Date, r, debug.Stack())
+			_ = os.WriteFile(path, []byte(secrecy.Redact(report)), 0o600)
 			fmt.Fprintf(os.Stderr, "MuhiyaCode crashed. A crash report was saved to %s\n", path)
 			os.Exit(1)
 		}

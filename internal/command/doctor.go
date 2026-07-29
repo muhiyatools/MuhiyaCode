@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -11,7 +12,181 @@ import (
 	"time"
 
 	"github.com/muhiya/muhiyacode/internal/buildinfo"
+	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/gateway"
+	"github.com/muhiya/muhiyacode/internal/orchestrator"
+	"github.com/muhiya/muhiyacode/internal/state"
+	"github.com/muhiya/muhiyacode/internal/tui"
+	"github.com/muhiya/muhiyacode/internal/workspace"
+	"github.com/spf13/cobra"
 )
+
+type sessionReconciliation struct {
+	mutationID        string
+	mutationCertainty string
+	approvalID        string
+	approvalDecision  string
+}
+
+func (request sessionReconciliation) requested() bool {
+	return request.mutationID != "" || request.mutationCertainty != "" ||
+		request.approvalID != "" || request.approvalDecision != ""
+}
+
+func doctorRepairSession(cmd *cobra.Command, reconciliation sessionReconciliation) error {
+	paths, _, secrets, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	request := sessionRepairRequest{
+		paths: paths, secrets: secrets, workspace: inheritedWorkspace(cmd),
+		reconciliation: reconciliation,
+	}
+	return repairSessionHistory(cmd.Context(), cmd.OutOrStdout(), request)
+}
+
+type sessionRepairRequest struct {
+	paths          state.Paths
+	secrets        contract.Secrets
+	workspace      string
+	reconciliation sessionReconciliation
+}
+
+func repairSessionHistory(ctx context.Context, out io.Writer, request sessionRepairRequest) error {
+	target, err := openSessionRepairTarget(ctx, request)
+	if err != nil {
+		return err
+	}
+	defer target.db.Close()
+	if err := applySessionReconciliation(ctx, out, target, request.reconciliation); err != nil {
+		return err
+	}
+	messageCount, err := repairHistoryProjection(ctx, target)
+	if err != nil {
+		return err
+	}
+	usageCount, err := repairUsageProjection(ctx, target)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(
+		out,
+		"repaired session %s projections from the execution journal (%d messages, %d usage records)\n",
+		target.session.ID,
+		messageCount,
+		usageCount,
+	)
+	return nil
+}
+
+func applySessionReconciliation(
+	ctx context.Context,
+	out io.Writer,
+	target sessionRepairTarget,
+	request sessionReconciliation,
+) error {
+	if request.mutationID != "" {
+		certainty, err := parseMutationCertainty(request.mutationCertainty)
+		if err != nil {
+			return err
+		}
+		if err := target.db.ReconcileMutation(ctx, target.session.ID, request.mutationID, certainty); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "reconciled mutation %s as %s\n", request.mutationID, certainty)
+	} else if request.mutationCertainty != "" {
+		return fmt.Errorf("--mutation-certainty requires --ack-mutation")
+	}
+	if request.approvalID != "" {
+		approved, err := parseApprovalDecision(request.approvalDecision)
+		if err != nil {
+			return err
+		}
+		if err := target.db.ReconcileApproval(ctx, target.session.ID, request.approvalID, approved); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "reconciled approval %s as %s\n", request.approvalID, request.approvalDecision)
+	} else if request.approvalDecision != "" {
+		return fmt.Errorf("--approval-decision requires --ack-approval")
+	}
+	return nil
+}
+
+func parseMutationCertainty(raw string) (contract.MutationCertainty, error) {
+	certainty := contract.MutationCertainty(strings.ReplaceAll(strings.ToLower(strings.TrimSpace(raw)), "-", "_"))
+	switch certainty {
+	case contract.MutationCommitted, contract.MutationNotStarted, contract.MutationIndeterminate:
+		return certainty, nil
+	default:
+		return "", fmt.Errorf("--mutation-certainty must be committed, not_started, or indeterminate")
+	}
+}
+
+func parseApprovalDecision(raw string) (bool, error) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "approved":
+		return true, nil
+	case "denied":
+		return false, nil
+	default:
+		return false, fmt.Errorf("--approval-decision must be approved or denied")
+	}
+}
+
+func repairHistoryProjection(ctx context.Context, target sessionRepairTarget) (int, error) {
+	var legacy orchestrator.HistorySnapshot
+	legacyErr := target.sessions.ReadJSON(target.session.ID, "history.json", orchestrator.HistorySnapshot{Version: 1}, &legacy)
+	app := &Application{db: target.db, sessions: target.sessions}
+	recovered, err := app.loadJournalHistory(ctx, target.session, legacy, legacyErr)
+	if err != nil {
+		return 0, err
+	}
+	if err := target.sessions.WriteJSON(target.session.ID, "history.json", recovered); err != nil {
+		return 0, fmt.Errorf("write repaired history projection: %w", err)
+	}
+	return len(recovered.Messages), nil
+}
+
+func repairUsageProjection(ctx context.Context, target sessionRepairTarget) (int, error) {
+	legacy, legacyErr := target.sessions.UsageRecords(target.session.ID)
+	app := &Application{db: target.db, sessions: target.sessions}
+	recovered, err := app.loadJournalUsage(ctx, target.session, legacy, legacyErr)
+	if err != nil {
+		return 0, err
+	}
+	if err := target.sessions.WriteUsageRecords(target.session.ID, recovered); err != nil {
+		return 0, fmt.Errorf("write repaired usage projection: %w", err)
+	}
+	return len(recovered), nil
+}
+
+type sessionRepairTarget struct {
+	db       *state.DB
+	sessions *state.Sessions
+	session  contract.Session
+}
+
+func openSessionRepairTarget(ctx context.Context, request sessionRepairRequest) (sessionRepairTarget, error) {
+	root, err := workspace.CanonicalPath(request.workspace)
+	if err != nil {
+		return sessionRepairTarget{}, err
+	}
+	db, err := state.Open(ctx, request.paths)
+	if err != nil {
+		return sessionRepairTarget{}, err
+	}
+	session, exists, err := db.LatestSession(ctx, root)
+	if err != nil {
+		db.Close()
+		return sessionRepairTarget{}, err
+	}
+	if !exists {
+		db.Close()
+		return sessionRepairTarget{}, fmt.Errorf("no session exists for workspace %s", root)
+	}
+	sessions := &state.Sessions{DB: db, Secrets: request.secrets}
+	return sessionRepairTarget{db: db, sessions: sessions, session: session}, nil
+}
 
 // This file adds the Stability Overhaul T005 diagnostics to `muhiyacode doctor`
 // (defect D3): a self-identifying build line, launch-shadowing detection (the
@@ -31,6 +206,66 @@ func printBuildDiagnostic(out io.Writer) {
 	fmt.Fprintf(out, "%s build: MuhiyaCode %s (commit %s, built %s)\n", status, buildinfo.Version, buildinfo.Commit, buildinfo.Date)
 	if !stamped {
 		fmt.Fprintln(out, "     unstamped build — official builds inject a commit/date via scripts/build.ps1")
+	}
+}
+
+func printPendingMutationDiagnostic(ctx context.Context, out io.Writer, paths state.Paths, requestedWorkspace string) {
+	if strings.TrimSpace(requestedWorkspace) == "" {
+		requestedWorkspace, _ = os.Getwd()
+	}
+	root, err := workspace.CanonicalPath(requestedWorkspace)
+	if err != nil {
+		fmt.Fprintln(out, "warn execution journal:", err)
+		return
+	}
+	db, err := state.Open(ctx, paths)
+	if err != nil {
+		fmt.Fprintln(out, "warn execution journal:", err)
+		return
+	}
+	defer db.Close()
+	session, exists, err := db.LatestSession(ctx, root)
+	if err != nil {
+		fmt.Fprintln(out, "warn execution journal:", err)
+		return
+	}
+	if !exists {
+		fmt.Fprintln(out, "ok  execution journal: no workspace session")
+		return
+	}
+	health, err := db.ExecutionJournalHealth(ctx, session.ID)
+	if err != nil {
+		fmt.Fprintln(out, "warn execution journal:", err)
+		return
+	}
+	if len(health.PendingMutations) == 0 && len(health.IncompleteTasks) == 0 &&
+		len(health.PendingApprovals) == 0 && len(health.IncompleteTools) == 0 {
+		fmt.Fprintln(out, "ok  execution journal: no incomplete tasks, tools, approvals, or mutation intents")
+		return
+	}
+	if len(health.IncompleteTasks) > 0 {
+		fmt.Fprintf(out, "warn execution journal: %d task(s) started without a durable terminal record\n", len(health.IncompleteTasks))
+		for _, taskID := range health.IncompleteTasks {
+			fmt.Fprintf(out, "     task %s\n", taskID)
+		}
+	}
+	if len(health.IncompleteTools) > 0 {
+		fmt.Fprintf(out, "warn execution journal: %d tool dispatch(es) have no durable terminal record\n", len(health.IncompleteTools))
+		for _, started := range health.IncompleteTools {
+			fmt.Fprintf(out, "     %s %s (execution %s)\n", started.ToolName, started.Target, started.ExecutionID)
+		}
+	}
+	if len(health.PendingMutations) > 0 {
+		fmt.Fprintf(out, "warn execution journal: %d mutation intent(s) have no durable outcome; inspect targets before retrying\n", len(health.PendingMutations))
+		for _, intent := range health.PendingMutations {
+			fmt.Fprintf(out, "     %s %s (intent %s)\n", intent.ToolName, intent.Target, intent.IntentID)
+		}
+	}
+	if len(health.PendingApprovals) > 0 {
+		fmt.Fprintf(out, "warn execution journal: %d approval request(s) have no durable resolution\n", len(health.PendingApprovals))
+		for _, request := range health.PendingApprovals {
+			fmt.Fprintf(out, "     %s %s (approval %s)\n", request.Action, request.Target, request.RequestID)
+		}
 	}
 }
 
@@ -176,4 +411,117 @@ func hasGitRepo(dir string) bool {
 		}
 		dir = parent
 	}
+}
+
+func newDoctorCommand() *cobra.Command {
+	var offline bool
+	var reconciliation sessionReconciliation
+	command := &cobra.Command{
+		Use:   "doctor [rtl|repair-session]",
+		Short: "Validate local setup and endpoint access",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			repairRequested := len(args) == 1 && strings.EqualFold(args[0], "repair-session")
+			if reconciliation.requested() && !repairRequested {
+				return errors.New("reconciliation flags require `doctor repair-session`")
+			}
+			if len(args) == 1 {
+				switch {
+				case strings.EqualFold(args[0], "rtl"):
+					return doctorRTL(cmd)
+				case strings.EqualFold(args[0], "repair-session"):
+					return doctorRepairSession(cmd, reconciliation)
+				}
+			}
+			return doctor(cmd, offline)
+		},
+	}
+	command.Flags().BoolVar(&offline, "offline", false, "skip endpoint and tool-call diagnostics")
+	command.Flags().StringVar(&reconciliation.mutationID, "ack-mutation", "", "acknowledge a pending mutation intent by ID")
+	command.Flags().StringVar(&reconciliation.mutationCertainty, "mutation-certainty", "", "committed, not_started, or indeterminate")
+	command.Flags().StringVar(&reconciliation.approvalID, "ack-approval", "", "acknowledge a pending approval request by ID")
+	command.Flags().StringVar(&reconciliation.approvalDecision, "approval-decision", "", "approved or denied")
+	return command
+}
+
+func doctor(cmd *cobra.Command, offline bool) error {
+	out := cmd.OutOrStdout()
+	fmt.Fprintln(out, "MuhiyaCode diagnostics")
+	printBuildDiagnostic(out)
+	printShadowDiagnostic(out)
+	for _, line := range workspaceDiagnostics(inheritedWorkspace(cmd)) {
+		fmt.Fprintln(out, line)
+	}
+	paths, settings, secrets, err := loadConfig()
+	if err != nil {
+		fmt.Fprintln(out, "fail config:", err)
+		return err
+	}
+	fmt.Fprintln(out, "ok  home:", paths.Home)
+	fmt.Fprintln(out, "ok  apiKey:", maskAPIKey(secrets.ProviderAPIKey))
+	printPendingMutationDiagnostic(cmd.Context(), out, paths, inheritedWorkspace(cmd))
+	shell, shellErr := workspace.ChooseShell(settings.Shell.Preferred)
+	if shellErr != nil {
+		fmt.Fprintln(out, "fail shell:", shellErr)
+	} else {
+		fmt.Fprintln(out, "ok  shell:", shell)
+	}
+	active, activeOK := state.ActiveModel(settings)
+	if secrets.ProviderAPIKey == "" || !activeOK || active.ContextLimit <= 0 || settings.Provider.BaseURL == "" {
+		message := "provider config incomplete; set baseUrl, apiKey, model, and contextLimit"
+		fmt.Fprintln(out, "fail provider:", message)
+		if shellErr != nil {
+			return errors.Join(shellErr, errors.New(message))
+		}
+		return errors.New(message)
+	}
+	fmt.Fprintf(out, "ok  provider: %s (%s, %d context)\n", settings.Provider.BaseURL, active.ID, active.ContextLimit)
+	if offline {
+		return shellErr
+	}
+	provider := gateway.NewOpenAICompatible(gateway.Config{Settings: settings, APIKey: secrets.ProviderAPIKey, MaxRetries: 1, RequestLifetime: 45 * time.Second})
+	response, endpointErr := provider.Chat(cmd.Context(), contract.ChatRequest{
+		ModelID: active.ID, Reasoning: contract.ReasoningLow, MaxTokens: 300,
+		Messages: []contract.Message{{Role: contract.RoleSystem, Content: "Call diagnostics_ping with value ok."}, {Role: contract.RoleUser, Content: "Run the diagnostic tool now."}},
+		Tools:    []contract.ToolDefinition{{Type: "function", Function: contract.FunctionDefinition{Name: "diagnostics_ping", Description: "Return a diagnostic ping.", Parameters: map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}}, "required": []string{"value"}, "additionalProperties": false}}}},
+	})
+	if endpointErr != nil {
+		fmt.Fprintln(out, "fail endpoint:", endpointErr)
+		return errors.Join(shellErr, endpointErr)
+	}
+	for _, call := range response.ToolCalls {
+		if call.ToolName() == "diagnostics_ping" {
+			fmt.Fprintln(out, "ok  endpoint: auth, streaming, and structured tool calls work")
+			return shellErr
+		}
+	}
+	fmt.Fprintln(out, "fail endpoint: response streamed but omitted diagnostics_ping")
+	return errors.Join(shellErr, errors.New("endpoint did not return a structured tool call"))
+}
+
+func doctorRTL(cmd *cobra.Command) error {
+	_, settings, _, err := loadConfig()
+	if err != nil {
+		return err
+	}
+	sample := "مرحباً، هل تستطيع تنفيذ مشاريعي وطلباتي البرمجية؟"
+	mixed := `راجع workspace: F:\MuhiyaCode Agent\dist ثم نفّذ الاختبارات.`
+	response := "نعم، أستطيع مساعدتك في تنفيذ المشاريع البرمجية المتاحة."
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "MuhiyaCode RTL diagnostics\nmode: %s  align: %s\n", settings.RTL.Mode, settings.RTL.Align)
+	fmt.Fprintf(out, "terminal BiDi control emitted: %q\n\n", tui.TerminalBiDiControl(settings.RTL.Mode))
+	fmt.Fprintln(out, "Native Arabic (logical order — what the model receives):")
+	fmt.Fprintln(out, sample)
+	fmt.Fprintln(out, response)
+	fmt.Fprintln(out, "\nMixed Arabic and path:")
+	fmt.Fprintln(out, tui.RenderRTL(sample, "visual"))
+	fmt.Fprintln(out, tui.RenderRTL(response, "visual"))
+	fmt.Fprintln(out, "\nMixed Arabic and path:")
+	fmt.Fprintln(out, tui.RenderRTL(mixed, settings.RTL.Mode))
+	if _, ok := tui.CopyRoundTrip(sample, "visual"); ok {
+		fmt.Fprintln(out, "\ncopy round-trip: OK (selecting the shaped text yields the original logical text)")
+	} else {
+		fmt.Fprintln(out, "\ncopy round-trip: DEGRADED (mixed-direction line; whole-message copy is still exact)")
+	}
+	return nil
 }

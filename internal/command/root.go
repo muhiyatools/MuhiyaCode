@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,7 +23,6 @@ import (
 	"github.com/muhiya/muhiyacode/internal/state"
 	"github.com/muhiya/muhiyacode/internal/tui"
 	"github.com/muhiya/muhiyacode/internal/updatecheck"
-	"github.com/muhiya/muhiyacode/internal/workspace"
 	"github.com/spf13/cobra"
 )
 
@@ -32,9 +32,17 @@ func Execute(ctx context.Context, args []string) error {
 	return command.ExecuteContext(ctx)
 }
 
+func optionalSeed(value int) *int {
+	if value < 0 {
+		return nil
+	}
+	return &value
+}
+
 func NewRootCommand() *cobra.Command {
 	var printPrompt, cwd string
-	var simple, fresh, noMCP bool
+	var seed int
+	var simple, fresh, noMCP, unsafeFullAccess, jsonl bool
 	root := &cobra.Command{
 		Use:           "muhiyacode [prompt...]",
 		Short:         "MuhiyaCode terminal coding agent",
@@ -45,9 +53,12 @@ func NewRootCommand() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prompt := strings.TrimSpace(strings.Join(args, " "))
 			if printPrompt != "" {
-				return runOneShot(cmd, cwd, printPrompt, fresh, noMCP)
+				return runOneShot(cmd, cwd, printPrompt, fresh, noMCP, unsafeFullAccess, jsonl, optionalSeed(seed))
 			}
-			return runInteractive(cmd, interactiveOptions{Workspace: cwd, Prompt: prompt, Fresh: fresh, NoMCP: noMCP, Simple: simple})
+			if jsonl {
+				return errors.New("--jsonl requires a one-shot prompt supplied with --print")
+			}
+			return runInteractive(cmd, interactiveOptions{Workspace: cwd, Prompt: prompt, Fresh: fresh, NoMCP: noMCP, Simple: simple, Seed: optionalSeed(seed)})
 		},
 	}
 	// Commit/Date are set by the release build's ldflags (.goreleaser.yaml);
@@ -57,17 +68,21 @@ func NewRootCommand() *cobra.Command {
 	// working release metadata for no reason).
 	root.SetVersionTemplate(fmt.Sprintf("MuhiyaCode {{.Version}} (commit %s, built %s)\n", buildinfo.Commit, buildinfo.Date))
 	root.PersistentFlags().StringVarP(&cwd, "cwd", "C", "", "workspace directory")
+	root.PersistentFlags().IntVar(&seed, "seed", -1, "provider seed for reproducible runs (when supported)")
 	root.Flags().StringVarP(&printPrompt, "print", "p", "", "run one-shot prompt and exit")
 	root.Flags().BoolVar(&simple, "simple", false, "use the line interface instead of the full TUI")
 	root.Flags().BoolVar(&fresh, "new", false, "start a new session instead of reopening the latest workspace session")
 	root.Flags().BoolVar(&noMCP, "no-mcp", false, "start without connecting MCP servers")
-	root.AddCommand(newLoginCommand(), newLogoutCommand(), newResumeCommand(), newSessionsCommand(), newConfigCommand(), newMCPCommand(), newDoctorCommand(), newBenchCommand())
+	root.Flags().BoolVar(&unsafeFullAccess, "unsafe-full-access", false, "allow unrestricted unattended file and shell tools in one-shot mode")
+	root.Flags().BoolVar(&jsonl, "jsonl", false, "emit versioned JSON Lines events in one-shot mode")
+	root.AddCommand(newLoginCommand(), newLogoutCommand(), newResumeCommand(), newSessionsCommand(), newCheckpointCommand(), newProcessCommand(), newModelCommand(), newConfigCommand(), newMCPCommand(), newDoctorCommand(), newBenchmarkCommand(), newDocsCommand())
 	return root
 }
 
 type interactiveOptions struct {
 	Workspace, SessionID, Prompt string
 	Fresh, NoMCP, Simple         bool
+	Seed                         *int
 }
 
 func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
@@ -77,11 +92,17 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 	app, err := openApplicationCore(ApplicationOptions{
 		Context: cmd.Context(), Workspace: options.Workspace, SessionID: options.SessionID,
 		NewSession: options.Fresh, Title: promptTitle(options.Prompt), Callbacks: bridge.Callbacks(), DisableMCP: options.NoMCP,
+		Seed: options.Seed,
 	})
 	if err != nil {
 		return err
 	}
 	defer app.Close()
+	// UMI-06: Auto Accept is no longer reset at interactive startup. The
+	// session runtime record is the permission authority: a resumed session
+	// restores its saved mode, and a new session inherits the global default
+	// (Normal unless the user explicitly configured a trusted default).
+	startupNotice := ""
 	// Ask the registry whether a newer version exists, on its own goroutine so
 	// startup never waits on it. Cached for a day, silent on failure, and the
 	// result is read at hydration — by then it has either landed or it has not,
@@ -96,6 +117,12 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 		}
 		// One-shot startup notices are read from the now-live engine: config gaps,
 		notice := configurationNotice(*app.Settings(), app.secrets)
+		if recovery := strings.TrimSpace(app.Runtime().RecoveryNotice); recovery != "" {
+			if notice != "" {
+				notice += " "
+			}
+			notice += recovery
+		}
 		latest := ""
 		select {
 		case latest = <-updateCh:
@@ -111,34 +138,63 @@ func runInteractive(cmd *cobra.Command, options interactiveOptions) error {
 		Runtime: tui.Runtime{Settings: app.settings, Session: app.session},
 		Bridge:  bridge, Version: buildinfo.Version,
 		InitialPrompt: options.Prompt, Context: cmd.Context(), Simple: options.Simple,
-		Hydrate: hydrate,
+		Hydrate: hydrate, Notice: startupNotice,
 	})
 }
 
-func runOneShot(cmd *cobra.Command, cwd, prompt string, fresh, noMCP bool) error {
+func runOneShot(cmd *cobra.Command, cwd, prompt string, fresh, noMCP, unsafeFullAccess, jsonl bool, seed *int) error {
+	var emitter *jsonlEmitter
 	callbacks := newConsoleCallbacks(cmd.InOrStdin(), cmd.OutOrStdout(), cmd.ErrOrStderr())
-	app, err := OpenApplication(ApplicationOptions{Context: cmd.Context(), Workspace: cwd, NewSession: fresh, Title: promptTitle(prompt), Callbacks: callbacks, DisableMCP: noMCP})
+	if jsonl {
+		emitter = newJSONLEmitter(cmd.OutOrStdout())
+		callbacks = emitter.callbacks()
+	}
+	app, err := OpenApplication(ApplicationOptions{Context: cmd.Context(), Workspace: cwd, NewSession: fresh, Title: promptTitle(prompt), Callbacks: callbacks, DisableMCP: noMCP, Seed: seed})
 	if err != nil {
 		return err
 	}
 	defer app.Close()
+	if emitter != nil {
+		secretValues := mcpSecretValues(app.paths)
+		emitter.SetRedactor(func(value string) string {
+			return state.Redact(value, app.secrets, secretValues...)
+		})
+	}
 	if notice := configurationNotice(*app.Settings(), app.secrets); notice != "" {
 		return errors.New(notice)
 	}
-	answer, stats, err := app.Runtime().Engine.Run(cmd.Context(), appcore.AssemblePrompt(cmd.Context(), prompt, nil, nil, nil))
-	if err != nil {
-		// Feature 011 T004a: the benchmark runner needs a summary even for a
-		// failed run (recorded as completed:false), before the error propagates.
-		if os.Getenv("MUHIYA_BENCH_JSON") == "1" {
-			emitBenchSummary(cmd.OutOrStdout(), stats, err)
+	if app.Settings().PermissionMode == contract.PermissionAutoAccept && !unsafeFullAccess {
+		return errors.New("saved auto-accept/full-access mode requires explicit --unsafe-full-access for a non-interactive run")
+	}
+	if unsafeFullAccess {
+		app.Runtime().Engine.SetPermissionMode(contract.PermissionAutoAccept)
+		if app.guard != nil {
+			if err := app.guard.SetMode(contract.PermissionAutoAccept); err != nil {
+				return err
+			}
 		}
+	}
+	answer, stats, err := app.Runtime().Engine.Run(cmd.Context(), appcore.AssemblePrompt(cmd.Context(), prompt, nil, nil, nil))
+	if emitter != nil {
+		emitter.terminal(answer, stats, err)
+		if emitErr := emitter.Err(); emitErr != nil {
+			return emitErr
+		}
+	}
+	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintln(cmd.OutOrStdout(), strings.TrimSpace(answer)); err != nil {
-		return err
+	if emitter == nil {
+		if _, err := fmt.Fprintln(cmd.OutOrStdout(), strings.TrimSpace(answer)); err != nil {
+			return err
+		}
 	}
-	if os.Getenv("MUHIYA_BENCH_JSON") == "1" {
-		emitBenchSummary(cmd.OutOrStdout(), stats, nil)
+	if stats.Status != contract.TaskStatusSucceeded {
+		reason := stats.TerminatedReason
+		if reason == "" {
+			reason = stats.StopCause
+		}
+		return &TaskExitError{Status: stats.Status, Reason: reason}
 	}
 	return nil
 }
@@ -155,55 +211,6 @@ func newResumeCommand() *cobra.Command {
 	}
 	command.Flags().BoolVar(&simple, "simple", false, "use the line interface")
 	command.Flags().BoolVar(&noMCP, "no-mcp", false, "do not connect MCP servers")
-	return command
-}
-
-func newSessionsCommand() *cobra.Command {
-	var all bool
-	command := &cobra.Command{
-		Use:   "sessions",
-		Short: "List stored sessions",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			paths, err := state.EnsurePaths()
-			if err != nil {
-				return err
-			}
-			db, err := state.Open(cmd.Context(), paths)
-			if err != nil {
-				return err
-			}
-			defer db.Close()
-			filter := ""
-			if !all {
-				filter = inheritedWorkspace(cmd)
-				if filter != "" {
-					filter, err = workspace.CanonicalPath(filter)
-				} else {
-					filter, err = os.Getwd()
-					if err == nil {
-						filter, err = workspace.CanonicalPath(filter)
-					}
-				}
-				if err != nil {
-					return err
-				}
-			}
-			sessions, err := db.ListSessions(cmd.Context(), filter, 100)
-			if err != nil {
-				return err
-			}
-			if len(sessions) == 0 {
-				_, err = fmt.Fprintln(cmd.OutOrStdout(), "No sessions found.")
-				return err
-			}
-			for _, session := range sessions {
-				fmt.Fprintf(cmd.OutOrStdout(), "%s  %s  %s  %s\n", session.ID, session.UpdatedAt.Local().Format(time.RFC3339), session.Title, session.WorkspacePath)
-			}
-			return nil
-		},
-	}
-	command.Flags().BoolVar(&all, "all", false, "list sessions from every workspace")
 	return command
 }
 
@@ -272,6 +279,11 @@ func newConfigCommand() *cobra.Command {
 			provider := gateway.NewOpenAICompatible(gateway.Config{Settings: settings, APIKey: secrets.ProviderAPIKey})
 			models, err := provider.ListModels(cmd.Context())
 			if err != nil {
+				return err
+			}
+			if err := state.SaveModelCatalog(state.ModelCatalogCache{
+				Version: 2, RefreshedAt: time.Now().UTC(), Models: models,
+			}, paths); err != nil {
 				return err
 			}
 			stranded := addDiscoveredModels(&settings, models)
@@ -407,107 +419,6 @@ func newMCPCommand() *cobra.Command {
 	return command
 }
 
-func newDoctorCommand() *cobra.Command {
-	var offline bool
-	command := &cobra.Command{
-		Use:   "doctor [rtl]",
-		Short: "Validate local setup and endpoint access",
-		Args:  cobra.MaximumNArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 1 && strings.EqualFold(args[0], "rtl") {
-				return doctorRTL(cmd)
-			}
-			return doctor(cmd, offline)
-		},
-	}
-	command.Flags().BoolVar(&offline, "offline", false, "skip endpoint and tool-call diagnostics")
-	return command
-}
-
-func doctor(cmd *cobra.Command, offline bool) error {
-	out := cmd.OutOrStdout()
-	fmt.Fprintln(out, "MuhiyaCode diagnostics")
-	// T005: the always-useful checks print FIRST, before any config load can fail
-	// out — a misconfigured user is exactly who runs `doctor`, and they still need
-	// the build identity, launch-shadow warning, and workspace state.
-	printBuildDiagnostic(out)
-	printShadowDiagnostic(out)
-	for _, line := range workspaceDiagnostics(inheritedWorkspace(cmd)) {
-		fmt.Fprintln(out, line)
-	}
-	paths, settings, secrets, err := loadConfig()
-	if err != nil {
-		fmt.Fprintln(out, "fail config:", err)
-		return err
-	}
-	fmt.Fprintln(out, "ok  home:", paths.Home)
-	fmt.Fprintln(out, "ok  apiKey:", maskAPIKey(secrets.ProviderAPIKey))
-	shell, shellErr := workspace.ChooseShell(settings.Shell.Preferred)
-	if shellErr != nil {
-		fmt.Fprintln(out, "fail shell:", shellErr)
-	} else {
-		fmt.Fprintln(out, "ok  shell:", shell)
-	}
-	active, activeOK := state.ActiveModel(settings)
-	if secrets.ProviderAPIKey == "" || !activeOK || active.ContextLimit <= 0 || settings.Provider.BaseURL == "" {
-		message := "provider config incomplete; set baseUrl, apiKey, model, and contextLimit"
-		fmt.Fprintln(out, "fail provider:", message)
-		if shellErr != nil {
-			return errors.Join(shellErr, errors.New(message))
-		}
-		return errors.New(message)
-	}
-	fmt.Fprintf(out, "ok  provider: %s (%s, %d context)\n", settings.Provider.BaseURL, active.ID, active.ContextLimit)
-	if offline {
-		return shellErr
-	}
-	provider := gateway.NewOpenAICompatible(gateway.Config{Settings: settings, APIKey: secrets.ProviderAPIKey, MaxRetries: 1, RequestLifetime: 45 * time.Second})
-	response, endpointErr := provider.Chat(cmd.Context(), contract.ChatRequest{
-		ModelID: active.ID, Reasoning: contract.ReasoningLow, MaxTokens: 300,
-		Messages: []contract.Message{{Role: contract.RoleSystem, Content: "Call diagnostics_ping with value ok."}, {Role: contract.RoleUser, Content: "Run the diagnostic tool now."}},
-		Tools:    []contract.ToolDefinition{{Type: "function", Function: contract.FunctionDefinition{Name: "diagnostics_ping", Description: "Return a diagnostic ping.", Parameters: map[string]any{"type": "object", "properties": map[string]any{"value": map[string]any{"type": "string"}}, "required": []string{"value"}, "additionalProperties": false}}}},
-	})
-	if endpointErr != nil {
-		fmt.Fprintln(out, "fail endpoint:", endpointErr)
-		return errors.Join(shellErr, endpointErr)
-	}
-	for _, call := range response.ToolCalls {
-		if call.ToolName() == "diagnostics_ping" {
-			fmt.Fprintln(out, "ok  endpoint: auth, streaming, and structured tool calls work")
-			return shellErr
-		}
-	}
-	fmt.Fprintln(out, "fail endpoint: response streamed but omitted diagnostics_ping")
-	return errors.Join(shellErr, errors.New("endpoint did not return a structured tool call"))
-}
-
-func doctorRTL(cmd *cobra.Command) error {
-	_, settings, _, err := loadConfig()
-	if err != nil {
-		return err
-	}
-	sample := "مرحباً، هل تستطيع تنفيذ مشاريعي وطلباتي البرمجية؟"
-	mixed := `راجع workspace: F:\MuhiyaCode Agent\dist ثم نفّذ الاختبارات.`
-	response := "نعم، أستطيع مساعدتك في تنفيذ المشاريع البرمجية المتاحة."
-	out := cmd.OutOrStdout()
-	fmt.Fprintf(out, "MuhiyaCode RTL diagnostics\nmode: %s  align: %s\n", settings.RTL.Mode, settings.RTL.Align)
-	fmt.Fprintf(out, "terminal BiDi control emitted: %q\n\n", tui.TerminalBiDiControl(settings.RTL.Mode))
-	fmt.Fprintln(out, "Native Arabic (logical order — what the model receives):")
-	fmt.Fprintln(out, sample)
-	fmt.Fprintln(out, response)
-	fmt.Fprintln(out, "\nVisual fallback (shaped + reordered — what the app draws):")
-	fmt.Fprintln(out, tui.RenderRTL(sample, "visual"))
-	fmt.Fprintln(out, tui.RenderRTL(response, "visual"))
-	fmt.Fprintln(out, "\nMixed Arabic and path:")
-	fmt.Fprintln(out, tui.RenderRTL(mixed, settings.RTL.Mode))
-	if _, ok := tui.CopyRoundTrip(sample, "visual"); ok {
-		fmt.Fprintln(out, "\ncopy round-trip: OK (selecting the shaped text yields the original logical text)")
-	} else {
-		fmt.Fprintln(out, "\ncopy round-trip: DEGRADED (mixed-direction line; whole-message copy is still exact)")
-	}
-	return nil
-}
-
 func loadConfig() (state.Paths, contract.Settings, contract.Secrets, error) {
 	paths, err := state.EnsurePaths()
 	if err != nil {
@@ -516,6 +427,13 @@ func loadConfig() (state.Paths, contract.Settings, contract.Secrets, error) {
 	settings, err := state.LoadSettings(paths)
 	if err != nil {
 		return paths, contract.Settings{}, contract.Secrets{}, err
+	}
+	catalog, err := state.LoadModelCatalog(paths)
+	if err != nil {
+		return paths, contract.Settings{}, contract.Secrets{}, err
+	}
+	if len(catalog.Models) > 0 {
+		addDiscoveredModels(&settings, append([]contract.Model(nil), catalog.Models...))
 	}
 	secrets, err := state.LoadSecrets(paths)
 	return paths, settings, secrets, err
@@ -646,7 +564,12 @@ func newConsoleCallbacks(input io.Reader, _ io.Writer, errorsOut io.Writer) cont
 			answer = strings.ToLower(strings.TrimSpace(answer))
 			return answer == "y" || answer == "yes", nil
 		},
-		Ask: func(_ context.Context, questions []contract.Question) ([]contract.Answer, error) {
+		Ask: func(ctx context.Context, questions []contract.Question) ([]contract.Answer, error) {
+			if !readerIsTerminal(input) {
+				return nil, errors.New("user input is required, but stdin is non-interactive")
+			}
+			mu.Lock()
+			defer mu.Unlock()
 			answers := make([]contract.Answer, 0, len(questions))
 			for _, question := range questions {
 				index := 0
@@ -656,9 +579,38 @@ func newConsoleCallbacks(input io.Reader, _ io.Writer, errorsOut io.Writer) cont
 						break
 					}
 				}
-				if len(question.Choices) > 0 {
-					answers = append(answers, contract.Answer{Question: question.Question, Choice: question.Choices[index], Index: index})
+				if len(question.Choices) == 0 {
+					return nil, errors.New("question has no choices")
 				}
+				fmt.Fprintln(errorsOut, question.Question)
+				for i, choice := range question.Choices {
+					recommended := ""
+					if choice.Recommended {
+						recommended = " (recommended)"
+					}
+					fmt.Fprintf(errorsOut, "  %d. %s%s — %s\n", i+1, choice.Label, recommended, choice.Description)
+				}
+				fmt.Fprintf(errorsOut, "Choose [%d]: ", index+1)
+				line, err := reader.ReadString('\n')
+				if err != nil && !errors.Is(err, io.EOF) {
+					return nil, err
+				}
+				if errors.Is(err, io.EOF) && strings.TrimSpace(line) == "" {
+					return nil, errors.New("question input ended without a selection")
+				}
+				select {
+				case <-ctx.Done():
+					return nil, ctx.Err()
+				default:
+				}
+				if value := strings.TrimSpace(line); value != "" {
+					selected, parseErr := strconv.Atoi(value)
+					if parseErr != nil || selected < 1 || selected > len(question.Choices) {
+						return nil, fmt.Errorf("invalid choice %q; expected 1-%d", value, len(question.Choices))
+					}
+					index = selected - 1
+				}
+				answers = append(answers, contract.Answer{Question: question.Question, Choice: question.Choices[index], Index: index})
 			}
 			return answers, nil
 		},

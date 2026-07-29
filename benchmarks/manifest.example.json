@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "revision": "working-tree",
+  "environmentImage": "replace-with-container-image-digest",
+  "modelId": "replace-with-exact-model-id",
+  "provider": "openai-compatible",
+  "seed": 7,
+  "sandbox": "workspace-write-network-denied",
+  "permission": "normal",
+  "cases": [
+    {
+      "name": "go-smoke",
+      "fixture": "smoke-fixture",
+      "prompt": "Fix the broken Add function and verify the tests.",
+      "timeoutSeconds": 600,
+      "graderCommand": "go test ./..."
+    }
+  ]
+}

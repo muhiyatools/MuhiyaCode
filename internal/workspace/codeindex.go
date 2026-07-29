@@ -6,8 +6,6 @@ import (
 	"go/parser"
 	"go/token"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 )
 
@@ -61,6 +59,21 @@ type ReferenceEntry struct {
 // outline including package name, imports, and all top-level declarations.
 // Even on parse errors the returned outline may contain partial results.
 func ParseFileOutline(fset *token.FileSet, path string) (outline *FileOutline, err error) {
+	source, readErr := os.ReadFile(path)
+	if readErr != nil {
+		return nil, fmt.Errorf("codeindex: read file %s: %w", path, readErr)
+	}
+	return ParseFileOutlineSource(fset, path, source)
+}
+
+// ParseFileOutlineSource parses an immutable source snapshot. Callers that
+// already read a file can avoid a second read, and content-addressed caches can
+// safely reuse its result even when a file is externally replaced with the
+// same size and modification time.
+func ParseFileOutlineSource(fset *token.FileSet, path string, source []byte) (outline *FileOutline, err error) {
+	if !strings.HasSuffix(strings.ToLower(path), ".go") {
+		return ParsePolyglotOutlineSource(path, source)
+	}
 	outline = &FileOutline{
 		Path:    path,
 		Symbols: []SymbolEntry{},
@@ -77,7 +90,7 @@ func ParseFileOutline(fset *token.FileSet, path string) (outline *FileOutline, e
 		return nil, fmt.Errorf("codeindex: fset must not be nil")
 	}
 
-	file, parseErr := parser.ParseFile(fset, path, nil, parser.AllErrors)
+	file, parseErr := parser.ParseFile(fset, path, source, parser.AllErrors)
 	if parseErr != nil {
 		outline.Errors = append(outline.Errors, parseErr.Error())
 	}
@@ -517,7 +530,11 @@ func FindReferences(fset *token.FileSet, paths []string, symbol string, maxResul
 			break
 		}
 
-		file, err := parser.ParseFile(fset, p, nil, parser.AllErrors)
+		source, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		file, err := parser.ParseFile(fset, p, source, parser.AllErrors)
 		if file == nil {
 			_ = err
 			continue
@@ -536,7 +553,7 @@ func FindReferences(fset *token.FileSet, paths []string, symbol string, maxResul
 			}
 
 			pos := fset.Position(ident.Pos())
-			ctx := readSourceLine(p, pos.Line)
+			ctx := sourceLine(source, pos.Line)
 
 			results = append(results, ReferenceEntry{
 				File:    p,
@@ -557,60 +574,14 @@ func FindReferences(fset *token.FileSet, paths []string, symbol string, maxResul
 
 // collectGoFiles gathers Go source files from the given path.
 func collectGoFiles(path string, includeTests bool) ([]string, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return nil, fmt.Errorf("codeindex: %w", err)
-	}
-
-	if !info.IsDir() {
-		if !strings.HasSuffix(path, ".go") {
-			return nil, fmt.Errorf("inspect_code only supports Go source files (.go). Use grep_search or list_files for Python, JavaScript, TypeScript, Rust, and other languages.")
-		}
-		return []string{path}, nil
-	}
-
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return nil, fmt.Errorf("codeindex: reading directory %s: %w", path, err)
-	}
-
-	var files []string
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".go") {
-			continue
-		}
-		if !includeTests && strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		files = append(files, filepath.Join(path, name))
-	}
-
-	sort.Strings(files)
-
-	const maxFiles = 100
-	if len(files) > maxFiles {
-		files = files[:maxFiles]
-	}
-
-	return files, nil
+	return CollectSourceFiles(path, includeTests)
 }
 
-// readSourceLine reads a specific 1-indexed line from a file.
-func readSourceLine(path string, line int) string {
+func sourceLine(source []byte, line int) string {
 	if line <= 0 {
 		return ""
 	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return ""
-	}
-
-	lines := strings.Split(string(data), "\n")
+	lines := strings.Split(string(source), "\n")
 	if line > len(lines) {
 		return ""
 	}

@@ -37,6 +37,8 @@ func TestNoBlockingEngineCallsOnUIThread(t *testing.T) {
 		"Usage":            "read-only usage copy",
 		"UsageAggregate":   "read-only aggregate copy",
 		"HarnessEvents":    "read-only ring copy (T012)",
+		"DiscoveredModels": "read-only model list copy",
+		"CatalogModelName": "read-only model name lookup",
 		// Fast in-memory mutations (no persistence I/O, no callback/Send).
 		"QueueUserMessage":  "mu-guarded steering append",
 		"SetEffort":         "liveSettingsMu-guarded field set",

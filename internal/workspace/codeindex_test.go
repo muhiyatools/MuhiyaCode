@@ -323,13 +323,13 @@ func TestExecInspectCode_MissingSymbol(t *testing.T) {
 	}
 }
 
-func TestInspectCodePythonError(t *testing.T) {
+func TestInspectCodePythonSupported(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "test.py")
-	os.WriteFile(path, []byte(""), 0o644)
-	_, err := collectGoFiles(path, false)
-	if err == nil || !strings.Contains(err.Error(), "grep_search") {
-		t.Errorf("expected grep_search guidance in error, got: %v", err)
+	os.WriteFile(path, []byte("def hello(): pass"), 0o644)
+	files, err := collectGoFiles(path, false)
+	if err != nil || len(files) != 1 {
+		t.Errorf("expected python file to be collected, got err: %v, files: %v", err, files)
 	}
 }
 

@@ -339,12 +339,14 @@ func (m *Model) ensureTick() tea.Cmd {
 var commands = []commandEntry{
 	{"/reasoning", "Set reasoning effort (low–max)"},
 	{"/resume", "Resume a workspace session"}, {"/new", "Start a new session"},
-	{"/context", "Inspect context usage"}, {"/compact", "Compact conversation"},
+	{"/model", "Select or switch active model"},
+	{"/context", "Inspect context usage"}, {"/requests", "Inspect model requests and cache lineage"}, {"/compact", "Compact conversation"},
 	{"/login", "Store API key"}, {"/logout", "Log Out of Account"},
 	{"/usage", "View account usage"},
 	{"/skills", "Assign skills to next prompt"}, {"/mcp", "Manage MCP servers"},
 	{"/paste", "Inspect or remove pasted blocks"},
-	{"/diff", "Summarize git diff"}, {"/rewind", "Restore latest checkpoint"},
+	{"/diff", "Summarize git diff"}, {"/rewind", "Restore a selected checkpoint"},
+	{"/processes", "List and stop background processes"},
 }
 
 func NewModel(options Options) *Model {

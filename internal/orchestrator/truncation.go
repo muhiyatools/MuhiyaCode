@@ -98,7 +98,7 @@ func (e *Engine) truncatedOutcomes(sc dispatchScope, cut []contract.ToolCall) []
 		if sc.onEnd != nil {
 			sc.onEnd(call, output)
 		}
-		outcomes = append(outcomes, toolOutcome{Call: call, Output: output, Failed: true, GateRejected: true})
+		outcomes = append(outcomes, toolOutcome{Call: call, Status: contract.ToolOutcomeRejected, Output: output, ErrorText: output, MutationCertainty: contract.MutationNotStarted})
 	}
 	return outcomes
 }

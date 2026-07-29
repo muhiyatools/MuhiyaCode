@@ -22,8 +22,8 @@ func (t *failingTool) Definition() contract.ToolDefinition {
 	}, nil)
 }
 
-func (t *failingTool) Execute(_ context.Context, _ json.RawMessage) (string, error) {
-	return "", fmt.Errorf("simulated failure")
+func (t *failingTool) Execute(_ context.Context, _ json.RawMessage) contract.ToolResult {
+	return contract.AdaptToolResult("", fmt.Errorf("simulated failure"))
 }
 
 // repeatedFailingCalls builds n responses, each carrying two GENUINELY failing
@@ -71,6 +71,9 @@ func TestDistinctFailureTerminatorStopsTask(t *testing.T) {
 	}
 	if stats.TerminatedReason == "" || !strings.Contains(stats.TerminatedReason, "repeated") {
 		t.Fatalf("terminator reason wrong: %q", stats.TerminatedReason)
+	}
+	if stats.Status != contract.TaskStatusIncomplete {
+		t.Fatalf("breaker outcome must be incomplete, got %q", stats.Status)
 	}
 }
 

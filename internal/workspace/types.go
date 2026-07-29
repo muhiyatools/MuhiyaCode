@@ -7,6 +7,7 @@ package workspace
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"time"
@@ -84,10 +85,12 @@ type Options struct {
 	Status         func(string)
 	KnownFile      KnownFile
 
-	PreferredShell string
-	ShellTimeout   time.Duration
-	OutputLimit    int
-	ShellOutput    func(string)
+	PreferredShell  string
+	ShellTimeout    time.Duration
+	OutputLimit     int
+	ShellOutput     func(string)
+	Sandbox         SandboxBackend
+	ProcessRegistry string
 
 	Checkpoints *CheckpointStore
 	SkillRoots  []string
@@ -95,11 +98,14 @@ type Options struct {
 
 // Workspace owns all operations rooted at one canonical workspace directory.
 type Workspace struct {
-	root       string
-	guard      *Guard
-	options    Options
-	readLedger *pathLedger
-	shell      *ShellRunner
+	root         string
+	guard        *Guard
+	options      Options
+	readLedger   *pathLedger
+	sourceCache  *sourceCache
+	shell        *ShellRunner
+	patchJournal *patchJournal
+	processes    *ProcessManager
 }
 
 func (w *Workspace) Guard() *Guard {
@@ -245,17 +251,88 @@ func New(root string, options Options) (*Workspace, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Workspace{
-		root:       canonical,
-		guard:      guard,
-		options:    options,
-		readLedger: newPathLedger(),
+	sandbox := options.Sandbox
+	if sandbox == nil {
+		sandbox = newPlatformSandbox(canonical)
+	}
+	capability := sandbox.Capability()
+	if options.Status != nil && !capability.Enforced {
+		options.Status("OS sandbox unavailable: " + capability.Reason)
+	}
+	processes := newProcessManager(options.ProcessRegistry)
+	workspace := &Workspace{
+		root:        canonical,
+		guard:       guard,
+		options:     options,
+		readLedger:  newPathLedger(),
+		sourceCache: newSourceCache(defaultSourceCacheEntries, defaultSourceCacheBytes, canonical),
 		shell: &ShellRunner{
 			Preferred:   options.PreferredShell,
 			Timeout:     options.ShellTimeout,
 			OutputLimit: options.OutputLimit,
+			Sandbox:     sandbox,
+			Processes:   processes,
 		},
-	}, nil
+		processes: processes,
+	}
+	workspace.patchJournal = newPatchJournal(options.Checkpoints, canonical, options.Status)
+	if options.Checkpoints != nil {
+		if err := options.Checkpoints.Prune(context.Background(), time.Now().UTC()); err != nil {
+			return nil, fmt.Errorf("prune workspace checkpoints: %w", err)
+		}
+	}
+	if err := workspace.patchJournal.recover(); err != nil {
+		return nil, fmt.Errorf("recover workspace transactions: %w", err)
+	}
+	return workspace, nil
+}
+
+func (w *Workspace) ListBackgroundProcesses() []BackgroundProcess {
+	if w == nil {
+		return nil
+	}
+	return w.processes.List()
+}
+
+func (w *Workspace) StopBackgroundProcess(id string) error {
+	if w == nil {
+		return fmt.Errorf("workspace is closed")
+	}
+	return w.processes.Stop(id)
+}
+
+// Close terminates every background process tree owned by the workspace.
+func (w *Workspace) Close() error {
+	if w == nil {
+		return nil
+	}
+	return w.processes.Close()
+}
+
+// SandboxCapability reports the actual process isolation backend. Enforced is
+// never inferred from permission mode or approval state.
+func (w *Workspace) SandboxCapability() SandboxCapability {
+	if w == nil || w.shell == nil || w.shell.Sandbox == nil {
+		return SandboxCapability{Backend: "host", Reason: "no sandbox backend configured"}
+	}
+	return w.shell.Sandbox.Capability()
+}
+
+// SandboxBackend returns the concrete process policy shared with other
+// session-owned subprocess clients such as stdio MCP.
+func (w *Workspace) SandboxBackend() SandboxBackend {
+	if w == nil || w.shell == nil {
+		return nil
+	}
+	return w.shell.Sandbox
+}
+
+// SourceCacheStats returns aggregate structural-index cache diagnostics.
+func (w *Workspace) SourceCacheStats() SourceCacheStats {
+	if w == nil || w.sourceCache == nil {
+		return SourceCacheStats{}
+	}
+	return w.sourceCache.stats()
 }
 
 // SetPermissionMode applies a permission change immediately to subsequent tool

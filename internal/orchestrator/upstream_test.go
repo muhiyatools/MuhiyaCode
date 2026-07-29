@@ -15,16 +15,14 @@ import (
 // so the harness has to say it out loud and stop pricing switches against a
 // cache that no longer exists.
 
-// upstreamProvider records the pin each request carried and answers with a
-// fixed upstream, the way a routing layer names who actually served it.
+// upstreamProvider answers with a fixed upstream, the way a routing layer names
+// who actually served it.
 type upstreamProvider struct {
 	upstream  string
 	responses []contract.ChatResponse
-	pins      []string
 }
 
 func (p *upstreamProvider) Chat(_ context.Context, request contract.ChatRequest) (contract.ChatResponse, error) {
-	p.pins = append(p.pins, request.PinUpstream)
 	response := contract.ChatResponse{Content: "done"}
 	if len(p.responses) > 0 {
 		response = p.responses[0]
@@ -54,7 +52,7 @@ func recordUpstream(t *testing.T, engine *Engine, model, upstream string) {
 }
 
 func TestUpstreamFlipIsReportedAndRetiresWarmth(t *testing.T) {
-	settings := advisorSettings()
+	settings := engineSettings()
 	var notices []string
 	engine, err := NewEngine(EngineConfig{
 		Settings: &settings, Session: contract.Session{ID: "upstream", WorkspacePath: t.TempDir()},
@@ -90,7 +88,7 @@ func TestUpstreamFlipIsReportedAndRetiresWarmth(t *testing.T) {
 // The field is absent on a direct provider connection, and absence must be
 // completely silent: this notice fires on every turn otherwise.
 func TestDirectConnectionNeverReportsAnUpstream(t *testing.T) {
-	settings := advisorSettings()
+	settings := engineSettings()
 	var notices []string
 	engine, err := NewEngine(EngineConfig{
 		Settings: &settings, Session: contract.Session{ID: "direct", WorkspacePath: t.TempDir()},
@@ -112,10 +110,9 @@ func TestDirectConnectionNeverReportsAnUpstream(t *testing.T) {
 	}
 }
 
-// The session must actually ASK to go back to the upstream holding its prefix.
-// Request 1 cannot know who that is; every request after it must say so, or the
-// routing layer is free to re-route and re-bill the whole conversation.
-func TestSessionPinsToTheUpstreamThatServedItFirst(t *testing.T) {
+// Provider affinity is gateway-owned (Phase 3). The client request contract
+// has no upstream-pin field, so manual pinning is structurally impossible.
+func TestSessionHasNoUpstreamPinContract(t *testing.T) {
 	settings := engineSettings()
 	provider := &upstreamProvider{upstream: "minimax"}
 	engine, err := NewEngine(EngineConfig{
@@ -132,17 +129,6 @@ func TestSessionPinsToTheUpstreamThatServedItFirst(t *testing.T) {
 	if _, _, err := engine.Run(context.Background(), "read a.go and tell me what it does"); err != nil {
 		t.Fatal(err)
 	}
-	if len(provider.pins) < 2 {
-		t.Fatalf("expected at least two requests, got %d", len(provider.pins))
-	}
-	if provider.pins[0] != "" {
-		t.Fatalf("the first request cannot know an upstream yet, sent %q", provider.pins[0])
-	}
-	for index, pin := range provider.pins[1:] {
-		if pin != "minimax" {
-			t.Fatalf("request %d did not pin to the warmed upstream: %q", index+1, pin)
-		}
-	}
 }
 
 // When the pinned upstream is unavailable the routing layer falls back, and the
@@ -150,7 +136,7 @@ func TestSessionPinsToTheUpstreamThatServedItFirst(t *testing.T) {
 // is not answering. A pin that cannot heal is a pin that turns one outage into
 // a permanently cold session.
 func TestPinFollowsAFallbackInsteadOfFightingIt(t *testing.T) {
-	settings := advisorSettings()
+	settings := engineSettings()
 	engine, err := NewEngine(EngineConfig{
 		Settings: &settings, Session: contract.Session{ID: "heal", WorkspacePath: t.TempDir()},
 		Provider: &scriptedProvider{}, Registry: NewRegistry(),
@@ -172,7 +158,7 @@ func TestPinFollowsAFallbackInsteadOfFightingIt(t *testing.T) {
 // Each bounce is a real cold start and must be reported, but the reporting has
 // to stay one calm line per change — and above all the task must still finish.
 func TestAFlipStormReportsEachChangeAndStillCompletes(t *testing.T) {
-	settings := advisorSettings()
+	settings := engineSettings()
 	var notices []string
 	engine, err := NewEngine(EngineConfig{
 		Settings: &settings, Session: contract.Session{ID: "storm", WorkspacePath: t.TempDir()},
@@ -283,7 +269,7 @@ func TestPersistedShapeCarriesTheCurrentUpstream(t *testing.T) {
 // The upstream must reach the persisted ledger, or a miss cannot be correlated
 // against it after the fact — which is the entire diagnostic purpose.
 func TestUpstreamIsPersistedOnTheUsageRecord(t *testing.T) {
-	settings := advisorSettings()
+	settings := engineSettings()
 	engine, err := NewEngine(EngineConfig{
 		Settings: &settings, Session: contract.Session{ID: "ledger", WorkspacePath: t.TempDir()},
 		Provider: &scriptedProvider{}, Registry: NewRegistry(),

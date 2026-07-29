@@ -16,7 +16,13 @@ func (e *Engine) recordMainUsage(ctx context.Context, observation mainUsageObser
 	previous := lastMainUsageRecord(e.usageRecords)
 	newTail := estimatedNewTail(previous, observation.usage)
 	attribution := e.mainCacheAttribution(cacheMissContext{previous: previous, usage: observation.usage, newTail: newTail, previousMessageCount: e.lastSentMessageCount, currentMessageCount: observation.messageCount}, observation.changeReasons)
-	record := usageRecord(usageRecordInput{model: observation.model, stream: contract.UsageStreamMain, pin: ":main", usage: observation.usage, reasons: observation.changeReasons, attribution: attribution, durationMS: observation.durationMS})
+	record := usageRecord(usageRecordInput{
+		model: observation.model, stream: contract.UsageStreamMain, pin: ":main",
+		purpose: contract.RequestPurposeMain, cacheEpoch: e.CacheEpoch(),
+		usage: observation.usage, reasons: observation.changeReasons,
+		attribution: attribution, durationMS: observation.durationMS,
+		requestBuild: &observation.requestBuild, prefixHash: observation.prefixHash,
+	})
 	if previous != nil && (observation.usage.PromptTokensAvailable || observation.usage.PromptTokens != 0) {
 		record.NewTailTokens = intPointer(newTail)
 	}
@@ -74,13 +80,6 @@ func (e *Engine) mainCacheAttribution(missContext cacheMissContext, changeReason
 	return contract.CacheAttributionProvider
 }
 
-func (e *Engine) recordAuxUsage(ctx context.Context, model, pin string, usage contract.Usage, durationMS *int64) error {
-	e.usageWriteMu.Lock()
-	defer e.usageWriteMu.Unlock()
-	record := usageRecord(usageRecordInput{model: model, stream: contract.UsageStreamAux, pin: pin, usage: usage, attribution: contract.CacheAttributionNA, durationMS: durationMS})
-	return e.appendUsage(ctx, &record)
-}
-
 // elapsedMS returns the whole milliseconds since start as a nullable pointer —
 // the shape UsageRecord.DurationMS wants (feature 008 UD-6).
 func elapsedMS(start time.Time) *int64 {
@@ -88,8 +87,7 @@ func elapsedMS(start time.Time) *int64 {
 	return &ms
 }
 
-// taskUsageSnapshot is the cumulative usage of the current task across main,
-// subagent, and auxiliary streams.
+// taskUsageSnapshot is the cumulative usage of the current task.
 func (e *Engine) taskUsageSnapshot() contract.Usage {
 	e.taskMu.Lock()
 	usage := subtractUsage(e.sessionUsage, e.taskUsageStart)
@@ -144,6 +142,9 @@ func (e *Engine) appendUsage(ctx context.Context, record *contract.UsageRecord) 
 	}
 	e.taskMu.Unlock()
 
+	if err := e.persistUsageEvent(ctx, *record); err != nil {
+		return err
+	}
 	if e.persistence.AppendUsage != nil {
 		if err := e.persistence.AppendUsage(ctx, *record); err != nil {
 			return err
@@ -164,11 +165,13 @@ func usageRecord(input usageRecordInput) contract.UsageRecord {
 	reasoning := cloneIntPointer(input.usage.ReasoningTokens)
 	read := cloneIntPointer(input.usage.CacheReadTokens)
 	miss := cloneIntPointer(input.usage.CacheMissTokens)
-	return contract.UsageRecord{
+	record := contract.UsageRecord{
 		At:                 time.Now().UTC(),
 		Model:              input.model,
 		Stream:             input.stream,
 		Pin:                input.pin,
+		Purpose:            input.purpose,
+		CacheEpoch:         input.cacheEpoch,
 		PromptTokens:       prompt,
 		CompletionTokens:   completion,
 		ReasoningTokens:    reasoning,
@@ -185,15 +188,43 @@ func usageRecord(input usageRecordInput) contract.UsageRecord {
 		CostEstimated:      input.usage.CostEstimated,
 		LogID:              input.usage.CostLogID,
 		Upstream:           input.usage.Upstream,
+		PrefixHash:         input.prefixHash,
 		DurationMS:         input.durationMS,
+	}
+	addRequestBuildDiagnostics(&record, input.requestBuild)
+	return record
+}
+
+func addRequestBuildDiagnostics(record *contract.UsageRecord, build *RequestBuild) {
+	if build == nil {
+		return
+	}
+	wireEstimate := build.EstimatedWireTokens
+	if wireEstimate == 0 {
+		wireEstimate = build.EstimatedPromptTokens
+	}
+	record.EstimatedPromptTokens = intPointer(wireEstimate)
+	record.EstimatedMessageTokens = intPointer(build.EstimatedPromptTokens)
+	record.EstimatedToolTokens = intPointer(build.EstimatedToolTokens)
+	record.EstimatedCoreToolTokens = intPointer(build.EstimatedCoreToolTokens)
+	record.EstimatedDeferredToolTokens = intPointer(build.EstimatedDeferredToolTokens)
+	record.PromptEstimateSource = build.EstimateSource
+	record.SerializedMessageBytes = intPointer(build.SerializedMessageBytes)
+	record.SerializedToolBytes = intPointer(build.SerializedToolBytes)
+	record.SerializedCoreToolBytes = intPointer(build.SerializedCoreToolBytes)
+	record.SerializedDeferredToolBytes = intPointer(build.SerializedDeferredToolBytes)
+	record.CompiledContextUnits = intPointer(build.CompiledUnits)
+	record.ContextCompilerCacheHit = boolPointer(build.CompilerCacheHit)
+	if record.PromptTokens != nil {
+		record.PromptEstimateDelta = intPointer(*record.PromptTokens - wireEstimate)
 	}
 }
 
-// upstreamPin is the upstream provider this session has already warmed, sent on
-// every later request so a routing layer sends us back to it (see
-// contract.ChatRequest.PinUpstream). Empty until the first response names one,
-// and empty forever on a direct connection — both correctly meaning "no
-// preference".
+// upstreamPin is the upstream provider this session has already warmed. The
+// gateway owns routing affinity (Phase 3); the client learns the value from
+// response metadata and uses it only for diagnostics, never sent as a request
+// pin. Empty until the first response names one, and empty forever on a direct
+// connection — both correctly meaning "no preference".
 //
 // Learning the value instead of configuring it is the point: the set of
 // upstreams behind a model slug changes without notice, so any hardcoded list
@@ -306,6 +337,18 @@ func cloneFloatPointer(value *float64) *float64 {
 	return &copy
 }
 
+func boolPointer(value bool) *bool {
+	return &value
+}
+
+func cloneBoolPointer(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
 func cloneUsageRecords(records []contract.UsageRecord) []contract.UsageRecord {
 	result := make([]contract.UsageRecord, len(records))
 	for i, record := range records {
@@ -320,6 +363,18 @@ func cloneUsageRecord(record contract.UsageRecord) contract.UsageRecord {
 	record.CacheReadTokens = cloneIntPointer(record.CacheReadTokens)
 	record.CacheMissTokens = cloneIntPointer(record.CacheMissTokens)
 	record.NewTailTokens = cloneIntPointer(record.NewTailTokens)
+	record.EstimatedPromptTokens = cloneIntPointer(record.EstimatedPromptTokens)
+	record.EstimatedMessageTokens = cloneIntPointer(record.EstimatedMessageTokens)
+	record.EstimatedToolTokens = cloneIntPointer(record.EstimatedToolTokens)
+	record.EstimatedCoreToolTokens = cloneIntPointer(record.EstimatedCoreToolTokens)
+	record.EstimatedDeferredToolTokens = cloneIntPointer(record.EstimatedDeferredToolTokens)
+	record.PromptEstimateDelta = cloneIntPointer(record.PromptEstimateDelta)
+	record.SerializedMessageBytes = cloneIntPointer(record.SerializedMessageBytes)
+	record.SerializedToolBytes = cloneIntPointer(record.SerializedToolBytes)
+	record.SerializedCoreToolBytes = cloneIntPointer(record.SerializedCoreToolBytes)
+	record.SerializedDeferredToolBytes = cloneIntPointer(record.SerializedDeferredToolBytes)
+	record.CompiledContextUnits = cloneIntPointer(record.CompiledContextUnits)
+	record.ContextCompilerCacheHit = cloneBoolPointer(record.ContextCompilerCacheHit)
 	record.HitRate = cloneFloatPointer(record.HitRate)
 	record.CostUSD = cloneFloatPointer(record.CostUSD)
 	record.ChangeReasons = append([]string{}, record.ChangeReasons...)

@@ -47,7 +47,7 @@ func (t *forwardingTool) DeclaresReadOnly() bool {
 	return live != nil && live.readOnly
 }
 
-func (t *forwardingTool) Execute(ctx context.Context, arguments json.RawMessage) (string, error) {
+func (t *forwardingTool) Execute(ctx context.Context, arguments json.RawMessage) contract.ToolResult {
 	name := t.definition.Function.Name
 	t.manager.mu.RLock()
 	live := t.manager.tools[name]
@@ -61,34 +61,36 @@ func (t *forwardingTool) Execute(ctx context.Context, arguments json.RawMessage)
 	server := serverForTool(name)
 	if server == "" {
 		//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
-		return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
+		err := contract.ToolNotStarted(fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name))
+		return contract.AdaptToolResult("", err)
 	}
 	if err := t.manager.EnsureLive(ctx, server); err != nil {
-		return "", err
+		return contract.AdaptToolResult("", contract.ToolNotStarted(err))
 	}
 	t.manager.mu.RLock()
 	live = t.manager.tools[name]
 	t.manager.mu.RUnlock()
 	if live == nil {
 		//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
-		return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
+		err := contract.ToolNotStarted(fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name))
+		return contract.AdaptToolResult("", err)
 	}
 	return live.Execute(ctx, arguments)
 }
 
-func (t *mcpTool) Execute(ctx context.Context, arguments json.RawMessage) (string, error) {
+func (t *mcpTool) Execute(ctx context.Context, arguments json.RawMessage) contract.ToolResult {
 	if t.manager.confirm != nil {
 		approved, err := t.manager.confirm(ctx, "Allow MCP tool "+t.exposedName+"?")
 		if err != nil || !approved {
 			if err != nil {
-				return "", err
+				return contract.AdaptToolResult("", contract.ToolNotStarted(err))
 			}
-			return "", fmt.Errorf("permission denied")
+			return contract.AdaptToolResult("", contract.ToolNotStarted(fmt.Errorf("permission denied")))
 		}
 	}
 	var args map[string]any
 	if len(arguments) > 0 && json.Unmarshal(arguments, &args) != nil {
-		return "", fmt.Errorf("invalid MCP tool arguments")
+		return contract.AdaptToolResult("", contract.ToolNotStarted(fmt.Errorf("invalid MCP tool arguments")))
 	}
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(t.connection.server.TimeoutMS)*time.Millisecond)
 	defer cancel()
@@ -101,9 +103,13 @@ func (t *mcpTool) Execute(ctx context.Context, arguments json.RawMessage) (strin
 		if isTransportClosed(err) {
 			t.manager.markServerError(t.connection.server.Name, t.connection.server.Name+": "+err.Error())
 		}
-		return "", err
+		return contract.AdaptToolResult("", err)
 	}
-	return formatResult(result), nil
+	output := formatResult(result)
+	if result.IsError {
+		return contract.AdaptToolResult(output, fmt.Errorf("MCP tool %s reported an error", t.exposedName))
+	}
+	return contract.AdaptToolResult(output, nil)
 }
 
 // isTransportClosed (M8) sniffs the few common transport-level failure shapes;

@@ -27,6 +27,15 @@ func TestOutputBudgetLeavesMiniMaxConservative(t *testing.T) {
 	}
 }
 
+func TestContextOutputReserveRespectsSeparateOutputWindows(t *testing.T) {
+	if got := ResolveModelProfile("deepseek-v4-pro").ContextOutputReserve(64_000); got != 0 {
+		t.Fatalf("DeepSeek output must not reduce its separate prompt window, got reserve %d", got)
+	}
+	if got := ResolveModelProfile("minimax-m3").ContextOutputReserve(0); got != 16_000 {
+		t.Fatalf("MiniMax shared context must reserve output, got %d", got)
+	}
+}
+
 func TestWriteSizedFamiliesRaisedFromSixteenK(t *testing.T) {
 	for _, name := range []string{"glm-4", "some-other-model", "deepseek-v4-flash"} {
 		if got := ResolveModelProfile(name).OutputBudget(0); got < 32_000 {

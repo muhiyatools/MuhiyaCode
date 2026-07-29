@@ -105,6 +105,7 @@ func MCPServerFingerprint(server MCPServer, secretEnv map[string]string) string 
 type ProbeSupport string
 
 const (
+	ProbeUnknown     ProbeSupport = "unknown"
 	ProbeSupported   ProbeSupport = "supported"
 	ProbeUnsupported ProbeSupport = "unsupported"
 )

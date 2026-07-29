@@ -5,6 +5,7 @@ package contract
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"time"
 )
 
@@ -48,6 +49,31 @@ type VerificationResult struct {
 	OutputTruncated string `json:"output_truncated,omitempty"`
 }
 
+type ReviewFinding struct {
+	Severity string `json:"severity"`
+	Path     string `json:"path,omitempty"`
+	Line     int    `json:"line,omitempty"`
+	Message  string `json:"message"`
+}
+
+type ReviewCoverage struct {
+	Reviewed []string `json:"reviewed,omitempty"`
+	Skipped  []string `json:"skipped,omitempty"`
+}
+
+// ReviewResult is the bounded, machine-readable output of the isolated
+// completion reviewer. Unlike ReviewTier, it records what the reviewer found.
+type ReviewResult struct {
+	Ran       bool            `json:"ran"`
+	Verdict   string          `json:"verdict,omitempty"`
+	Model     string          `json:"model,omitempty"`
+	Summary   string          `json:"summary,omitempty"`
+	Findings  []ReviewFinding `json:"findings,omitempty"`
+	Coverage  ReviewCoverage  `json:"coverage,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	CreatedAt time.Time       `json:"createdAt,omitempty"`
+}
+
 type ReasoningTier string
 
 const (
@@ -58,14 +84,58 @@ const (
 )
 
 type Model struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	ContextLimit int    `json:"contextLimit"`
-	MaxOutput    int    `json:"maxOutputTokens,omitempty"`
-	Provider     string `json:"provider,omitempty"`
-	Source       string `json:"source,omitempty"`
-	Description  string `json:"description,omitempty"`
-	CreatedAt    string `json:"createdAt,omitempty"`
+	ID                       string            `json:"id"`
+	Name                     string            `json:"name"`
+	RecordID                 string            `json:"recordId,omitempty"`
+	TargetModel              string            `json:"targetModel,omitempty"`
+	Tags                     []string          `json:"tags,omitempty"`
+	ProviderFamily           string            `json:"providerFamily,omitempty"`
+	AdapterVersion           string            `json:"adapterVersion,omitempty"`
+	CompatibilityEpoch       int               `json:"compatibilityEpoch,omitempty"`
+	CacheContract            json.RawMessage   `json:"cacheContract,omitempty"`
+	SupportedParameters      []string          `json:"supportedParameters,omitempty"`
+	PricingRuleSetID         string            `json:"pricingRuleSetId,omitempty"`
+	InputNanoPerMillion      int64             `json:"inputNanoUsdPerMillion,omitempty"`
+	OutputNanoPerMillion     int64             `json:"outputNanoUsdPerMillion,omitempty"`
+	CacheReadNanoPerMillion  int64             `json:"cacheReadNanoUsdPerMillion,omitempty"`
+	CacheWriteNanoPerMillion int64             `json:"cacheWriteNanoUsdPerMillion,omitempty"`
+	PricingTiers             []PricingTier     `json:"pricingTiers,omitempty"`
+	Capabilities             ModelCapabilities `json:"capabilities,omitempty"`
+	ContextLimit             int               `json:"contextLimit"`
+	MaxOutput                int               `json:"maxOutputTokens,omitempty"`
+	// CodingTier is an operator/provider supplied capability rank from 1 to 5.
+	// Zero means unknown and never justifies an automatic capability switch.
+	CodingTier           int     `json:"codingTier,omitempty"`
+	InputCostPerMillion  float64 `json:"inputCostPerMillion,omitempty"`
+	OutputCostPerMillion float64 `json:"outputCostPerMillion,omitempty"`
+	Health               string  `json:"health,omitempty"`
+	Provider             string  `json:"provider,omitempty"`
+	Source               string  `json:"source,omitempty"`
+	Description          string  `json:"description,omitempty"`
+	CreatedAt            string  `json:"createdAt,omitempty"`
+}
+
+type PricingRates struct {
+	InputNanoPerMillion      int64 `json:"input_nano_usd_per_million"`
+	OutputNanoPerMillion     int64 `json:"output_nano_usd_per_million"`
+	CacheReadNanoPerMillion  int64 `json:"cache_read_nano_usd_per_million"`
+	CacheWriteNanoPerMillion int64 `json:"cache_write_nano_usd_per_million"`
+}
+
+type PricingTier struct {
+	MinInputTokensExclusive int64        `json:"min_input_tokens_exclusive"`
+	Rates                   PricingRates `json:"rates"`
+}
+
+type ModelCapabilities struct {
+	Vision            bool     `json:"vision,omitempty"`
+	Thinking          bool     `json:"thinking,omitempty"`
+	Audio             bool     `json:"audio,omitempty"`
+	Video             bool     `json:"video,omitempty"`
+	Documents         bool     `json:"documents,omitempty"`
+	MaxAttachmentMB   int      `json:"max_attachment_mb,omitempty"`
+	AcceptedMIMETypes []string `json:"accepted_mime_types,omitempty"`
+	InputModalities   []string `json:"input_modalities,omitempty"`
 }
 
 type Settings struct {
@@ -73,31 +143,19 @@ type Settings struct {
 	Provider struct {
 		Type    string `json:"type"`
 		BaseURL string `json:"baseUrl"`
-		// ActiveModelID is the model the session runs on. It is frozen for the
-		// duration of a task and may only change at a task boundary, where the
-		// advisor weighs the cold-start cost of the switch (caching is the
-		// priority); the user sets it with `muhiyacode config set model`.
+		// ActiveModelID is the default for new sessions. Existing sessions persist
+		// their own explicit model and change only through `/model`.
 		ActiveModelID string  `json:"activeModelId"`
 		Models        []Model `json:"models"`
 		// ModelsRefreshedAt is when the gateway catalog was last discovered
 		// (RFC3339). It drives the TTL refresh that keeps the model list current
 		// now that the interactive refresh command is gone; empty means never.
 		ModelsRefreshedAt string `json:"modelsRefreshedAt,omitempty"`
-		// RolesPinned records that the user chose the models explicitly, so the
-		// session advisor never overrides them.
-		RolesPinned bool `json:"rolesPinned,omitempty"`
-		// Advisor controls the session-start model advisor: "auto" (default) or
-		// "off" (always use the configured pairing).
-		Advisor string `json:"advisor,omitempty"`
 	} `json:"provider"`
 	PermissionMode PermissionMode `json:"permissionMode"`
 	Effort         EffortLevel    `json:"effort"`
-	// ReviewGating controls the automatic review triggers (feature 011):
-	// "off" | "conservative" | "default" (empty = default). Explicit review
-	// requests always run regardless of this setting.
-	ReviewGating string `json:"reviewGating,omitempty"`
-	Theme        string `json:"theme"`
-	Shell        struct {
+	Theme          string         `json:"theme"`
+	Shell          struct {
 		Preferred   string `json:"preferred"`
 		TimeoutMS   int    `json:"timeoutMs"`
 		OutputLimit int    `json:"outputLimit"`
@@ -121,18 +179,52 @@ type Session struct {
 	Title         string    `json:"title"`
 	CreatedAt     time.Time `json:"createdAt"`
 	UpdatedAt     time.Time `json:"updatedAt"`
+	ArchivedAt    time.Time `json:"archivedAt,omitempty"`
+	ParentID      string    `json:"parentId,omitempty"`
+	// ModelID and CacheEpoch are loaded from the session runtime sidecar. They
+	// are not global defaults and therefore survive resume and model switches.
+	ModelID       string                  `json:"modelId,omitempty"`
+	CacheEpoch    uint64                  `json:"cacheEpoch,omitempty"`
+	ModelLineages map[string]ModelLineage `json:"modelLineages,omitempty"`
+	// PermissionMode is the durable session-scoped permission authority (UMI-06).
+	// Global settings supply only the default for a new session; an existing
+	// session restores its saved mode on resume. Empty means Normal (safe default).
+	PermissionMode PermissionMode `json:"permissionMode,omitempty"`
+}
+
+type ModelLineage struct {
+	CompatibilityEpoch int       `json:"compatibilityEpoch,omitempty"`
+	CacheEpoch         uint64    `json:"cacheEpoch"`
+	PrefixHash         string    `json:"prefixHash,omitempty"`
+	RouteAffinity      string    `json:"routeAffinity,omitempty"`
+	UpdatedAt          time.Time `json:"updatedAt,omitempty"`
+}
+
+type CheckpointInfo struct {
+	ID          string    `json:"id"`
+	SessionID   string    `json:"sessionId"`
+	Description string    `json:"description"`
+	CreatedAt   time.Time `json:"createdAt"`
+	EventCursor int64     `json:"eventCursor"`
+}
+
+type BackgroundProcess struct {
+	ID        string    `json:"id"`
+	Label     string    `json:"label"`
+	PID       int       `json:"pid"`
+	StartedAt time.Time `json:"startedAt"`
 }
 
 type Event struct {
-	Role    string
-	Type    string
-	Content string
+	Role    string `json:"role"`
+	Type    string `json:"type"`
+	Content string `json:"content"`
 	// Target is the tool call's display target (file/command/query) for tool
 	// events, persisted so a resumed transcript row names WHAT the call acted on
 	// exactly as it did live. Empty for non-tool events and for tool events from
 	// sessions predating the events.target column.
-	Target    string
-	CreatedAt time.Time
+	Target    string    `json:"target,omitempty"`
+	CreatedAt time.Time `json:"createdAt"`
 }
 
 type Role string
@@ -291,24 +383,32 @@ type ChatRequest struct {
 	ToolChoice  string
 	Reasoning   ReasoningTier
 	Seed        *int
+	Purpose     RequestPurpose
+	CacheEpoch  uint64
 	// SessionID is a routing pin derived once per session per stream and sent
 	// as the X-Muhiya-Session header. Long-lived providers key their cache by
 	// routing identity; without it, an upstream model flip silently invalidates
 	// the entire cached prefix. Must not be serialized into the JSON body.
 	SessionID string
-	// PinUpstream asks a routing layer (OpenRouter) to prefer the named upstream
-	// provider. Prefix caches live on the upstream that served the request, so
-	// once a session has warmed one, every later request should go back to it —
-	// otherwise a silent re-route re-bills the whole conversation as uncached.
-	//
-	// It is a PREFERENCE, never a restriction: the wire form keeps fallbacks
-	// enabled, so an upstream outage costs a cold prefix rather than a failed
-	// task. Empty means "no preference", which is correct for a direct provider
-	// connection and for a session's first request.
-	PinUpstream      string
+	// RequestID is the per-request correlation ID (P0-W5, UMI-26). It is
+	// generated by the client once per logical turn and sent as the
+	// X-Muhiya-Request-ID header. The gateway groups independently logged retry
+	// attempts beneath this ID; replaying one attempt is idempotent.
+	// Empty means the gateway generates its own logical ID.
+	RequestID        string
 	OnToken          func(string)
 	OnReasoningToken func(string)
+	// OnStreamReset retracts visible deltas from a failed stream attempt before
+	// the provider retries the identical request. Without it, the successful
+	// retry is appended after the abandoned partial text and duplicates output.
+	OnStreamReset func()
 }
+
+type RequestPurpose string
+
+const (
+	RequestPurposeMain RequestPurpose = "main"
+)
 
 type ChatResponse struct {
 	Content          string
@@ -334,7 +434,36 @@ type Provider interface {
 
 type Tool interface {
 	Definition() ToolDefinition
-	Execute(context.Context, json.RawMessage) (string, error)
+	Execute(context.Context, json.RawMessage) ToolResult
+}
+
+type ToolExecutionState string
+
+const (
+	ToolExecutionCompleted     ToolExecutionState = "completed"
+	ToolExecutionNotStarted    ToolExecutionState = "not_started"
+	ToolExecutionIndeterminate ToolExecutionState = "indeterminate"
+)
+
+type ToolResult struct {
+	Status ToolOutcomeStatus
+	State  ToolExecutionState
+	Output string
+	Err    error
+}
+
+func AdaptToolResult(output string, err error) ToolResult {
+	if err == nil {
+		return ToolResult{Status: ToolOutcomeSucceeded, State: ToolExecutionCompleted, Output: output}
+	}
+	if errors.Is(err, ErrToolNotStarted) {
+		return ToolResult{Status: ToolOutcomeRejected, State: ToolExecutionNotStarted, Output: output, Err: err}
+	}
+	status := ToolOutcomeFailed
+	if errors.Is(err, context.Canceled) {
+		status = ToolOutcomeCancelled
+	}
+	return ToolResult{Status: status, State: ToolExecutionIndeterminate, Output: output, Err: err}
 }
 
 // ReadOnlyDeclaring is the OPTIONAL half of Tool: a tool that can say it does
@@ -412,6 +541,7 @@ type PrunedRecord struct {
 }
 
 type TaskStats struct {
+	Status     TaskStatus  `json:"status"`
 	DurationMS int64       `json:"durationMs"`
 	Effort     EffortLevel `json:"effort"`
 	TaskClass  string      `json:"taskClass"`
@@ -443,8 +573,9 @@ type TaskStats struct {
 	ReviewRationale string `json:"reviewRationale,omitempty"`
 	// ReviewCeilingHit/ReviewCoverage (T022/D6): whether the review's token
 	// ceiling bounded the run, and the reviewer's parsed coverage line.
-	ReviewCeilingHit bool   `json:"reviewCeilingHit,omitempty"`
-	ReviewCoverage   string `json:"reviewCoverage,omitempty"`
+	ReviewCeilingHit bool         `json:"reviewCeilingHit,omitempty"`
+	ReviewCoverage   string       `json:"reviewCoverage,omitempty"`
+	ReviewResult     ReviewResult `json:"reviewResult,omitempty"`
 	// Violation counters (feature 011 SC-006, measured per task): shell commands
 	// that read files where a dedicated tool sufficed, and duplicate reads the
 	// inspection ledger blocked.
@@ -481,6 +612,16 @@ type TaskStats struct {
 	Verification VerificationResult `json:"verification,omitempty"`
 }
 
+type TaskStatus string
+
+const (
+	TaskStatusSucceeded     TaskStatus = "succeeded"
+	TaskStatusIncomplete    TaskStatus = "incomplete"
+	TaskStatusIndeterminate TaskStatus = "indeterminate"
+	TaskStatusFailed        TaskStatus = "failed"
+	TaskStatusCancelled     TaskStatus = "cancelled"
+)
+
 // StopCause values for TaskStats.StopCause (003, FR-013a).
 const (
 	StopCauseUserStop   = "user stop"
@@ -498,6 +639,7 @@ type Callbacks struct {
 	Notice         func(string)
 	Token          func(string)
 	ReasoningToken func(string)
+	StreamReset    func()
 	ToolStart      func(name string, input json.RawMessage)
 	ToolOutput     func(name, chunk string)
 	ToolEnd        func(name, output string)

@@ -1,7 +1,6 @@
 package orchestrator
 
 import (
-	"math"
 	"strings"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
@@ -23,12 +22,10 @@ func isMutation(name string) bool {
 	return name == "edit_file" || name == "multi_edit" || name == "write_file" || name == "apply_patch" || name == "run_shell" || name == "save_memory" || name == "edit_memory" || strings.HasPrefix(name, "mcp__")
 }
 
-// hardTurnCeiling is the task's absolute liveness backstop, scaled by effort so
-// a max-effort task — which legitimately climbs the runway ladder further — is
-// not stopped by a bound calibrated for medium. It is the ONLY unconditional
-// turn bound in the loop: everything below it extends while real work lands.
+// hardTurnCeiling is the fixed emergency backstop. Productive tasks retain
+// normal runway through new evidence; effort settings cannot multiply the cap.
 func (e *Engine) hardTurnCeiling() int {
-	return int(math.Ceil(hardTurnCeiling * Profile(e.effort()).AgentTurnScale))
+	return hardTurnCeiling
 }
 
 // noteChangedFiles records a successful mutation's targets on the task ledger.

@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -31,8 +32,8 @@ func TestTokenCalibration(t *testing.T) {
 	if base <= 0 {
 		t.Fatal("uncalibrated estimate should be positive")
 	}
-	// 200 tokens for 100 system chars + 400 message chars = 500 chars → 0.4/char.
-	h.Calibrate(200, 100)
+	// 200 tokens for 500 semantic request chars = 0.4/char.
+	h.Calibrate(200, 500)
 	if calibrated := h.EstimatedTokens(); calibrated <= base {
 		t.Fatalf("calibrated estimate (%d) should reflect the higher 0.4 ratio vs the 0.25 fallback (%d)", calibrated, base)
 	}
@@ -48,7 +49,7 @@ func TestTokenCalibration(t *testing.T) {
 	if hc.EstimatedTokens() <= 0 {
 		t.Fatal("CJK estimate should be positive")
 	}
-	hc.Calibrate(120, 0)
+	hc.Calibrate(120, 300)
 	if hc.EstimatedTokens() <= 0 {
 		t.Fatal("calibrated CJK estimate should be positive")
 	}
@@ -101,7 +102,9 @@ func TestUserCompactRecordsInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	events := engine.InvalidationEvents()
-	if len(events) != 1 || events[0].Cause != contract.InvalidationUserCompact || events[0].RequestSeq != 2 {
+	// P0: compaction no longer makes an auxiliary model call, so no usage
+	// record increments the request sequence before the invalidation event.
+	if len(events) != 1 || events[0].Cause != contract.InvalidationUserCompact || events[0].RequestSeq != 1 {
 		t.Fatalf("events=%+v", events)
 	}
 }
@@ -204,6 +207,64 @@ func TestCompactionAccumulatesDigests(t *testing.T) {
 	}
 	if strings.Index(second, "DIGEST-ONE") > strings.Index(second, "DIGEST-TWO") {
 		t.Fatalf("digests should accumulate in order (prior first): %q", second)
+	}
+}
+
+func TestCompactionIsBoundedAndPersistsSourceProvenance(t *testing.T) {
+	h := NewHistory(HistorySnapshot{Version: 1}, nil)
+	for _, content := range []string{"u1", "a1", "u2", "a2", "u3", "a3"} {
+		role := contract.RoleUser
+		if content[0] == 'a' {
+			role = contract.RoleAssistant
+		}
+		h.Append(contract.Message{Role: role, Content: content})
+	}
+	record := h.CompactToWithReason(strings.Repeat("digest ", 2000), 1, "manual")
+	if record.Sequence != 1 || record.Reason != "manual" || record.SourceMessages != 4 ||
+		record.SourceChars == 0 || len(record.SourceHash) != 64 || len(record.SummaryHash) != 64 ||
+		record.SummaryChars > maxCompactionDigestChars {
+		t.Fatalf("invalid compaction provenance: %+v", record)
+	}
+	if len(h.CompactSummary()) > maxCompactionSummaryChars {
+		t.Fatalf("summary exceeded bound: %d", len(h.CompactSummary()))
+	}
+
+	resumed := NewHistory(h.Snapshot(), nil)
+	records := resumed.CompactionRecords()
+	if len(records) != 1 || records[0] != record {
+		t.Fatalf("compaction provenance did not survive resume: %+v", records)
+	}
+}
+
+func TestCompactionBoundsTenCycleSummary(t *testing.T) {
+	h := NewHistory(HistorySnapshot{Version: 1}, nil)
+	for cycle := 0; cycle < 10; cycle++ {
+		h.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("task-%d", cycle)})
+		h.Append(contract.Message{Role: contract.RoleAssistant, Content: "done"})
+		h.CompactTo(strings.Repeat(fmt.Sprintf("fact-%d ", cycle), 1200), 0)
+	}
+	if got := len(h.CompactSummary()); got > maxCompactionSummaryChars {
+		t.Fatalf("ten-cycle summary grew to %d chars", got)
+	}
+	if records := h.CompactionRecords(); len(records) != 10 {
+		t.Fatalf("compaction records=%d, want 10", len(records))
+	}
+}
+
+func TestCompactionSequenceRemainsMonotonicAfterRecordEviction(t *testing.T) {
+	h := NewHistory(HistorySnapshot{Version: 1}, nil)
+	for cycle := 0; cycle < maxCompactionRecords+2; cycle++ {
+		h.Append(contract.Message{Role: contract.RoleUser, Content: "task"})
+		h.CompactTo("digest", 0)
+	}
+	records := h.CompactionRecords()
+	if len(records) != maxCompactionRecords {
+		t.Fatalf("compaction records=%d, want %d", len(records), maxCompactionRecords)
+	}
+	for index := 1; index < len(records); index++ {
+		if records[index].Sequence != records[index-1].Sequence+1 {
+			t.Fatalf("sequence stopped being monotonic at %d: %+v", index, records[index-1:index+1])
+		}
 	}
 }
 

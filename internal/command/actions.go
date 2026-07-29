@@ -21,7 +21,10 @@ func (a *Application) Actions() tui.Actions {
 			if settings == nil {
 				return errors.New("settings are nil")
 			}
-			if err := state.SaveSettings(*settings, a.paths); err != nil {
+			persisted := *settings
+			persisted.Provider.Models = append([]contract.Model(nil), settings.Provider.Models...)
+			persisted.Provider.ActiveModelID = a.defaultModelID
+			if err := state.SaveSettings(persisted, a.paths); err != nil {
 				return err
 			}
 			// F-1: every caller passes a.settings itself (the TUI's m.runtime.Settings
@@ -35,22 +38,39 @@ func (a *Application) Actions() tui.Actions {
 			// distinct-pointer caller does not exist today; one must never stomp a
 			// struct a running task shares — it would race and must instead go through
 			// the engine's synchronized setters.
-			if settings != a.settings {
-				*a.settings = *settings
-			}
-			a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
+			a.mu.Lock()
+			*a.settings = persisted
+			a.mu.Unlock()
+			a.provider.UpdateConfig(persisted, a.secrets.ProviderAPIKey)
 			return nil
 		},
 		SetPermission: func(_ context.Context, mode contract.PermissionMode) error {
 			a.mu.Lock()
 			active := a.activeWorkspace
+			sessionID := a.runtime.Session.ID
+			a.settings.PermissionMode = mode
 			a.mu.Unlock()
 			if active != nil {
 				if err := active.SetPermissionMode(mode); err != nil {
 					return err
 				}
 			}
-			return state.SaveSettings(*a.settings, a.paths)
+			// UMI-06: the session runtime record is the durable permission
+			// authority. Shift+Tab updates it atomically so the mode survives
+			// restart/resume. Global settings are NOT persisted for session mode
+			// changes — a new session gets the global default, an existing one
+			// keeps its own.
+			if sessionID != "" {
+				existing, _, err := a.sessions.ReadRuntimeConfig(sessionID)
+				if err != nil {
+					return err
+				}
+				existing.PermissionMode = mode
+				if err := a.sessions.WriteRuntimeConfig(sessionID, existing); err != nil {
+					return err
+				}
+			}
+			return nil
 		},
 		Rewind: func(ctx context.Context) (string, error) {
 			a.mu.Lock()
@@ -60,6 +80,32 @@ func (a *Application) Actions() tui.Actions {
 				return "No checkpoint available.", nil
 			}
 			return checkpoint.RestoreLatest(ctx)
+		},
+		ListCheckpoints: a.Checkpoints,
+		RestoreCheckpoint: func(ctx context.Context, id, scopeValue string) (tui.Runtime, []contract.Event, string, error) {
+			scope, err := ParseCheckpointScope(scopeValue)
+			if err != nil {
+				return tui.Runtime{}, nil, "", err
+			}
+			return a.RestoreCheckpoint(ctx, id, scope)
+		},
+		ListProcesses: func() []contract.BackgroundProcess {
+			a.mu.Lock()
+			active := a.activeWorkspace
+			a.mu.Unlock()
+			if active == nil {
+				return nil
+			}
+			return active.ListBackgroundProcesses()
+		},
+		StopProcess: func(id string) error {
+			a.mu.Lock()
+			active := a.activeWorkspace
+			a.mu.Unlock()
+			if active == nil {
+				return fmt.Errorf("workspace is unavailable")
+			}
+			return active.StopBackgroundProcess(id)
 		},
 		NewSession: func(ctx context.Context) (tui.Runtime, []contract.Event, error) {
 			a.mu.Lock()
@@ -125,12 +171,22 @@ func (a *Application) Actions() tui.Actions {
 			if err != nil {
 				return nil, err
 			}
+			if err := state.SaveModelCatalog(state.ModelCatalogCache{
+				Version: 2, RefreshedAt: time.Now().UTC(), Models: models,
+			}, a.paths); err != nil {
+				return nil, err
+			}
 			stranded := addDiscoveredModels(a.settings, models)
-			a.settings.Provider.ModelsRefreshedAt = time.Now().UTC().Format(time.RFC3339)
 			if err := state.SaveSettings(*a.settings, a.paths); err != nil {
 				return nil, err
 			}
 			a.provider.UpdateConfig(*a.settings, a.secrets.ProviderAPIKey)
+			a.mu.Lock()
+			activeEngine := a.runtime.Engine
+			a.mu.Unlock()
+			if activeEngine != nil {
+				activeEngine.UpdateCatalog(a.settings.Provider.Models)
+			}
 			if len(stranded) > 0 && a.callbacks.Notice != nil {
 				a.callbacks.Notice("No longer offered by the gateway (still selected — pick a new one with `muhiyacode config set model <id>`): " + strings.Join(stranded, ", "))
 			}
@@ -200,8 +256,19 @@ func addDiscoveredModels(settings *contract.Settings, models []contract.Model) [
 		state.UpsertModel(settings, model, false)
 	}
 	stranded := pruneStaleDiscoveredModels(settings, models)
-	if !state.AssignFreshDefaultModels(settings) {
-		state.AutoAssignModels(settings)
+	activeExists := false
+	for _, m := range settings.Provider.Models {
+		if m.ID == settings.Provider.ActiveModelID {
+			activeExists = true
+			break
+		}
+	}
+	if settings.Provider.ActiveModelID == "" || settings.Provider.ActiveModelID == "main" || !activeExists {
+		if !state.AssignFreshDefaultModels(settings) && len(settings.Provider.Models) > 0 {
+			// First-run fallback only. Catalog order is deterministic; this is a
+			// default for a new session, never task-time model routing.
+			settings.Provider.ActiveModelID = settings.Provider.Models[0].ID
+		}
 	}
 	return stranded
 }

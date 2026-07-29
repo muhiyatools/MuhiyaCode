@@ -1,8 +1,11 @@
 package orchestrator
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"hash"
 	"math"
 	"os"
 	"path/filepath"
@@ -11,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
@@ -34,9 +38,11 @@ type InspectionSnapshot struct {
 }
 
 type InspectionEntry struct {
-	CallID string `json:"callId"`
-	Kind   string `json:"kind"`
-	Path   string `json:"path,omitempty"`
+	CallID             string `json:"callId"`
+	Kind               string `json:"kind"`
+	Path               string `json:"path,omitempty"`
+	ContentFingerprint string `json:"contentFingerprint,omitempty"`
+	RecordedAtUnix     int64  `json:"recordedAtUnix,omitempty"`
 
 	// Transitional fields from the first Go snapshot shape.
 	Tool      string `json:"tool,omitempty"`
@@ -60,6 +66,7 @@ type InspectionSegment struct {
 type InspectionFingerprint struct {
 	MTimeMS float64 `json:"mtimeMs"`
 	Size    int64   `json:"size"`
+	SHA256  string  `json:"sha256,omitempty"`
 }
 
 type InspectionLedger struct {
@@ -103,17 +110,9 @@ func NewInspection(snapshot InspectionSnapshot, persist func(InspectionSnapshot)
 	return &InspectionLedger{signatures: snapshot.Signatures, coverage: snapshot.Coverage, inspected: inspected, fullReads: snapshot.FullReads, root: root, persist: persist}
 }
 
-// readonlyTools is the dispatch-side dedup ledger's tool set. These are the
-// tools whose results flow into the conversation unchanged on a second call
-// and therefore pay nothing on a second hit — inspect_code and web_search are
-// included because (a) inspect_code is an AST parse that is fully deterministic
-// given (mode, path, symbol) and (b) web_search cache-cache of identical queries
-// is the dominant token waste on research-heavy tasks. Both fall into the
-// "search_kind" record path below, key on `callSignature` (compactJSON), and
-// are wiped alongside other search results when any workspace file changes —
-// which is the right trade-off because both kinds of results can describe any
-// file in the workspace and have no per-file freshness key.
-var readonlyTools = map[string]bool{"read_file": true, "list_files": true, "grep": true, "glob": true, "search_text": true, "git_status": true, "git_diff": true, "inspect_code": true, "web_search": true}
+// Git views are intentionally excluded: their truth includes repository
+// metadata outside the content fingerprint used for workspace searches.
+var readonlyTools = map[string]bool{"read_file": true, "list_files": true, "grep": true, "glob": true, "search_text": true, "inspect_code": true, "web_search": true}
 
 func (l *InspectionLedger) Duplicate(call contract.ToolCall, intact func(string) bool) (InspectionEntry, bool) {
 	if !readonlyTools[call.ToolName()] {
@@ -122,21 +121,30 @@ func (l *InspectionLedger) Duplicate(call contract.ToolCall, intact func(string)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if call.ToolName() != "read_file" {
-		// A-4: search dedup (grep/glob/list_files/inspect_code/web_search) is
-		// invalidated ONLY by workspace mutations — every agent edit/write/patch/
-		// shell clears all search-kind signatures via invalidatePathLocked (see
-		// the entry.Kind == "search" branch there). Unlike read_file it carries no
-		// per-file mtime gate, so a change made OUTSIDE the agent's tools between
-		// turns is not detected; an identical re-search then serves the prior
-		// "already ran" block. This is by design: a search spans many files with
-		// no single freshness key, and the agent is the workspace's own mutator, so
-		// an external mid-session edit is out of scope.
 		key := callSignature(call)
 		if call.ToolName() == "inspect_code" {
 			key = inspectSignature(call)
 		}
 		entry, ok := l.signatures[key]
-		return entry, ok && intact(entry.CallID)
+		if !ok || !intact(entry.CallID) {
+			return InspectionEntry{}, false
+		}
+		if call.ToolName() == "web_search" {
+			const webSearchTTLSeconds = 300
+			if entry.RecordedAtUnix <= 0 || time.Now().Unix()-entry.RecordedAtUnix > webSearchTTLSeconds {
+				delete(l.signatures, key)
+				l.saveLocked()
+				return InspectionEntry{}, false
+			}
+			return entry, true
+		}
+		current := l.searchFingerprint(call)
+		if current == "" || current != entry.ContentFingerprint {
+			delete(l.signatures, key)
+			l.saveLocked()
+			return InspectionEntry{}, false
+		}
+		return entry, true
 	}
 	path := pathArgument(call)
 	if path == "" {
@@ -184,7 +192,14 @@ func (l *InspectionLedger) Record(call contract.ToolCall, output string) {
 		if call.ToolName() == "inspect_code" {
 			key = inspectSignature(call)
 		}
-		l.addSignatureLocked(key, InspectionEntry{CallID: call.ID, Kind: "search"})
+		entry := InspectionEntry{CallID: call.ID, Kind: "search", RecordedAtUnix: time.Now().Unix()}
+		if call.ToolName() != "web_search" {
+			entry.ContentFingerprint = l.searchFingerprint(call)
+			if entry.ContentFingerprint == "" {
+				return
+			}
+		}
+		l.addSignatureLocked(key, entry)
 		l.saveLocked()
 		return
 	}
@@ -224,6 +239,15 @@ func (l *InspectionLedger) InvalidateFor(call contract.ToolCall) []string {
 	name := call.ToolName()
 	mutates := name == "edit_file" || name == "multi_edit" || name == "write_file" || name == "apply_patch" || name == "run_shell" || strings.HasPrefix(name, "mcp__")
 	if !mutates {
+		if name == "read_file" || name == "inspect_code" {
+			path := pathArgument(call)
+			if path != "" {
+				l.mu.Lock()
+				defer l.mu.Unlock()
+				key := l.pathKey(path)
+				return l.invalidatePathLocked(key)
+			}
+		}
 		return nil
 	}
 	if name == "run_shell" {
@@ -357,11 +381,17 @@ func (l *InspectionLedger) fingerprint(key string) *InspectionFingerprint {
 	if l.root == "" {
 		return nil
 	}
-	info, err := os.Stat(filepath.Join(l.root, filepath.FromSlash(key)))
+	path := filepath.Join(l.root, filepath.FromSlash(key))
+	info, err := os.Stat(path)
 	if err != nil {
 		return nil
 	}
-	return &InspectionFingerprint{MTimeMS: float64(info.ModTime().UnixNano()) / 1e6, Size: info.Size()}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	digest := sha256.Sum256(data)
+	return &InspectionFingerprint{MTimeMS: float64(info.ModTime().UnixNano()) / 1e6, Size: info.Size(), SHA256: fmt.Sprintf("%x", digest)}
 }
 
 func (l *InspectionLedger) coverageStaleLocked(key string) bool {
@@ -370,7 +400,114 @@ func (l *InspectionLedger) coverageStaleLocked(key string) bool {
 		return false
 	}
 	current := l.fingerprint(key)
-	return current != nil && (current.Size != coverage.Fingerprint.Size || math.Abs(current.MTimeMS-coverage.Fingerprint.MTimeMS) > .01)
+	if current == nil {
+		return true
+	}
+	if coverage.Fingerprint.SHA256 != "" {
+		return current.SHA256 != coverage.Fingerprint.SHA256
+	}
+	return current.Size != coverage.Fingerprint.Size || math.Abs(current.MTimeMS-coverage.Fingerprint.MTimeMS) > .01
+}
+
+func (l *InspectionLedger) searchFingerprint(call contract.ToolCall) string {
+	if l.root == "" {
+		// Rootless ledgers exist only in isolated unit callers. Production
+		// engines always pass Session.WorkspacePath and therefore never use this
+		// compatibility marker.
+		return "unscoped"
+	}
+	absolute, ok := l.fingerprintTarget(pathArgument(call))
+	if !ok {
+		return ""
+	}
+	digest := sha256.New()
+	scan := treeFingerprintScan{root: l.root, target: absolute, digest: digest}
+	if err := filepath.Walk(absolute, scan.visit); err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%x", digest.Sum(nil))
+}
+
+func (l *InspectionLedger) fingerprintTarget(target string) (string, bool) {
+	if target == "" {
+		target = "."
+	}
+	absolute := target
+	if !filepath.IsAbs(absolute) {
+		absolute = filepath.Join(l.root, absolute)
+	}
+	absolute, err := filepath.Abs(absolute)
+	if err != nil {
+		return "", false
+	}
+	relative, err := filepath.Rel(l.root, absolute)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return absolute, true
+}
+
+type treeFingerprintScan struct {
+	root      string
+	target    string
+	digest    hash.Hash
+	fileCount int
+	byteCount int64
+}
+
+func (s *treeFingerprintScan) visit(path string, fileInfo os.FileInfo, walkErr error) error {
+	if walkErr != nil {
+		return walkErr
+	}
+	if fileInfo.IsDir() {
+		if path != s.target && ignoredFingerprintDir(fileInfo.Name()) {
+			return filepath.SkipDir
+		}
+		return nil
+	}
+	if !fileInfo.Mode().IsRegular() {
+		return nil
+	}
+	s.fileCount++
+	s.byteCount += fileInfo.Size()
+	if s.fileCount > 10_000 || s.byteCount > 64<<20 {
+		return errFingerprintLimit
+	}
+	return writeFingerprintedFile(s.digest, s.root, path)
+}
+
+func writeFingerprintedFile(digest hash.Hash, root, path string) error {
+	relative, err := filepath.Rel(root, path)
+	if err != nil {
+		return err
+	}
+	if _, err = digest.Write(append([]byte(filepath.ToSlash(relative)), 0)); err != nil {
+		return err
+	}
+	return hashFile(digest, path)
+}
+
+var errFingerprintLimit = errors.New("inspection fingerprint limit exceeded")
+
+func hashFile(destination hash.Hash, path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	_, err = destination.Write(data)
+	if err == nil {
+		_, err = destination.Write([]byte{0})
+	}
+	return err
+}
+
+func ignoredFingerprintDir(name string) bool {
+	switch name {
+	case ".git", "node_modules", "vendor", "dist", "build", "target", ".next":
+		return true
+	default:
+		return false
+	}
 }
 
 func (l *InspectionLedger) pathKey(raw string) string {

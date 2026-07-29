@@ -146,8 +146,8 @@ type fakeMCPTool struct{ name string }
 func (f fakeMCPTool) Definition() contract.ToolDefinition {
 	return contract.ToolDefinition{Type: "function", Function: contract.FunctionDefinition{Name: f.name, Description: "probe"}}
 }
-func (f fakeMCPTool) Execute(context.Context, json.RawMessage) (string, error) {
-	return "", nil
+func (f fakeMCPTool) Execute(context.Context, json.RawMessage) contract.ToolResult {
+	return contract.AdaptToolResult("", nil)
 }
 
 // mcpRegistrySupportsDynamicTools proves the live mechanism registry.go

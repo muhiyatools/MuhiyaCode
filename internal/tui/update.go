@@ -175,6 +175,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.notify(string(value))
 	case streamMsg:
 		m.appendStream(value)
+	case streamResetMsg:
+		m.resetStreamDraft()
 	case toolStartMsg:
 		tv := &toolView{name: value.name, target: contract.ToolTarget(value.name, value.input), state: "running", started: time.Now()}
 		m.items = append(m.items, item{kind: "tool", tool: tv})
@@ -203,6 +205,8 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		// short of the turn ceiling.
 		if value.TerminatedReason != "" {
 			m.warn("Task terminated: " + value.TerminatedReason)
+		} else if value.Status == contract.TaskStatusIncomplete {
+			m.warn("Task ended incomplete.")
 		}
 	case engineNoticeMsg:
 		// An off-thread engine mutation (T021) finished; show its notice.
@@ -299,7 +303,7 @@ func (m *Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	// instant regardless of transcript length. Presentation-only: the provider
 	// request path (and therefore the prefix cache) is untouched.
 	switch message.(type) {
-	case streamMsg, toolStartMsg, toolEndMsg, toolOutputMsg, resultMsg, statsMsg, initialMsg, actionMsg:
+	case streamMsg, streamResetMsg, toolStartMsg, toolEndMsg, toolOutputMsg, resultMsg, statsMsg, initialMsg, actionMsg:
 		dirty = true
 	}
 	if len(m.items) != beforeItems || m.width != beforeWidth {

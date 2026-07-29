@@ -104,15 +104,15 @@ func (m *Model) applyPage(msg transcriptPageMsg) {
 	m.applyOlderPage(msg.page)
 }
 
-// applyInitialPage adopts the newest page as the render window and records the
-// paging cursor. It replaces the recent window (identical content, now id-tagged)
-// only before any live turn, so it never disturbs an active session.
+// applyInitialPage records the legacy projection's paging cursor. Journal-backed
+// recent events remain the render authority; the page only populates an empty
+// window, which preserves compatibility for callers without a journal snapshot.
 func (m *Model) applyInitialPage(page contract.TranscriptPage) {
 	m.initialPaged = true
 	m.oldestEventID = page.OldestID
 	m.hasOlderEvents = page.HasOlder
-	if m.busy || len(m.items) > len(page.Entries) {
-		return // a turn already advanced the window; keep it, just record the cursor
+	if m.busy || len(m.items) > 0 {
+		return
 	}
 	if items := m.pageItems(page); len(items) > 0 {
 		m.items = items

@@ -13,10 +13,6 @@ func filePath(parts ...string) string {
 	return filepath.Join(parts...)
 }
 
-func expectedFirst() string {
-	return filePath("workspace", "file-05.go")
-}
-
 func expectedEvicted(i int) string {
 	return filePath("workspace", fmt.Sprintf("file-%02d.go", i))
 }

@@ -3,8 +3,6 @@ package workspace
 import (
 	"context"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -41,85 +39,17 @@ func (w *Workspace) ApplyPatch(ctx context.Context, text string) (PatchResult, e
 	if len(patches) == 0 {
 		return PatchResult{}, fmt.Errorf("patch contains no file headers")
 	}
-	type change struct {
-		path          string
-		before, after string
-		existed, drop bool
-	}
-	changes := make([]change, 0, len(patches))
-	for _, patch := range patches {
-		name := patch.newName
-		if name == "/dev/null" || name == "" {
-			name = patch.oldName
-		}
-		name = strings.TrimPrefix(strings.TrimPrefix(name, "a/"), "b/")
-		target, err := w.authorizePath(ctx, ActionPatch, name)
-		if err != nil {
-			return PatchResult{}, err
-		}
-		data, readErr := os.ReadFile(target)
-		existed := readErr == nil
-		if readErr != nil && !os.IsNotExist(readErr) {
-			return PatchResult{}, readErr
-		}
-		if existed && !w.canOverwrite(target) {
-			return PatchResult{}, fmt.Errorf("%w: %s", ErrUnreadOverwrite, name)
-		}
-		before := strings.ReplaceAll(string(data), "\r\n", "\n")
-		after, err := applyHunks(before, patch.hunks)
-		if err != nil {
-			return PatchResult{}, fmt.Errorf("patch %s: %w", name, err)
-		}
-		// Re-encode to CRLF only when it is the file's DOMINANT ending, so a
-		// mostly-LF file with a stray CRLF is not flipped wholesale to CRLF (C-2).
-		if dominantCRLF(string(data)) {
-			after = strings.ReplaceAll(after, "\n", "\r\n")
-		}
-		changes = append(changes, change{path: target, before: string(data), after: after, existed: existed, drop: patch.newName == "/dev/null"})
-	}
-	paths := make([]string, len(changes))
-	for i := range changes {
-		paths[i] = changes[i].path
-	}
-	if err := w.checkpoint(ctx, "before applying patch", paths); err != nil {
+	changes, err := w.preparePatchChanges(ctx, patches)
+	if err != nil {
 		return PatchResult{}, err
 	}
-	var committed []change
-	rollback := func() {
-		for i := len(committed) - 1; i >= 0; i-- {
-			entry := committed[i]
-			if entry.existed {
-				_ = writeAtomic(entry.path, []byte(entry.before), 0o644)
-			} else {
-				_ = os.Remove(entry.path)
-			}
-		}
+	if err := w.checkpoint(ctx, "before applying patch", patchChangePaths(changes)); err != nil {
+		return PatchResult{}, err
 	}
-	for _, entry := range changes {
-		if entry.drop {
-			if err := os.Remove(entry.path); err != nil && !os.IsNotExist(err) {
-				rollback()
-				return PatchResult{}, err
-			}
-		} else {
-			if err := os.MkdirAll(filepath.Dir(entry.path), 0o755); err != nil {
-				rollback()
-				return PatchResult{}, err
-			}
-			if err := writeAtomic(entry.path, []byte(entry.after), 0o644); err != nil {
-				rollback()
-				return PatchResult{}, err
-			}
-		}
-		committed = append(committed, entry)
-		w.readLedger.add(entry.path)
+	if err := w.commitPatchChanges(changes); err != nil {
+		return PatchResult{}, err
 	}
-	result := PatchResult{Files: make([]string, 0, len(changes))}
-	for _, entry := range changes {
-		result.Files = append(result.Files, relativeSlash(w.root, entry.path))
-	}
-	result.Summary = fmt.Sprintf("Applied patch to %d file(s): %s.", len(result.Files), strings.Join(result.Files, ", "))
-	return result, nil
+	return patchResult(w.root, changes), nil
 }
 
 func parseUnifiedPatch(text string) ([]unifiedPatch, error) {

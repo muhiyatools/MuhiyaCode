@@ -6,15 +6,15 @@ func pairedRecord(stream UsageStream, read, miss int, attribution CacheAttributi
 	return UsageRecord{Stream: stream, CacheReadTokens: &read, CacheMissTokens: &miss, Attribution: attribution}
 }
 
-// TestAllStreamHitRateCountsSubagentsAndAux (013 FR-021 / SC-006) is the whole
+// TestAllStreamHitRateCountsAuxAndMain (013 FR-021 / SC-006) is the whole
 // point of the field: the displayed session rate must describe the SESSION, not
 // just the main conversation. The fixture is deliberately lopsided — a
-// well-cached main stream and a cold subagent stream — so a main-only
-// computation gives a visibly different (and flattering) answer.
+// well-cached main stream and a cold aux stream — so a main-only computation
+// gives a visibly different (and flattering) answer.
 func TestAllStreamHitRateCountsSubagentsAndAux(t *testing.T) {
 	aggregate := AggregateUsage([]UsageRecord{
 		pairedRecord(UsageStreamMain, 90, 10, CacheAttributionProvider),
-		pairedRecord(UsageStreamSubagent, 0, 100, CacheAttributionNA),
+		pairedRecord(UsageStreamAux, 0, 100, CacheAttributionNA),
 		pairedRecord(UsageStreamAux, 10, 90, CacheAttributionNA),
 	})
 	if aggregate.AllStreamHitRate == nil {
@@ -28,7 +28,7 @@ func TestAllStreamHitRateCountsSubagentsAndAux(t *testing.T) {
 		t.Fatalf("main-only SessionHitRate should be unchanged at 0.9, got %v", aggregate.SessionHitRate)
 	}
 	if *aggregate.AllStreamHitRate == *aggregate.SessionHitRate {
-		t.Fatal("the two rates must differ here, or the fixture cannot prove subagents are counted")
+		t.Fatal("the two rates must differ here, or the fixture cannot prove aux is counted")
 	}
 }
 
@@ -38,7 +38,7 @@ func TestAllStreamHitRateIgnoresOneSidedRecords(t *testing.T) {
 	read := 50
 	aggregate := AggregateUsage([]UsageRecord{
 		pairedRecord(UsageStreamMain, 80, 20, CacheAttributionProvider),
-		{Stream: UsageStreamSubagent, CacheReadTokens: &read}, // miss unknown: excluded from the rate
+		{Stream: UsageStreamAux, CacheReadTokens: &read}, // miss unknown: excluded from the rate
 	})
 	if aggregate.AllStreamHitRate == nil || *aggregate.AllStreamHitRate != 0.8 {
 		t.Fatalf("one-sided record polluted the rate: %v", aggregate.AllStreamHitRate)

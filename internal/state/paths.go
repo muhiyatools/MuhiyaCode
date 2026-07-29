@@ -17,18 +17,19 @@ const HomeEnvironment = "MUHIYA_HOME"
 // MuhiyaCode implementation. New state must continue to use these names so an
 // upgrade can open an existing ~/.muhiya directory in place.
 type Paths struct {
-	Home           string
-	SettingsFile   string
-	SecretsFile    string
-	MCPFile        string
-	MCPSecretsFile string
-	StateDir       string
-	DBFile         string
-	SessionsDir    string
-	ProjectsDir    string
-	CacheDir       string
-	LogsDir        string
-	TmpDir         string
+	Home             string
+	SettingsFile     string
+	SecretsFile      string
+	MCPFile          string
+	MCPSecretsFile   string
+	StateDir         string
+	DBFile           string
+	SessionsDir      string
+	ProjectsDir      string
+	CacheDir         string
+	ModelCatalogFile string
+	LogsDir          string
+	TmpDir           string
 }
 
 // DefaultPaths resolves MUHIYA_HOME on every call, which makes tests and
@@ -49,18 +50,19 @@ func DefaultPaths() (Paths, error) {
 	home = filepath.Clean(abs)
 	stateDir := filepath.Join(home, "state")
 	return Paths{
-		Home:           home,
-		SettingsFile:   filepath.Join(home, "settings.json"),
-		SecretsFile:    filepath.Join(home, "secrets.json"),
-		MCPFile:        filepath.Join(home, "mcp.json"),
-		MCPSecretsFile: filepath.Join(home, "mcp-secrets.json"),
-		StateDir:       stateDir,
-		DBFile:         filepath.Join(stateDir, "muhiyacode.sqlite"),
-		SessionsDir:    filepath.Join(home, "sessions"),
-		ProjectsDir:    filepath.Join(home, "projects"),
-		CacheDir:       filepath.Join(home, "cache"),
-		LogsDir:        filepath.Join(home, "logs"),
-		TmpDir:         filepath.Join(home, "tmp"),
+		Home:             home,
+		SettingsFile:     filepath.Join(home, "settings.json"),
+		SecretsFile:      filepath.Join(home, "secrets.json"),
+		MCPFile:          filepath.Join(home, "mcp.json"),
+		MCPSecretsFile:   filepath.Join(home, "mcp-secrets.json"),
+		StateDir:         stateDir,
+		DBFile:           filepath.Join(stateDir, "muhiyacode.sqlite"),
+		SessionsDir:      filepath.Join(home, "sessions"),
+		ProjectsDir:      filepath.Join(home, "projects"),
+		CacheDir:         filepath.Join(home, "cache"),
+		ModelCatalogFile: filepath.Join(home, "cache", "model-catalog-v2.json"),
+		LogsDir:          filepath.Join(home, "logs"),
+		TmpDir:           filepath.Join(home, "tmp"),
 	}, nil
 }
 

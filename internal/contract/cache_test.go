@@ -84,7 +84,7 @@ func TestAggregateUsageComputesPrefixStabilityFromMainStreamOnly(t *testing.T) {
 	if aggregate.PrefixStabilityRate == nil || *aggregate.PrefixStabilityRate != 0.98 {
 		t.Fatalf("prefix stability=%v aggregate=%+v", aggregate.PrefixStabilityRate, aggregate)
 	}
-	if aggregate.MainRequests != 2 || aggregate.AuxRequests != 1 || aggregate.SubagentRequests != 0 {
+	if aggregate.MainRequests != 2 || aggregate.AuxRequests != 1 {
 		t.Fatalf("stream counts=%+v", aggregate)
 	}
 	if aggregate.SteadyStateHitRate == nil || *aggregate.SteadyStateHitRate != float64(ninetyEight)/float64(ninetyEight+twelve) {

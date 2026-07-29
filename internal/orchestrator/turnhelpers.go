@@ -19,7 +19,11 @@ func (e *Engine) drainSteering(ctx context.Context) bool {
 	e.steering = nil
 	e.mu.Unlock()
 	for _, text := range queued {
-		_ = e.persistMessage(ctx, "user", "message", text, "", map[string]any{"role": "user", "content": text, "createdAt": time.Now().UTC().Format(time.RFC3339Nano)})
+		_ = e.persistConversation(ctx, conversationPersistence{
+			Message:    contract.Message{Role: contract.RoleUser, Content: text},
+			Kind:       "message",
+			Transcript: map[string]any{"role": "user", "content": text, "createdAt": time.Now().UTC().Format(time.RFC3339Nano)},
+		})
 		e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[Mid-task message from the user; incorporate now and keep valid completed work]\n" + text})
 	}
 	if len(queued) > 0 {
@@ -90,31 +94,76 @@ func sleepContext(ctx context.Context, delay time.Duration) error {
 // persistMessage records one durable event (and its transcript twin). target is
 // the tool's display target for tool events (empty for user/assistant), persisted
 // so a resumed row names WHAT the call acted on exactly as it did live.
-func (e *Engine) persistMessage(ctx context.Context, role, kind, content, target string, transcript map[string]any) error {
-	if e.persistence.AddEvent != nil {
-		if err := e.persistence.AddEvent(ctx, role, kind, e.redact(content), target); err != nil {
+type conversationPersistence struct {
+	Message    contract.Message
+	Kind       string
+	Target     string
+	Transcript map[string]any
+}
+
+func (e *Engine) persistConversation(ctx context.Context, record conversationPersistence) error {
+	if err := e.persistMessageEvent(ctx, record.Message, record.Kind, record.Target); err != nil {
+		return err
+	}
+	if e.persistence.AddEvent != nil && legacyEventVisible(record.Message) {
+		if err := e.persistence.AddEvent(ctx, string(record.Message.Role), record.Kind, e.redact(record.Message.Content), record.Target); err != nil {
 			return err
 		}
 	}
 	if e.persistence.AppendTranscript != nil {
-		if err := e.persistence.AppendTranscript(ctx, transcript); err != nil {
+		if err := e.persistence.AppendTranscript(ctx, record.Transcript); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+func legacyEventVisible(message contract.Message) bool {
+	return message.Role != contract.RoleAssistant || strings.TrimSpace(message.Content) != ""
+}
+
 func (e *Engine) persistAssistant(ctx context.Context, content string) error {
-	if err := e.persistMessage(ctx, "assistant", "message", content, "", map[string]any{"role": "assistant", "content": content, "createdAt": time.Now().UTC().Format(time.RFC3339Nano)}); err != nil {
+	record := conversationPersistence{
+		Message:    contract.Message{Role: contract.RoleAssistant, Content: content},
+		Kind:       "message",
+		Transcript: map[string]any{"role": "assistant", "content": content, "createdAt": time.Now().UTC().Format(time.RFC3339Nano)},
+	}
+	if err := e.persistConversation(ctx, record); err != nil {
 		return err
 	}
 	e.history.Append(contract.Message{Role: contract.RoleAssistant, Content: content})
 	return nil
 }
 
+func (e *Engine) persistAssistantReplay(ctx context.Context, message contract.Message, content string) error {
+	record := conversationPersistence{
+		Message: message,
+		Kind:    "message",
+		Transcript: map[string]any{
+			"role": "assistant", "content": content, "toolCalls": message.ToolCalls,
+			"createdAt": time.Now().UTC().Format(time.RFC3339Nano),
+		},
+	}
+	return e.persistConversation(ctx, record)
+}
+
+func (e *Engine) persistToolConversation(ctx context.Context, outcome toolOutcome, target string) error {
+	record := conversationPersistence{
+		Message: contract.Message{Role: contract.RoleTool, ToolCallID: outcome.Call.ID, Content: outcome.Output},
+		Kind:    outcome.Call.ToolName(),
+		Target:  target,
+		Transcript: map[string]any{
+			"role": "tool", "name": outcome.Call.ToolName(), "input": outcome.Call.ArgumentsJSON(),
+			"output": outcome.Output, "indeterminate": outcome.IsIndeterminate(),
+			"createdAt": time.Now().UTC().Format(time.RFC3339Nano), "durationMs": outcome.DurationMS,
+		},
+	}
+	return e.persistConversation(ctx, record)
+}
+
 func (e *Engine) finalize(ctx context.Context, content string) string {
 	if strings.TrimSpace(content) == "" {
-		content = "Done."
+		content = "No final response was produced."
 	}
 	// FR-017: reconcile the answer against the tasks.md checklist so a finished
 	// answer never implies completion while checklist items are still open. Uses
@@ -205,7 +254,7 @@ func (e *Engine) taskFailureWindowCount(currentTurn int) int {
 
 func (e *Engine) trackKnowledge(outcome toolOutcome) {
 	name := outcome.Call.ToolName()
-	if !outcome.Failed && name == "read_file" {
+	if outcome.Succeeded() && name == "read_file" {
 		e.knowledge.NoteFile(e.workspaceCallPath(outcome.Call), summarizeRead(outcome.Output))
 	}
 	if isMutation(name) {
@@ -237,13 +286,13 @@ func fallbackAnswer(content string, changed map[string]bool) string {
 		return strings.TrimSpace(content)
 	}
 	if len(changed) > 0 {
-		return fmt.Sprintf("Work completed with %d changed file(s).", len(changed))
+		return fmt.Sprintf("Changed %d file(s), but no final summary was produced.", len(changed))
 	}
-	return "Done."
+	return "No final response was produced."
 }
 
 func trackChanged(outcome toolOutcome, files map[string]bool) {
-	if outcome.Failed {
+	if outcome.IsFailure() {
 		return
 	}
 	name := outcome.Call.ToolName()
@@ -275,3 +324,22 @@ func summarizeRead(output string) string {
 }
 
 func filepathSlash(value string) string { return strings.ReplaceAll(value, "\\", "/") }
+
+func evaluateToolLoopBreakers(successfulToolCalls map[string][]int, turns int) (string, bool) {
+	for name, callTurns := range successfulToolCalls {
+		cutoff := turns - 15
+		count := 0
+		kept := callTurns[:0]
+		for _, t := range callTurns {
+			if t > cutoff {
+				kept = append(kept, t)
+				count++
+			}
+		}
+		successfulToolCalls[name] = kept
+		if count >= 15 {
+			return fmt.Sprintf("repeated successful calls to %s without progress — %d calls in the last 15 turns", name, count), true
+		}
+	}
+	return "", false
+}

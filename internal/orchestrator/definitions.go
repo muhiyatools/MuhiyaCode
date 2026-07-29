@@ -5,22 +5,72 @@ import (
 	"github.com/muhiya/muhiyacode/internal/instructions"
 )
 
-// sessionDefinitions returns the full, session-stable tool schema set. It never
-// varies by task class or effort, so the tool block stays byte-identical across
-// turns and stays inside the provider's cached prefix. Per-turn permission comes
-// at execution time from the liveness guards, never by adding or removing
-// schemas.
+// sessionDefinitions returns the complete discoverable session catalog. The
+// request path uses taskDefinitions so optional MCP schemas can remain deferred;
+// this full catalog powers inventory and administration surfaces.
 func (e *Engine) sessionDefinitions() []contract.ToolDefinition {
-	definitions := e.registry.BaseDefinitions(nil)
-	definitions = append(definitions, askUserDefinition(), proposeChangesDefinition(), saveMemoryDefinition(), recallMemoryDefinition(), editMemoryDefinition())
+	definitions := e.coreDefinitions()
+	definitions = append(definitions, e.registry.MCPDefinitions(nil)...)
+	return definitions
+}
+
+// taskDefinitions returns the stable local core plus MCP definitions activated
+// for this task. The active set may grow only through activate_tools, which
+// records a toolset invalidation before the next request is assembled.
+func (e *Engine) taskDefinitions() []contract.ToolDefinition {
+	return e.coreDefinitions()
+}
+
+func (e *Engine) coreDefinitions() []contract.ToolDefinition {
+	excluded := map[string]bool{
+		"search_text": true, "glob": true, "apply_patch": true, "git_status": true,
+	}
+	all := e.registry.BaseDefinitions(nil)
+	definitions := make([]contract.ToolDefinition, 0, len(all)+3)
+	for _, candidate := range all {
+		if !excluded[candidate.Function.Name] {
+			definitions = append(definitions, candidate)
+		}
+	}
+	definitions = append(definitions, askUserDefinition(), integrationToolsDefinition())
 	// read_skill is advertised only when the session actually catalogued skills:
 	// a tool the model can never use successfully is pure prefix weight, and its
 	// presence would invite calls that can only fail.
 	if e.skills.Len() > 0 {
 		definitions = append(definitions, readSkillDefinition())
 	}
-	definitions = append(definitions, e.registry.MCPDefinitions(nil)...)
 	return definitions
+}
+
+func integrationToolsDefinition() contract.ToolDefinition {
+	return definition("integration_tools", "List or call an optional MCP integration without changing the main prompt's tool schemas.", map[string]any{
+		"action":    map[string]any{"type": "string", "enum": []string{"list", "call"}},
+		"name":      map[string]any{"type": "string"},
+		"query":     map[string]any{"type": "string"},
+		"offset":    map[string]any{"type": "integer", "minimum": 0},
+		"arguments": map[string]any{"type": "object", "additionalProperties": true},
+	}, []string{"action"})
+}
+
+func sameDefinitionNames(left, right []contract.ToolDefinition) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for i := range left {
+		if left[i].Function.Name != right[i].Function.Name {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *Engine) refreshTaskDefinitions(current []contract.ToolDefinition, currentReserve requestBudgetReserve, promptText string, promptContext PromptContext) ([]contract.ToolDefinition, requestBudgetReserve) {
+	next := e.taskDefinitions()
+	if sameDefinitionNames(current, next) {
+		return current, currentReserve
+	}
+	e.recordAssemblySizes(promptText, promptContext, next)
+	return next, e.requestReserve(next)
 }
 
 // SessionToolNames exposes sessionDefinitions()'s full name set (feature 010

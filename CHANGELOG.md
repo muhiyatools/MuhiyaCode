@@ -2,6 +2,10 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
+## 1.3.2
+
+- Version maintenance release preparing for GitHub release and npm distribution.
+
 ## 1.3.1 – AST & Code Intelligence Integration (Feature 015)
 
 - **`inspect_code` Workspace Tool:** Native Go AST-powered structural parser (`go/parser`, `go/ast`, `go/token`) supporting `outline` (declaration signatures), `definition` (symbol lookup), and `references` (usage sites) modes.

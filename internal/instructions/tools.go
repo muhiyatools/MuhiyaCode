@@ -36,7 +36,7 @@ const (
 	ToolRunShellDescription    = "Run a shell command in the workspace with streaming output and cancellation. Each call runs fresh at the workspace root; a cd affects only that one command, so combine cd and the command in a single call. For reading or searching files use read_file/grep instead — they are cheaper and cache-tracked."
 	ToolGitStatusDescription   = "Show concise git status."
 	ToolGitDiffDescription     = "Show the workspace git diff."
-	ToolInspectCodeDescription = "Inspect Go source structure: outline (declarations), definition (symbol lookup), or references (usage sites). Returns compact signatures with line numbers — no bodies."
+	ToolInspectCodeDescription = "Inspect supported source structure. Go results use syntax-aware AST indexing; TypeScript, JavaScript, Python, Rust, C/C++, and Java use explicitly labeled lexical outlines and symbol matches. This is not compiler/LSP semantic resolution."
 )
 
 var (

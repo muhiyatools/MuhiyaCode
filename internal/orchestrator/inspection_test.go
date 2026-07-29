@@ -11,6 +11,67 @@ import (
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
+func TestSearchDedupDetectsExternalSameMetadataEdit(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	original, replacement := "alpha\n", "bravo\n"
+	if len(original) != len(replacement) {
+		t.Fatal("test contents must have equal length")
+	}
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixed := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(path, fixed, fixed); err != nil {
+		t.Fatal(err)
+	}
+	ledger := NewInspection(InspectionSnapshot{Version: 3}, nil, root)
+	call := contract.NewToolCall("grep-1", "grep", `{"pattern":"alpha","path":"."}`)
+	ledger.Record(call, "sample.txt:1:alpha")
+	if _, duplicate := ledger.Duplicate(call, func(string) bool { return true }); !duplicate {
+		t.Fatal("unchanged search should deduplicate")
+	}
+
+	if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, fixed, fixed); err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate := ledger.Duplicate(call, func(string) bool { return true }); duplicate {
+		t.Fatal("external same-size, same-mtime edit returned a stale search result")
+	}
+}
+
+func TestReadDedupDetectsExternalSameMetadataEdit(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "sample.txt")
+	original, replacement := "alpha\n", "bravo\n"
+	if err := os.WriteFile(path, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixed := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(path, fixed, fixed); err != nil {
+		t.Fatal(err)
+	}
+	ledger := NewInspection(InspectionSnapshot{Version: 3}, nil, root)
+	call := contract.NewToolCall("read-1", "read_file", `{"path":"sample.txt","offset":1,"limit":1}`)
+	ledger.Record(call, "Read sample.txt (lines 1-1 of 1).\n1 | alpha")
+	if _, duplicate := ledger.Duplicate(call, func(string) bool { return true }); !duplicate {
+		t.Fatal("unchanged read should deduplicate")
+	}
+
+	if err := os.WriteFile(path, []byte(replacement), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, fixed, fixed); err != nil {
+		t.Fatal(err)
+	}
+	if _, duplicate := ledger.Duplicate(call, func(string) bool { return true }); duplicate {
+		t.Fatal("external same-size, same-mtime edit returned a stale read result")
+	}
+}
+
 func TestInspectionStitchesRangesPersistsAndReloads(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "large.go")

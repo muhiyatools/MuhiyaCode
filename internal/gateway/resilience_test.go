@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -43,12 +44,18 @@ func TestDiedStreamIsRetriedOnce(t *testing.T) {
 	defer server.Close()
 
 	var retries int
+	var visible strings.Builder
+	resets := 0
 	provider := NewOpenAICompatible(Config{
 		Settings: testSettings(server.URL), APIKey: "sk-test", MaxRetries: 1,
 		IdleTimeout: 2 * time.Second, RequestLifetime: 5 * time.Second,
 		StreamRetryObserver: func(error) { retries++ },
 	})
-	response, err := provider.Chat(context.Background(), contract.ChatRequest{Messages: []contract.Message{{Role: contract.RoleUser, Content: "hi"}}})
+	response, err := provider.Chat(context.Background(), contract.ChatRequest{
+		Messages:      []contract.Message{{Role: contract.RoleUser, Content: "hi"}},
+		OnToken:       func(token string) { visible.WriteString(token) },
+		OnStreamReset: func() { resets++; visible.Reset() },
+	})
 	if err != nil {
 		t.Fatalf("a died stream must be retried, not surfaced as a dead task: %v", err)
 	}
@@ -57,6 +64,9 @@ func TestDiedStreamIsRetriedOnce(t *testing.T) {
 	}
 	if retries != 1 {
 		t.Fatalf("stream retries = %d, want exactly 1 (telemetered, not silent)", retries)
+	}
+	if resets != 1 || visible.String() != "complete" {
+		t.Fatalf("visible stream was not reconciled before retry: resets=%d visible=%q", resets, visible.String())
 	}
 	if got := attempts.Load(); got != 2 {
 		t.Fatalf("upstream attempts = %d, want 2", got)
@@ -67,6 +77,7 @@ func TestDiedStreamIsRetriedOnce(t *testing.T) {
 // rather than being hidden behind an escalating retry ladder.
 func TestDiedStreamRetriesOnlyOnce(t *testing.T) {
 	var attempts atomic.Int32
+	var resets atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		attempts.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -84,11 +95,17 @@ func TestDiedStreamRetriesOnlyOnce(t *testing.T) {
 		Settings: testSettings(server.URL), APIKey: "sk-test", MaxRetries: 3,
 		IdleTimeout: 2 * time.Second, RequestLifetime: 5 * time.Second,
 	})
-	if _, err := provider.Chat(context.Background(), contract.ChatRequest{Messages: []contract.Message{{Role: contract.RoleUser, Content: "hi"}}}); err == nil {
+	if _, err := provider.Chat(context.Background(), contract.ChatRequest{
+		Messages:      []contract.Message{{Role: contract.RoleUser, Content: "hi"}},
+		OnStreamReset: func() { resets.Add(1) },
+	}); err == nil {
 		t.Fatal("a permanently dying stream must eventually surface an error")
 	}
 	if got := attempts.Load(); got != 2 {
 		t.Fatalf("upstream attempts = %d, want 2 (the original plus one retry)", got)
+	}
+	if got := resets.Load(); got != 2 {
+		t.Fatalf("each abandoned stream attempt must be retracted, got %d resets", got)
 	}
 }
 

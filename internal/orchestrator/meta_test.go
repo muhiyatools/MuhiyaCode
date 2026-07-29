@@ -14,6 +14,7 @@ func TestClassificationAndBudgets(t *testing.T) {
 	}{
 		{"hi", ClassChat},
 		{"fix typo in README.md", ClassTiny},
+		{"Make for me a simple snake game in a single html file", ClassTiny},
 		{"add a user management system", ClassStandard},
 		{"fully migrate the entire project from TypeScript to Go with a new architecture", ClassEpic},
 	}
@@ -22,14 +23,17 @@ func TestClassificationAndBudgets(t *testing.T) {
 			t.Errorf("Classify(%q) = %s, want %s", test.prompt, got, test.want)
 		}
 	}
-	// Reasoning effort is the user's chosen level sent raw (the gateway maps it
-	// per provider) — not capped by class.
 	budget := BudgetFor(Classify("hi", ""), Profile(contract.EffortMax))
-	if budget.Reasoning != contract.ReasoningMax {
-		t.Fatalf("reasoning effort should pass through the user's level: %+v", budget)
+	if budget.Reasoning != contract.ReasoningLow {
+		t.Fatalf("chat reasoning must stay cheap even when the session is set to max: %+v", budget)
 	}
 	if BudgetFor(Classify("hi", ""), Profile(contract.EffortLow)).Reasoning != contract.ReasoningLow {
 		t.Fatal("low effort should send low reasoning")
+	}
+	snake := BudgetFor(Classify("Make for me a simple snake game in a single html file", ""), Profile(contract.EffortHigh))
+	if snake.ToolCalls != 5 || snake.MaxChecks != 1 || snake.MaxTurns != 5 ||
+		snake.Reasoning != contract.ReasoningLow || snake.SingleArtifactExtension != ".html" {
+		t.Fatalf("simple single-file budget is not bounded: %+v", snake)
 	}
 }
 

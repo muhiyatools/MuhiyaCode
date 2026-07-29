@@ -11,8 +11,10 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/secrecy"
 )
 
 type Sessions struct {
@@ -48,6 +50,82 @@ func (s *Sessions) New(ctx context.Context, workspace, title string) (contract.S
 	return session, nil
 }
 
+func (s *Sessions) ForkAt(ctx context.Context, sourceID, title string, cursor int64, cutoff time.Time) (contract.Session, error) {
+	session, err := s.DB.ForkSessionAt(ctx, sourceID, title, cursor, cutoff)
+	if err != nil {
+		return contract.Session{}, err
+	}
+	dir, err := SessionDir(s.DB.paths, session.ID)
+	if err != nil {
+		return contract.Session{}, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return contract.Session{}, err
+	}
+	if err := writeFileAtomic(filepath.Join(dir, "transcript.jsonl"), nil, false); err != nil {
+		return contract.Session{}, err
+	}
+	sourceRuntime, ok, err := s.ReadRuntimeConfig(sourceID)
+	if err != nil {
+		return contract.Session{}, err
+	}
+	if ok {
+		sourceRuntime.CacheEpoch = 0
+		sourceRuntime.ModelLineages = map[string]contract.ModelLineage{
+			sourceRuntime.ModelID: {CacheEpoch: 0},
+		}
+		if err := s.WriteRuntimeConfig(session.ID, sourceRuntime); err != nil {
+			return contract.Session{}, err
+		}
+	}
+	return session, nil
+}
+
+func (s *Sessions) Delete(ctx context.Context, id string) error {
+	dir, err := SessionDir(s.DB.paths, id)
+	if err != nil {
+		return err
+	}
+	inside, err := filepath.Rel(s.DB.paths.SessionsDir, dir)
+	if err != nil || inside == ".." || strings.HasPrefix(inside, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("refuse to delete session directory outside session root")
+	}
+	if _, statErr := os.Stat(dir); statErr != nil {
+		if os.IsNotExist(statErr) {
+			return s.DB.DeleteSession(ctx, id)
+		}
+		return statErr
+	}
+	quarantine := filepath.Join(s.DB.paths.SessionsDir, ".deleting-"+id+"-"+fmt.Sprint(time.Now().UnixNano()))
+	if err := os.Rename(dir, quarantine); err != nil {
+		return err
+	}
+	if err := s.DB.DeleteSession(ctx, id); err != nil {
+		_ = os.Rename(quarantine, dir)
+		return err
+	}
+	return os.RemoveAll(quarantine)
+}
+
+func (s *Sessions) Import(ctx context.Context, bundle SessionBundle, workspace string) (contract.Session, error) {
+	session, err := s.DB.ImportSession(ctx, bundle, workspace)
+	if err != nil {
+		return contract.Session{}, err
+	}
+	dir, err := SessionDir(s.DB.paths, session.ID)
+	if err == nil {
+		err = os.MkdirAll(dir, 0o700)
+	}
+	if err == nil {
+		err = writeFileAtomic(filepath.Join(dir, "transcript.jsonl"), nil, false)
+	}
+	if err != nil {
+		_ = s.DB.DeleteSession(ctx, session.ID)
+		return contract.Session{}, err
+	}
+	return session, nil
+}
+
 func (s *Sessions) AppendTranscript(sessionID string, value map[string]any) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -76,6 +154,25 @@ func (s *Sessions) AppendTranscript(sessionID string, value map[string]any) erro
 
 func (s *Sessions) AppendUsage(sessionID string, record contract.UsageRecord) error {
 	return s.appendJSONLine(sessionID, "usage.jsonl", record)
+}
+
+func (s *Sessions) WriteUsageRecords(sessionID string, records []contract.UsageRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var content []byte
+	for _, record := range records {
+		line, err := json.Marshal(record)
+		if err != nil {
+			return err
+		}
+		content = append(content, line...)
+		content = append(content, '\n')
+	}
+	dir, err := SessionDir(s.DB.paths, sessionID)
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(dir, "usage.jsonl"), content, false)
 }
 
 func (s *Sessions) UsageRecords(sessionID string) ([]contract.UsageRecord, error) {
@@ -249,26 +346,8 @@ func (s *Sessions) WriteJSON(sessionID, name string, value any) error {
 	return writeJSON(filepath.Join(dir, name), value, false)
 }
 
-var secretPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`sk-[A-Za-z0-9_-]{12,}`),
-	regexp.MustCompile(`(?i)Bearer\s+[A-Za-z0-9._~+/=-]{12,}`),
-	regexp.MustCompile(`(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)\s*[:=]\s*[^\s,}]+`),
-	regexp.MustCompile(`(?i)(AKIA|ASIA)[A-Z0-9]{16}`),
-	regexp.MustCompile(`(?i)github_pat_[a-zA-Z0-9_]{22,}`),
-	regexp.MustCompile(`(?i)gh[po]_[a-zA-Z0-9_]{36}`),
-}
-
 func Redact(input string, secrets contract.Secrets, extra ...string) string {
-	output := input
-	for _, value := range append([]string{secrets.ProviderAPIKey}, extra...) {
-		if len(value) >= 8 {
-			output = strings.ReplaceAll(output, value, "[REDACTED_SECRET]")
-		}
-	}
-	for _, pattern := range secretPatterns {
-		output = pattern.ReplaceAllString(output, "[REDACTED]")
-	}
-	return output
+	return secrecy.Redact(input, append([]string{secrets.ProviderAPIKey}, extra...)...)
 }
 
 func redactObject(value any, secrets contract.Secrets) any {

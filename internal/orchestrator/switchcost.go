@@ -2,7 +2,6 @@ package orchestrator
 
 import (
 	"github.com/muhiya/muhiyacode/internal/contract"
-	"github.com/muhiya/muhiyacode/internal/gateway"
 )
 
 // The economics of changing models mid-session.
@@ -120,17 +119,22 @@ func (e *Engine) historyFitsModel(modelID string) bool {
 			break
 		}
 	}
-	profile := gateway.ResolveModelProfile(modelID + " " + e.catalogModelName(modelID))
+	profile := e.catalogModelProfile(modelID)
 	if limit <= 0 {
 		limit = profile.DefaultContextWindow
 	}
 	if limit <= 0 {
 		return false // an unknown window is not one to gamble a conversation on
 	}
-	// 30% headroom for this task's growth, plus the output the model must be
-	// able to produce.
-	needed := e.inUseContextTokens()*13/10 + profile.OutputBudget(0)
-	return needed <= limit-outputReserveTokens
+	// 30% headroom for this task's growth, plus tool schemas and the output the
+	// candidate must be able to produce. Keep this equation aligned with request
+	// preflight: subtracting a second fixed reserve here used to double-charge
+	// output room and reject models that actually fit.
+	e.taskMu.Lock()
+	toolChars := e.assemblyToolDefChars
+	e.taskMu.Unlock()
+	needed := e.inUseContextTokens()*13/10 + e.history.TokensForChars(toolChars) + profile.ContextOutputReserve(e.catalogModelMaxOutput(modelID)) + 512
+	return needed <= limit
 }
 
 // routedWindowFloorTokens is where a conversation stops being safe to route

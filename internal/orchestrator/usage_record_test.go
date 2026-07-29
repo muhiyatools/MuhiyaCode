@@ -19,7 +19,13 @@ func TestUsagePersistenceDoesNotBlockSnapshots(t *testing.T) {
 	persistDone := make(chan error, 1)
 	go func() {
 		persistDone <- engine.recordUsageAndEmit(func() error {
-			return engine.recordAuxUsage(context.Background(), "utility", ":aux", contract.Usage{}, nil)
+			engine.usageWriteMu.Lock()
+			defer engine.usageWriteMu.Unlock()
+			record := usageRecord(usageRecordInput{
+				model: "main", stream: contract.UsageStreamMain,
+				purpose: contract.RequestPurposeMain, usage: contract.Usage{},
+			})
+			return engine.appendUsage(context.Background(), &record)
 		})
 	}()
 	<-persistStarted
@@ -89,6 +95,22 @@ func TestEnginePersistsUsageSequenceAttributionAndResumeAggregate(t *testing.T) 
 	if persisted[1].HitRate == nil || *persisted[1].HitRate != 0.9 {
 		t.Fatalf("second hit rate=%v", persisted[1].HitRate)
 	}
+	firstBuild, secondBuild := persisted[0], persisted[1]
+	if firstBuild.EstimatedPromptTokens == nil || firstBuild.PromptEstimateDelta == nil ||
+		firstBuild.SerializedMessageBytes == nil || *firstBuild.SerializedMessageBytes == 0 ||
+		firstBuild.CompiledContextUnits == nil || *firstBuild.CompiledContextUnits == 0 {
+		t.Fatalf("first request build diagnostics are incomplete: %+v", firstBuild)
+	}
+	if firstBuild.PromptEstimateSource != "heuristic" ||
+		firstBuild.ContextCompilerCacheHit == nil || *firstBuild.ContextCompilerCacheHit {
+		t.Fatalf("unexpected first request estimator state: %+v", firstBuild)
+	}
+	if secondBuild.ContextCompilerCacheHit == nil || !*secondBuild.ContextCompilerCacheHit {
+		t.Fatalf("second request did not reuse compiler state: %+v", secondBuild)
+	}
+	if want := *secondBuild.PromptTokens - *secondBuild.EstimatedPromptTokens; *secondBuild.PromptEstimateDelta != want {
+		t.Fatalf("prompt estimate delta=%d, want %d", *secondBuild.PromptEstimateDelta, want)
+	}
 
 	resumedProvider := &scriptedProvider{responses: []contract.ChatResponse{{Content: "resumed", Usage: reportedUsage(100, 5, &read2, &miss2)}}}
 	resumed, err := NewEngine(EngineConfig{
@@ -116,6 +138,44 @@ func TestEnginePersistsUsageSequenceAttributionAndResumeAggregate(t *testing.T) 
 	last := persisted[len(persisted)-1]
 	if last.Seq != 3 || last.Attribution != contract.CacheAttributionColdStart {
 		t.Fatalf("resumed record=%+v", last)
+	}
+}
+
+func TestUsageRecordPersistsRequestBuildDiagnostics(t *testing.T) {
+	record := usageRecord(usageRecordInput{
+		model:  "main",
+		stream: contract.UsageStreamMain,
+		usage:  reportedUsage(120, 5, nil, nil),
+		requestBuild: &RequestBuild{
+			EstimatedPromptTokens:       100,
+			EstimatedWireTokens:         115,
+			EstimatedToolTokens:         15,
+			EstimatedCoreToolTokens:     10,
+			EstimatedDeferredToolTokens: 5,
+			EstimateSource:              "provider-calibrated",
+			SerializedMessageBytes:      800,
+			SerializedToolBytes:         120,
+			SerializedCoreToolBytes:     80,
+			SerializedDeferredToolBytes: 40,
+			CompiledUnits:               3,
+			CompilerCacheHit:            true,
+		},
+	})
+
+	if record.EstimatedPromptTokens == nil || *record.EstimatedPromptTokens != 115 ||
+		record.EstimatedMessageTokens == nil || *record.EstimatedMessageTokens != 100 ||
+		record.EstimatedToolTokens == nil || *record.EstimatedToolTokens != 15 ||
+		record.EstimatedCoreToolTokens == nil || *record.EstimatedCoreToolTokens != 10 ||
+		record.EstimatedDeferredToolTokens == nil || *record.EstimatedDeferredToolTokens != 5 ||
+		record.PromptEstimateDelta == nil || *record.PromptEstimateDelta != 5 ||
+		record.PromptEstimateSource != "provider-calibrated" ||
+		record.SerializedMessageBytes == nil || *record.SerializedMessageBytes != 800 ||
+		record.SerializedToolBytes == nil || *record.SerializedToolBytes != 120 ||
+		record.SerializedCoreToolBytes == nil || *record.SerializedCoreToolBytes != 80 ||
+		record.SerializedDeferredToolBytes == nil || *record.SerializedDeferredToolBytes != 40 ||
+		record.CompiledContextUnits == nil || *record.CompiledContextUnits != 3 ||
+		record.ContextCompilerCacheHit == nil || !*record.ContextCompilerCacheHit {
+		t.Fatalf("request-build diagnostics were not preserved: %+v", record)
 	}
 }
 
@@ -177,15 +237,25 @@ func TestEngineMarksUnexplainedPromptShrinkAgentSuspect(t *testing.T) {
 	}
 }
 
-func TestModelSwitchRefreshesPromptAndRecordsBoundary(t *testing.T) {
+func TestModelSwitchRestoresPerModelLineageAndRecordsBoundaries(t *testing.T) {
 	read, miss := 90, 10
 	provider := &scriptedProvider{responses: []contract.ChatResponse{
 		{Content: "first", Usage: reportedUsage(100, 1, &read, &miss)},
 		{Content: "second", Usage: reportedUsage(100, 1, &read, &miss)},
+		{Content: "third", Usage: reportedUsage(100, 1, &read, &miss)},
 	}}
 	settings := engineSettings()
 	settings.Provider.Models = append(settings.Provider.Models, contract.Model{ID: "next", Name: "Next", ContextLimit: 128000})
-	engine, err := NewEngine(EngineConfig{Settings: &settings, Session: contract.Session{WorkspacePath: t.TempDir()}, Provider: provider, Registry: NewRegistry(), Prompt: PromptContext{Model: "Test"}})
+	var persistedModel string
+	var persistedEpoch uint64
+	engine, err := NewEngine(EngineConfig{
+		Settings: &settings, Session: contract.Session{ID: "switch", WorkspacePath: t.TempDir()},
+		Provider: provider, Registry: NewRegistry(), Prompt: PromptContext{Model: "Test"},
+		Persistence: Persistence{WriteSessionModel: func(_ context.Context, model string, epoch uint64) error {
+			persistedModel, persistedEpoch = model, epoch
+			return nil
+		}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,15 +268,31 @@ func TestModelSwitchRefreshesPromptAndRecordsBoundary(t *testing.T) {
 	if settings.Provider.ActiveModelID != "next" || engine.prompt.Model != "Next" || engine.prompt.ModelAddendum != "next addendum" {
 		t.Fatalf("settings=%+v prompt=%+v", settings.Provider, engine.prompt)
 	}
+	// A model owns its own cache lineage. The first switch to "next" starts at
+	// epoch zero instead of inheriting and incrementing "main".
+	if persistedModel != "next" || persistedEpoch != 0 || engine.CacheEpoch() != 0 {
+		t.Fatalf("persisted model=%q epoch=%d engine epoch=%d", persistedModel, persistedEpoch, engine.CacheEpoch())
+	}
 	if _, _, err := engine.Run(context.Background(), "again"); err != nil {
 		t.Fatal(err)
 	}
+	if err := engine.SwitchModel(context.Background(), "main", "main", "Test", ""); err != nil {
+		t.Fatal(err)
+	}
+	if persistedModel != "main" || persistedEpoch != 0 || engine.CacheEpoch() != 0 {
+		t.Fatalf("restored model=%q epoch=%d engine epoch=%d", persistedModel, persistedEpoch, engine.CacheEpoch())
+	}
+	if _, _, err := engine.Run(context.Background(), "third"); err != nil {
+		t.Fatal(err)
+	}
 	records := engine.UsageRecords()
-	if len(records) != 2 || records[1].Attribution != contract.CacheAttributionAgent {
+	if len(records) != 3 || records[1].Attribution != contract.CacheAttributionAgent || records[2].Attribution != contract.CacheAttributionAgent {
 		t.Fatalf("records=%+v", records)
 	}
 	events := engine.InvalidationEvents()
-	if len(events) != 1 || events[0].Cause != contract.InvalidationModelSwitch || events[0].RequestSeq != 2 {
+	if len(events) != 2 ||
+		events[0].Cause != contract.InvalidationModelSwitch || events[0].RequestSeq != 2 ||
+		events[1].Cause != contract.InvalidationModelSwitch || events[1].RequestSeq != 3 {
 		t.Fatalf("events=%+v", events)
 	}
 }

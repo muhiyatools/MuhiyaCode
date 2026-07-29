@@ -26,9 +26,10 @@ import (
 // Runtime is one live session: the engine plus the session and settings it was
 // built for.
 type Runtime struct {
-	Engine   *orchestrator.Engine
-	Session  contract.Session
-	Settings *contract.Settings
+	Engine         *orchestrator.Engine
+	Session        contract.Session
+	Settings       *contract.Settings
+	RecoveryNotice string
 }
 
 // Skill is a discovered skill a frontend can list and queue for the next turn.
@@ -95,14 +96,18 @@ type MCPActions struct {
 // Actions is the backend surface a frontend calls. internal/command implements
 // it; frontends only consume it.
 type Actions struct {
-	SaveSettings  func(context.Context, *contract.Settings) error
-	SetPermission func(context.Context, contract.PermissionMode) error
-	Rewind        func(context.Context) (string, error)
-	NewSession    func(context.Context) (Runtime, []contract.Event, error)
-	ListSessions  func(context.Context) ([]contract.Session, error)
-	Resume        func(context.Context, string) (Runtime, []contract.Event, error)
-	SetAPIKey     func(context.Context, string) error
-	Logout        func(context.Context) error
+	SaveSettings      func(context.Context, *contract.Settings) error
+	SetPermission     func(context.Context, contract.PermissionMode) error
+	Rewind            func(context.Context) (string, error)
+	ListCheckpoints   func(context.Context) ([]contract.CheckpointInfo, error)
+	RestoreCheckpoint func(context.Context, string, string) (Runtime, []contract.Event, string, error)
+	ListProcesses     func() []contract.BackgroundProcess
+	StopProcess       func(string) error
+	NewSession        func(context.Context) (Runtime, []contract.Event, error)
+	ListSessions      func(context.Context) ([]contract.Session, error)
+	Resume            func(context.Context, string) (Runtime, []contract.Event, error)
+	SetAPIKey         func(context.Context, string) error
+	Logout            func(context.Context) error
 	// LoginViaBrowser runs the browser sign-in (loopback + PKCE) and returns the
 	// signed-in email. It powers bare `/login` when a key is not pasted directly.
 	LoginViaBrowser func(context.Context) (string, error)

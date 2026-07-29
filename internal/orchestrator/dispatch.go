@@ -6,12 +6,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
-
-// subagentKind was removed with the harness-side fan-out that inspected a
-// call's kind before dispatch: run_subagent now decodes its own arguments.
 
 // failedCallLastError returns the cached error for an identical prior
 // verbatim call, or ("", false) when no such failure has been recorded.
@@ -52,16 +50,68 @@ func failedClassKey(name, message string) string {
 	return name + "|" + normalizeError(message)
 }
 
-// executeBatch runs a turn's tool calls in order through the shared gate. The
-// batch-announce path that once fanned out delegate rows is gone with the
-// subagents it announced: every call here is an ordinary tool the session runs
-// itself, with strict start/end nesting.
+const maxParallelReads = 4
+
+// executeBatch preserves provider order in its result while running independent
+// local reads concurrently. Any mutation, interactive tool, or external tool
+// forces the entire batch through the deterministic serial path.
 func (e *Engine) executeBatch(ctx context.Context, calls []contract.ToolCall, definitions []contract.ToolDefinition, effort EffortProfile) []toolOutcome {
 	result := make([]toolOutcome, len(calls))
+	if !parallelReadBatch(calls) {
+		for index, call := range calls {
+			started := time.Now()
+			result[index] = e.executeCall(ctx, call, definitions, effort)
+			result[index].DurationMS = time.Since(started).Milliseconds()
+		}
+		return result
+	}
+	limit := make(chan struct{}, maxParallelReads)
+	var wait sync.WaitGroup
+	for _, call := range calls {
+		if e.callbacks.ToolStart != nil {
+			e.callbacks.ToolStart(call.ToolName(), json.RawMessage(call.ArgumentsJSON()))
+		}
+	}
 	for i, call := range calls {
-		result[i] = e.executeCall(ctx, call, definitions, effort)
+		index, call := i, call
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			select {
+			case limit <- struct{}{}:
+				defer func() { <-limit }()
+			case <-ctx.Done():
+				result[index] = toolOutcome{
+					Call: call, Status: contract.ToolOutcomeCancelled,
+					Output: "[cancelled before parallel read]", MutationCertainty: contract.MutationNotStarted,
+				}
+				return
+			}
+			started := time.Now()
+			scope := e.mainScope(definitions)
+			scope.onStart = nil
+			scope.onEnd = nil
+			result[index] = e.gatedExecute(ctx, call, definitions, effort, scope)
+			result[index].DurationMS = time.Since(started).Milliseconds()
+		}()
+	}
+	wait.Wait()
+	for index, call := range calls {
+		e.endTool(call.ToolName(), result[index].Output)
 	}
 	return result
+}
+
+func parallelReadBatch(calls []contract.ToolCall) bool {
+	if len(calls) < 2 {
+		return false
+	}
+	for _, call := range calls {
+		if !readonlyTools[call.ToolName()] {
+			return false
+		}
+	}
+	return true
 }
 
 // callCounters holds the task's dispatch-gate state: identical-call repeats,
@@ -82,18 +132,15 @@ func newCallCounters() *callCounters {
 	}
 }
 
-// dispatchScope carries the wiring gatedExecute needs. It kept per-scope flags
-// while subagent runs shared the gate; with one session there is one scope, and
-// the flags that distinguished them (dedupe, trackStats, readOnly, runReads)
-// are gone — the gate always dedupes against the inspection ledger and always
-// tracks discipline stats.
+// dispatchScope carries the task-local callbacks and executor used by the
+// shared dispatch gate.
 type dispatchScope struct {
 	counters     *callCounters
 	onStart      func(contract.ToolCall)
 	onEnd        func(contract.ToolCall, string)
 	escalate     func(string)
-	dispatch     func(context.Context, contract.ToolCall) (string, error)
-	postDispatch func(contract.ToolCall, string, bool, error)
+	dispatch     func(context.Context, contract.ToolCall) contract.ToolResult
+	postDispatch func(contract.ToolCall, contract.ToolResult)
 }
 
 func (e *Engine) executeCall(ctx context.Context, call contract.ToolCall, definitions []contract.ToolDefinition, effort EffortProfile) toolOutcome {
@@ -113,13 +160,13 @@ func (e *Engine) mainScope(definitions []contract.ToolDefinition) dispatchScope 
 		},
 		onEnd:    func(call contract.ToolCall, output string) { e.endTool(call.ToolName(), output) },
 		escalate: func(notice string) { e.history.Append(contract.Message{Role: contract.RoleUser, Content: notice}) },
-		dispatch: func(c context.Context, call contract.ToolCall) (string, error) {
+		dispatch: func(c context.Context, call contract.ToolCall) contract.ToolResult {
 			return e.executeOne(c, call, definitions)
 		},
-		postDispatch: func(call contract.ToolCall, output string, failed bool, dispatchErr error) {
+		postDispatch: func(call contract.ToolCall, result contract.ToolResult) {
 			name := call.ToolName()
-			if !failed && readonlyTools[name] {
-				e.inspection.Record(call, output)
+			if result.Status == contract.ToolOutcomeSucceeded && readonlyTools[name] {
+				e.inspection.Record(call, result.Output)
 			}
 			if isMutation(name) {
 				e.history.MarkSuperseded(e.inspection.InvalidateFor(call))
@@ -149,7 +196,7 @@ func allFailed(outcomes []toolOutcome) bool {
 		return false
 	}
 	for _, outcome := range outcomes {
-		if !outcome.Failed {
+		if !outcome.IsFailure() {
 			return false
 		}
 	}

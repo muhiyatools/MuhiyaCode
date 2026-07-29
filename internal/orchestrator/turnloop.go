@@ -10,13 +10,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/gateway"
 )
-
-type wireRequestNormalizer interface {
-	StableRequestMessages(contract.ChatRequest) ([]contract.Message, error)
-}
 
 func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, stats contract.TaskStats, runErr error) {
 	userPrompt = strings.TrimSpace(userPrompt)
@@ -54,49 +51,20 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	// request this task makes — including onboarding, which runs before the
 	// main per-task counters reset below — lands in the emitted task delta.
 	e.taskUsageStart = e.sessionUsage
+	e.taskExecutionID = e.session.ID + ":" + started.UTC().Format("20060102T150405.000000000Z")
 	e.taskMu.Unlock()
 	eventStart := len(e.InvalidationEvents())
 	profile := Profile(e.effort())
 	assessment := Classify(userPrompt, e.previous)
 	e.previous = assessment.Class
 	budget := BudgetFor(assessment, profile)
-	// The session's models are decided HERE, before the first request, and never
-	// again: a mid-session switch cold-starts the main prefix and breaks the
-	// execution chain's continuation. On every later task this is a no-op, and
-	// the fresh-session advisory takes over for work that has outgrown the
-	// session (it switches nothing and costs no model call).
-	// Catalog first: a model that is not in the catalog at all would 404 the
-	// first real request, so it must be substituted before the advisor reasons
-	// about the pairing.
+	// The user-selected session model is authoritative. Catalog reconciliation
+	// validates it but never substitutes or routes to another model.
 	if err := e.reconcileCatalog(); err != nil {
 		e.callbacks.EmitNotice(err.Error())
-		return "", contract.TaskStats{TerminatedReason: "Missing configured model"}, err
+		return "", contract.TaskStats{Status: contract.TaskStatusFailed, TerminatedReason: "Missing configured model"}, err
 	}
-	e.runTaskAdvisor(ctx, userPrompt, e.workspaceSignal())
-	e.maybeAdviseFreshSession(assessment, userPrompt)
 	modelPrompt := userPrompt
-	if profile.Onboarding && ShouldConsiderOnboarding(userPrompt) && e.callbacks.Ask != nil {
-		e.callbacks.EmitStatus("Clarifying the task...")
-		// Onboarding is an auxiliary call: cheap model, its own routing pin, off
-		// the session's cached stream entirely. It ran on the configured subagent
-		// model while one existed; it now shares utilityModelID with the task
-		// advisor. The pin string is unchanged on purpose — pins are cache
-		// identity, and renaming one would orphan the usage rows already recorded
-		// against it.
-		onboardingStart := time.Now()
-		utilityModel := e.utilityModelID()
-		questions, usage := GenerateOnboardingQuestions(ctx, e.provider, utilityModel, userPrompt, e.session.ID+":sub:onboarding")
-		if err := e.recordUsageAndEmit(func() error {
-			return e.recordAuxUsage(ctx, utilityModel, ":sub:onboarding", usage, elapsedMS(onboardingStart))
-		}); err != nil {
-			return "", stats, fmt.Errorf("persist onboarding usage: %w", err)
-		}
-		if len(questions) > 0 {
-			if answers, err := e.callbacks.Ask(ctx, questions); err == nil {
-				modelPrompt = PromptWithAnswers(userPrompt, answers)
-			}
-		}
-	}
 	e.resetTaskState(budget)
 	// 013 FR-008: whatever the manual /skills flow already wrapped into this
 	// prompt counts as delivered, so read_skill will not send it a second time.
@@ -108,6 +76,8 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	toolCalls, checksRun, turns, folded := 0, 0, 0, 0
 	taskLinesAdded, taskLinesRemoved := 0, 0 // UD-6: Σ diff adds/removes of applied file-changing calls this task
 	doneCriteria := ""
+	taskIndeterminate := false
+	taskStartedPersisted := false
 
 	terminateReason := "" // H5: reason a task was force-finalized (token breaker / failure terminator), surfaced to the TUI as a warn
 	defer func() {
@@ -115,6 +85,9 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// and sync.Mutex is not reentrant.
 		_, harnessVisible := e.harnessEventsSince(harnessStart)
 		e.taskMu.Lock()
+		if terminateReason == "" && e.taskEvidenceError != "" {
+			terminateReason = "task-graph evidence persistence failed: " + e.taskEvidenceError
+		}
 		stats = contract.TaskStats{DurationMS: time.Since(started).Milliseconds(), Effort: profile.Level, TaskClass: string(assessment.Class), Usage: subtractUsage(e.sessionUsage, usageStart), PeakContextPercent: e.taskPeakContext, ToolCalls: toolCalls, Turns: turns, ChecksRun: checksRun, FoldedTokens: folded, DisciplineScore: max(0, 100-min(24, e.taskDuplicates*8)-min(16, e.taskOverBudget*2)), DoneCriteria: doneCriteria, TerminatedReason: terminateReason, LinesAdded: taskLinesAdded, LinesRemoved: taskLinesRemoved, HarnessEvents: harnessVisible}
 		// UD-6/UD-9 (feature 008): session accumulators for the usage panel —
 		// active time and lines± are session-scoped (reset on resume, labeled
@@ -126,9 +99,9 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// show session hit-rate, not just this task's cache tag. Computed under
 		// taskMu with usageRecords.
 		//
-		// The ALL-STREAM rate: the session's turns plus the auxiliary calls
-		// (advisor, onboarding), so the figure covers everything the user paid for.
-		stats.SessionHitRate = contract.AggregateUsage(e.usageRecords).AllStreamHitRate
+		// The footer is a main-session health signal. Explicit auxiliary actions
+		// have their own rows and must not distort the main prefix's cache rate.
+		stats.SessionHitRate = contract.AggregateUsage(e.usageRecords).SessionHitRate
 		// Feature 011 D8: per-(model, pin) cache health for mixed-model sessions.
 		stats.PerPairing = contract.PerPairingRates(e.usageRecords)
 		// The credits figure is the FULL SESSION cost — every session turn and
@@ -145,10 +118,21 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// H5 TerminatedReason keeps its own notice and does not set StopCause.
 		// ctx (not parent) is what user-stop cancels via e.Cancel.
 		switch {
+		case taskIndeterminate:
+			stats.Status = contract.TaskStatusIndeterminate
+			if ctx.Err() != nil || (runErr != nil && errors.Is(runErr, context.Canceled)) {
+				stats.StopCause = contract.StopCauseUserStop
+			}
 		case ctx.Err() != nil || (runErr != nil && errors.Is(runErr, context.Canceled)):
 			stats.StopCause = contract.StopCauseUserStop
+			stats.Status = contract.TaskStatusCancelled
 		case runErr != nil:
 			stats.StopCause = contract.StopCauseError
+			stats.Status = contract.TaskStatusFailed
+		case terminateReason != "":
+			stats.Status = contract.TaskStatusIncomplete
+		default:
+			stats.Status = contract.TaskStatusSucceeded
 		}
 		// 004 US2 (T10/T11): stamp the plan lifecycle at every task exit. An
 		// executing plan resolves to finished (all steps done) or interrupted (any
@@ -166,13 +150,23 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			stats.FilesChanged = append(stats.FilesChanged, file)
 		}
 		sort.Strings(stats.FilesChanged)
-		e.finalizeReviewStats(&stats, assessment.Class, filesChanged, taskLinesAdded, taskLinesRemoved)
+		if taskStartedPersisted {
+			e.finalizeTaskJournal(parent, answer, &stats, &runErr)
+		}
 		if e.callbacks.TaskComplete != nil {
 			e.callbacks.TaskComplete(stats)
 		}
 	}()
 
-	if err := e.persistMessage(ctx, "user", "message", userPrompt, "", map[string]any{"role": "user", "content": userPrompt, "createdAt": time.Now().UTC().Format(time.RFC3339Nano)}); err != nil {
+	if err := e.persistTaskStarted(ctx, userPrompt); err != nil {
+		return "", stats, err
+	}
+	taskStartedPersisted = true
+	if err := e.persistConversation(ctx, conversationPersistence{
+		Message:    contract.Message{Role: contract.RoleUser, Content: userPrompt},
+		Kind:       "message",
+		Transcript: map[string]any{"role": "user", "content": userPrompt, "createdAt": time.Now().UTC().Format(time.RFC3339Nano)},
+	}); err != nil {
 		return "", stats, err
 	}
 	// Establish the boundary before maintenance so every completed prior task
@@ -218,12 +212,10 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	// Per-stream session pin for the main loop (C1). The subagent / compact /
 	// onboarding paths each derive their own identical suffix locally so the
 	// gateway-side routing pin never drifts within a session.
-	sessionPinMain := e.session.ID + ":main"
+	sessionPinMain := e.cacheSessionID("main")
 
-	// The system prompt and tool schemas are session-stable: identical bytes
-	// on every turn and every task, so they stay in the cached prefix. Per-turn
-	// variation lives only in the task brief on the newest user message.
-	definitions := e.sessionDefinitions()
+	// Optional MCP schemas are task-boundary hydrated or explicitly activated.
+	definitions := e.taskDefinitions()
 	promptContext := e.prompt
 	promptContext.Workspace = e.session.WorkspacePath
 	promptContext.OS = runtime.GOOS
@@ -233,22 +225,28 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 	// /context usage-by-category estimate. Measured once per task from values
 	// already in hand — read-side (contextCategories) never recomputes them.
 	e.recordAssemblySizes(promptText, promptContext, definitions)
+	reserve := e.requestReserve(definitions)
 
-	currentClass := assessment.Class
 	turnCap := budget.MaxTurns
 	convergeNoted, finalNoted := false, false
 	sawToolCall, emptyFinalRetries, consecutiveFailures := false, 0, 0
-	intentFinalRetries := 0   // FR-004b: bounded retries when a turn narrates an action without calling a tool
-	autoReviewNudged := false // DG-7: the max-effort review nudge fires at most once per task
-	allFailedTurnStreak := 0  // B7: consecutive turns where EVERY tool call failed (reset at Run start via this local)
-	overBudgetNoted := false
+	outputTruncationRetries := 0
+	truncatedToolRecoveryRetries := 0
+	intentFinalRetries := 0            // FR-004b: bounded retries when a turn narrates an action without calling a tool
+	allFailedTurnStreak := 0           // B7: consecutive turns where EVERY tool call failed (reset at Run start via this local)
 	providerFailures := make([]int, 0) // G2.2: provider-error sliding window
 	stalledProgressTurns := 0
-	lastLinesAdded, lastLinesRemoved, lastChecksRun := 0, 0, 0
-	explorationEscalations := 0
-	verificationRan := false
+	controller := newPhaseController()
+	lastEvidenceRevision := 0
 	successfulToolCalls := make(map[string][]int)
 	for {
+		definitions, reserve = e.refreshTaskDefinitions(definitions, reserve, promptText, promptContext)
+		requestReserve := reserve.Total
+		if e.taskTokenLimitReached() {
+			terminateReason = fmt.Sprintf("hard task token limit reached (%d)", budget.MaxTaskTokens)
+			e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:task-tokens", terminateReason)
+			return e.finalize(ctx, fallbackAnswer("", filesChanged)), stats, nil
+		}
 		if e.BudgetExceeded() {
 			terminateReason = "budget exceeded"
 			e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:budget", terminateReason)
@@ -260,42 +258,15 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			return "", stats, fmt.Errorf("task stopped: %w", err)
 		}
 		live := Profile(e.effort())
-		liveBudget := BudgetFor(Assessment{Class: currentClass, Risky: assessment.Risky, ScopeGuard: assessment.ScopeGuard}, live)
 		ceiling := e.hardTurnCeiling()
-		turnCap = min(ceiling, max(turnCap, liveBudget.MaxTurns))
 		if e.drainSteering(ctx) {
-			turnCap = min(ceiling, max(turnCap, turns-1+liveBudget.MaxTurns))
+			turnCap = min(ceiling, max(turnCap, turns+2))
 			convergeNoted, finalNoted = false, false
 		}
-		// Fold in the executor's writes BEFORE the runway check reads them.
-		// trackChanged only sees main-loop outcomes, and under the plan/execute
-		// split the main model writes nothing but tasks.md — so a task whose real
-		// work all happened in the execution agent used to look like a task that
-		// changed nothing, and the escape hatch below never fired. It then
-		// hard-stopped at the un-escalated cap, mid-work. The executor's changes
-		// ARE the task's changes; the runway must be sized against them.
 		e.mergeChangedFiles(filesChanged)
-		// The ladder may climb more than once. It used to fire a single time per
-		// task, so a turn classified chat topped out at twelve turns however much
-		// real work it was doing — and "Go" after a plan classifies as chat, which
-		// is exactly the prompt that kicks off the largest builds. Re-escalation is
-		// self-limiting: each step raises turnCap, so this goes quiet until the new
-		// cap is reached, and it only fires while files are genuinely changing.
-		// ClassEpic and hardTurnCeiling are the terminal bounds.
-		if turns >= turnCap && currentClass != ClassEpic {
-			if len(filesChanged) > 0 || explorationEscalations < 2 {
-				if len(filesChanged) == 0 {
-					explorationEscalations++
-				}
-				currentClass = EscalateClass(currentClass)
-				bigger := BudgetFor(Assessment{Class: currentClass, Risky: assessment.Risky, ScopeGuard: assessment.ScopeGuard}, live)
-				turnCap = min(ceiling, max(turnCap+6, bigger.MaxTurns))
-				convergeNoted, finalNoted = false, false
-				e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[governor] Task outgrew its brief; class=%s and runway extended. Keep going if work remains; otherwise complete, verify once, and report.", currentClass)})
-			}
-		}
 		isFinal := turns >= turnCap
 		if isFinal && !finalNoted {
+			controller.transition(phaseFinalize)
 			finalNoted = true
 			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[governor] Final step: do not call tools. Give the complete factual final answer now: outcome, verification, and genuine remaining work."})
 		} else if !isFinal && turns >= turnCap-2 && !convergeNoted {
@@ -349,7 +320,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				// paid summarization (one rewrite instead of two). A slight
 				// under-estimate here only risks skipping one turn early; the next
 				// turn's real token count re-triggers compaction if still needed.
-				usable := max(8000, e.contextLimit()-outputReserveTokens)
+				usable := max(1, e.contextLimit()-requestReserve)
 				postRatio := float64(e.history.EstimatedTokens()) / float64(usable)
 				if postRatio < profile.CompactThreshold {
 					skipCompact = true
@@ -383,7 +354,13 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// Trimming rewrites history and busts the prefix cache, so it must not
 		// run on every turn — only once pressure crosses the threshold.
 		e.callbacks.EmitStatus("Thinking...")
-		built := e.history.BuildRequestWithMetadata(promptText, e.contextLimit(), outputReserveTokens)
+		built, effectiveReserve, preflightErr := e.buildMainRequest(promptText, definitions, sessionPinMain, reserve)
+		if preflightErr != nil {
+			return "", stats, preflightErr
+		}
+		if err := requestBuildError(built, e.contextLimit(), effectiveReserve); err != nil {
+			return "", stats, err
+		}
 		if built.WindowDropped {
 			pressure := e.contextPressure()
 			trigger := contract.InvalidationPressure
@@ -404,7 +381,12 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// TB03 (tool_calls truncations) needs bounded reasoning + bounded visible content +
 		// a deterministic budget. DeepSeek R1 handles reasoning implicitly, but generic
 		// endpoints with effort mappings scale output probabilistically.
-		request := contract.ChatRequest{SessionID: sessionPinMain, Messages: messages, Tools: definitions, ModelID: e.settings.Provider.ActiveModelID, ToolChoice: "auto", Reasoning: ReasoningForEffort(e.effort()), MaxTokens: e.outputBudget(e.settings.Provider.ActiveModelID), PinUpstream: e.upstreamPin(), OnToken: e.callbacks.Token, OnReasoningToken: e.callbacks.ReasoningToken, Seed: e.seed}
+		request := e.mainChatRequest(messages, definitions, sessionPinMain)
+		// P0-W5: per-turn correlation ID. The turn-level retry (turns--; continue)
+		// regenerates this for its next attempt; the transport-level retry inside
+		// the provider (MaxRetries=1) reuses it. The gateway uses it as the
+		// request_log row ID so one ID ties client turn → gateway attempt → settlement.
+		request.RequestID = uuid.NewString()
 		shapeRequest := request
 		if normalizer, ok := e.provider.(wireRequestNormalizer); ok {
 			normalizedMessages, normalizeErr := normalizer.StableRequestMessages(request)
@@ -419,6 +401,9 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			// session, and continue (the unknown-normalizer provider may still be
 			// correct in practice).
 			e.recordDegradedPrefixGuard(ctx, "no wireRequestNormalizer on provider")
+		}
+		if serialized, serializeErr := json.Marshal(shapeRequest.Messages); serializeErr == nil {
+			built.SerializedMessageBytes = len(serialized)
 		}
 		shape, err := NewWirePrefixShape(shapeRequest, e.lastSentMessageCount, e.history.RewriteVersion())
 		if err != nil {
@@ -460,6 +445,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				if explanation == "" {
 					explanation = "Rate limit reached (429). The provider is temporarily throttling requests."
 				}
+				terminateReason = explanation
 				e.callbacks.EmitNotice(explanation)
 				e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:rate-limit", explanation)
 				e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[breaker] " + explanation + ". Stop retrying; give the final factual status."})
@@ -493,7 +479,7 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 		// messageCount is the post-normalization wire count (== e.lastSentMessageCount
 		// basis) so suspiciousCacheMiss compares this turn's and the prior turn's
 		// counts on the same wire basis rather than a normalizer-skewed one.
-		observation := mainUsageObservation{model: e.settings.Provider.ActiveModelID, usage: response.Usage, changeReasons: changeReasons, messageCount: shape.MessageCount, durationMS: elapsedMS(requestStart), rewriteVersion: shape.RewriteVersion}
+		observation := mainUsageObservation{model: e.settings.Provider.ActiveModelID, usage: response.Usage, changeReasons: changeReasons, messageCount: shape.MessageCount, durationMS: elapsedMS(requestStart), requestBuild: built, rewriteVersion: shape.RewriteVersion, prefixHash: shape.PrefixHash}
 		if err := e.recordUsageAndEmit(func() error { return e.recordMainUsage(ctx, observation) }); err != nil {
 			return "", stats, fmt.Errorf("persist request usage: %w", err)
 		}
@@ -521,19 +507,22 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			e.recordHarnessEvent(ctx, contract.HarnessProvider, "output-truncated", "finish_reason=length")
 			e.callbacks.EmitNotice("The model's reply reached the output limit and was cut off — it may be incomplete.")
 		}
-		// T038: calibrate the token estimator from this real provider usage so the
-		// pressure estimate (used when provider tokens are unavailable, e.g. the
-		// bootstrap turn) tracks the actual tokenizer rather than a fixed 0.25
-		// chars/token guess. promptText is the system prompt just sent; its chars
-		// count toward promptTokens but are not stored in the message log.
+		// Calibrate from the normalized messages and tool surface actually sent.
+		// Stored-but-windowed history must not dilute the observed ratio.
 		if response.Usage.PromptTokensAvailable {
-			e.history.Calibrate(response.Usage.PromptTokens, len(promptText))
+			e.history.Calibrate(response.Usage.PromptTokens, requestCalibrationChars(shapeRequest.Messages, definitions))
 		}
 		if doneCriteria == "" {
 			doneCriteria = extractDoneCriteria(response.Content)
 		}
 		calls, assistantText := response.ToolCalls, response.Content
-		if !isFinal && len(calls) == 0 && e.rescue != nil {
+		if retry, terminate := e.handleTruncatedTextResponse(ctx, response, &outputTruncationRetries); retry {
+			continue
+		} else if terminate {
+			terminateReason = "model output reached the limit repeatedly; the final response may be incomplete"
+			return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
+		}
+		if !isFinal && len(calls) == 0 && e.rescue != nil && e.needsToolCallRescue() {
 			calls, assistantText = e.rescue(response.Content, toolNames(definitions))
 		}
 		if isFinal && len(calls) == 0 {
@@ -577,62 +566,55 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[continue] You announced the next action but made no tool call. Make that tool call now, or give the final result instead."})
 				continue
 			}
-			// DG-7 (feature 008): AutoReview — at max effort, when substantial
-			// file-changing work is about to finalize, nudge ONCE to review it
-			// before answering. A dynamic tail rider (never prefix), fired at most
-			// once per task, skipped when nothing meaningful changed.
-			e.mergeChangedFiles(filesChanged)
-			if profile.AutoReview && !autoReviewNudged && len(filesChanged) >= 2 {
-				autoReviewNudged = true
-				// Feature 011 T019: the nudge consults the review gate first — a
-				// trivial two-file change (docs, renames, tiny low-risk edits) no
-				// longer triggers a review just because the effort is max. The gate
-				// may only suppress or shape this trigger, never widen it (contract
-				// §6).
-				decision := Decide(e.reviewProfileForTask(currentClass, filesChanged, taskLinesAdded, taskLinesRemoved))
-				e.setTaskReviewDecision(decision)
-				if decision.Tier != ReviewTierSkip {
-					if trimmed != "" {
-						_ = e.persistAssistant(ctx, trimmed)
-					}
-					// The session reviews its own work: it already holds the diff in
-					// context, so this is a re-read of what it just wrote, not a
-					// dispatch. Naming a tool here that no longer exists is how a
-					// nudge turns into a wasted turn and an invented tool call.
-					e.history.Append(contract.Message{Role: contract.RoleUser, Content: fmt.Sprintf("[review] Before finishing: re-read the files you changed and check them at a %s level — correctness first, then anything you left half-done. Fix what you find, then give the final answer.", decision.Tier)})
-					continue
-				}
-			}
 			return e.finalize(ctx, fallbackAnswer(trimmed, filesChanged)), stats, nil
 		}
 
 		sawToolCall = true
-		e.countTerminalReadCalls(calls) // feature 011 SC-006 violation counter
-		if strings.TrimSpace(assistantText) != "" {
-			if err := e.persistMessage(ctx, "assistant", "message", assistantText, "", map[string]any{"role": "assistant", "content": assistantText, "createdAt": time.Now().UTC().Format(time.RFC3339Nano)}); err != nil {
-				return "", stats, err
-			}
-		}
 		// TB03: a call cut off at the output cap is never dispatched — its JSON is
 		// incomplete. It is answered with the chunked-write protocol, and history
 		// stores a marker instead of the half-written payload so the dead bytes are
 		// billed once rather than on every later request.
 		truncated := truncatedSet(response)
 		executable, cut := splitTruncatedCalls(calls, truncated)
-		e.history.Append(assistantReplayMessage(response, assistantText, sanitizeTruncatedCalls(calls, truncated)))
-		outcomes := e.truncatedOutcomes(e.mainScope(definitions), cut)
-		for _, call := range executable {
-			startTime := time.Now()
-			batch := e.executeBatch(ctx, []contract.ToolCall{call}, definitions, live)
-			if len(batch) > 0 {
-				outcome := batch[0]
-				outcome.DurationMS = time.Since(startTime).Milliseconds()
-				outcomes = append(outcomes, outcome)
+		if len(cut) > 0 {
+			truncatedToolRecoveryRetries++
+			if truncatedToolRecoveryRetries > 2 {
+				terminateReason = "the model repeatedly exceeded its output limit while constructing a tool call"
+				e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:truncated-tool-call", terminateReason)
+				return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
 			}
+			// A cap-hit is a transport-format recovery, not task progress. Always
+			// leave room for one compact chunked write plus one factual final turn,
+			// even when the original oversized call landed on the nominal last turn.
+			turnCap = min(e.hardTurnCeiling(), max(turnCap, turns+2))
+			finalNoted = false
+			isFinal = false
+			e.callbacks.EmitStatus("Recovering an oversized file write...")
 		}
+		assistantMessage := assistantReplayMessage(response, assistantText, sanitizeTruncatedCalls(calls, truncated))
+		if err := e.persistAssistantReplay(ctx, assistantMessage, assistantText); err != nil {
+			return "", stats, err
+		}
+		e.history.Append(assistantMessage)
+		outcomes := e.truncatedOutcomes(e.mainScope(definitions), cut)
+		outcomes = append(outcomes, e.executeBatch(ctx, executable, definitions, live)...)
+		controller.Observe(outcomes)
 		for _, outcome := range outcomes {
-			toolCalls++
-			if outcome.Failed {
+			// A truncated call never reached dispatch. Counting it as a tool
+			// attempt could exhaust the task governor on the exact turn where the
+			// model needs one smaller recovery write, turning valid guidance into
+			// an immediate false finalization.
+			formatRecovery := truncated[outcome.Call.ID]
+			if !formatRecovery {
+				toolCalls++
+			}
+			if outcome.IsIndeterminate() {
+				taskIndeterminate = true
+				if terminateReason == "" {
+					terminateReason = "a mutating tool was interrupted after dispatch; its side effect could not be confirmed"
+				}
+			}
+			if outcome.IsFailure() && !formatRecovery {
 				consecutiveFailures++
 				// H5: record the failed call's turn in the sliding window for the
 				// distinct-failure terminator. The windowed count (not the
@@ -647,20 +629,24 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 				// role-gated edits force-finalizes the task with a false "genuine
 				// blocker." The gate's own escalation, the B7 all-failed guard, the
 				// nudge below, and the hard ceiling remain the liveness backstops.
-				if !outcome.GateRejected {
+				if !outcome.WasRejected() {
 					e.recordTaskFailure(turns)
 				}
-			} else {
+			} else if !formatRecovery {
 				consecutiveFailures = 0
 			}
-			if isCheckCall(outcome.Call) && !outcome.Failed {
-				checksRun++
+			if isCheckCall(outcome.Call) {
+				if outcome.Succeeded() {
+					checksRun++
+				} else if outcome.Status == contract.ToolOutcomeFailed {
+					e.grantFailedCheckRetry()
+				}
 			}
 			trackChanged(outcome, filesChanged)
 			// UD-6 (feature 008): accumulate lines± from applied (successful)
 			// file-changing calls via the SAME shared diff parser the TUI rows use,
 			// so the session panel and the per-row counts can never drift.
-			if !outcome.Failed {
+			if outcome.Succeeded() {
 				successfulToolCalls[outcome.Call.ToolName()] = append(successfulToolCalls[outcome.Call.ToolName()], turns)
 				if add, remove, ok := contract.DiffCounts(outcome.Output); ok {
 					taskLinesAdded += add
@@ -673,10 +659,18 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			// so a reopened transcript row names WHAT the call acted on. Redacted
 			// like every persisted field.
 			toolTarget := e.redact(contract.ToolTarget(outcome.Call.ToolName(), []byte(outcome.Call.ArgumentsJSON())))
-			if err := e.persistMessage(ctx, "tool", outcome.Call.ToolName(), outcome.Output, toolTarget, map[string]any{"role": "tool", "name": outcome.Call.ToolName(), "input": outcome.Call.ArgumentsJSON(), "output": outcome.Output, "createdAt": time.Now().UTC().Format(time.RFC3339Nano), "durationMs": outcome.DurationMS}); err != nil {
+			if err := e.persistToolConversation(ctx, outcome, toolTarget); err != nil {
 				return "", stats, err
 			}
 			e.history.Append(contract.Message{Role: contract.RoleTool, ToolCallID: outcome.Call.ID, Content: outcome.Output})
+		}
+		if shouldFinalizeAfterEvidence(budget, toolCalls, checksRun, len(filesChanged)) && e.beginTaskFinalization() {
+			turnCap = min(turnCap, turns+1)
+			convergeNoted = true
+			e.history.Append(contract.Message{
+				Role:    contract.RoleUser,
+				Content: "[governor] The requested change exists and its verification budget is complete. Stop testing, do not create a harness or another artifact, and give the final factual answer.",
+			})
 		}
 		// B7: all-failed-turns detector. A turn in which EVERY tool call failed is
 		// a strong loop signal the per-call storm breaker can miss (e.g. the model
@@ -707,79 +701,29 @@ func (e *Engine) Run(parent context.Context, userPrompt string) (answer string, 
 			return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
 		}
 		// H6: distinct-argument loop coverage per tool.
-		for name, callTurns := range successfulToolCalls {
-			cutoff := turns - 15 // Window of 15 turns
-			count := 0
-			kept := callTurns[:0]
-			for _, t := range callTurns {
-				if t > cutoff {
-					kept = append(kept, t)
-					count++
-				}
-			}
-			successfulToolCalls[name] = kept
-			if count >= 15 {
-				terminateReason = fmt.Sprintf("repeated successful calls to %s without progress — %d calls in the last 15 turns", name, count)
-				e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:tool-loop", terminateReason)
-				e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[breaker] " + terminateReason + ". Stop repeating this action; give the final factual status."})
-				return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
-			}
+		if reason, triggered := evaluateToolLoopBreakers(successfulToolCalls, turns); triggered {
+			terminateReason = reason
+			e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:tool-loop", terminateReason)
+			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[breaker] " + terminateReason + ". Stop repeating this action; give the final factual status."})
+			return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
 		}
-		if taskLinesAdded == lastLinesAdded && taskLinesRemoved == lastLinesRemoved && checksRun == lastChecksRun && sawToolCall {
+		if controller.EvidenceRevision() == lastEvidenceRevision && sawToolCall {
 			stalledProgressTurns++
 		} else {
 			stalledProgressTurns = 0
-			lastLinesAdded = taskLinesAdded
-			lastLinesRemoved = taskLinesRemoved
-			lastChecksRun = checksRun
+			lastEvidenceRevision = controller.EvidenceRevision()
 		}
-		if stalledProgressTurns >= 15 {
-			terminateReason = "stalled progress: no meaningful changes or checks for 15 turns"
+		if stalledProgressTurns >= 10 {
+			terminateReason = "stalled progress: no new tool evidence for 10 turns"
 			e.recordHarnessEvent(ctx, contract.HarnessRecovery, "breaker:stalled-progress", terminateReason)
 			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[breaker] " + terminateReason + ". Give the final factual status."})
 			return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
 		}
-		if toolCalls > budget.ToolCalls && !overBudgetNoted {
-			overBudgetNoted = true
-			e.taskMu.Lock()
-			e.taskOverBudget = toolCalls - budget.ToolCalls
-			e.taskMu.Unlock()
-			e.history.Append(contract.Message{Role: contract.RoleUser, Content: "[governor] The estimated tool budget is passed. Keep required work moving, but converge: avoid new exploration, finish the outstanding dispatch, and report."})
-		}
 		if isFinal {
-			if len(filesChanged) > 0 && checksRun == 0 && !verificationRan {
-				verificationRan = true
-				runCmd := func(c context.Context, cmd string) (string, error) {
-					escapedCmd, _ := json.Marshal(cmd)
-					call := contract.NewToolCall("verify", "run_shell", fmt.Sprintf(`{"command":%s}`, escapedCmd))
-					defs := append(definitions, contract.ToolDefinition{Function: contract.FunctionDefinition{Name: "run_shell"}})
-					return e.executeOne(c, call, defs)
-				}
-				e.callbacks.EmitNotice("Verifying workspace changes before finalization...")
-				verification := VerifyWorkspace(ctx, e.session.WorkspacePath, runCmd)
-				if verification.Result == "failure" {
-					verification.FailureEffect = "re-prompted"
-					stats.Verification = verification
-					isFinal = false
-					msg := fmt.Sprintf("[verification] Automatically ran %q to verify changes. The check FAILED. Review the output and fix the root cause before completing the task.\n\nOutput:\n```\n%s\n```", verification.Command, verification.OutputTruncated)
-					e.history.Append(contract.Message{Role: contract.RoleUser, Content: msg})
-					continue
-				}
-				stats.Verification = verification
+			if terminateReason == "" {
+				terminateReason = "turn limit reached after tool execution; no final completion response was produced"
 			}
 			return e.finalize(ctx, fallbackAnswer(assistantText, filesChanged)), stats, nil
 		}
 	}
-}
-
-func assistantReplayMessage(response contract.ChatResponse, content string, calls []contract.ToolCall) contract.Message {
-	message := contract.Message{Role: contract.RoleAssistant, Content: content, ToolCalls: calls}
-	if strings.TrimSpace(response.Reasoning) != "" {
-		reasoning := response.Reasoning
-		message.ReasoningContent = &reasoning
-	}
-	if len(response.ReasoningDetails) > 0 {
-		message.ReasoningDetails = append(json.RawMessage(nil), response.ReasoningDetails...)
-	}
-	return message
 }

@@ -8,6 +8,7 @@ import (
 	"runtime/debug"
 
 	"github.com/muhiya/muhiyacode/internal/buildinfo"
+	"github.com/muhiya/muhiyacode/internal/secrecy"
 )
 
 // recoverTaskPanic converts a panic from the engine task goroutine into a task
@@ -30,7 +31,8 @@ func writeCrashLog(r any, stack []byte) string {
 	name := filepath.Join(os.TempDir(), fmt.Sprintf("muhiyacode-crash-%d.log", os.Getpid()))
 	content := fmt.Sprintf("MuhiyaCode %s (commit %s, built %s)\npanic: %v\n\n%s\n",
 		buildinfo.Version, buildinfo.Commit, buildinfo.Date, r, stack)
-	if err := os.WriteFile(name, []byte(content), 0o644); err != nil {
+	content = secrecy.Redact(content)
+	if err := os.WriteFile(name, []byte(content), 0o600); err != nil {
 		return ""
 	}
 	return name

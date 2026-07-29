@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go/token"
+	"path/filepath"
 	"strings"
 )
 
@@ -21,8 +22,8 @@ func (w *Workspace) execInspectCode(ctx context.Context, raw json.RawMessage) (s
 	if input.Path == "" {
 		return "", fmt.Errorf("path is required")
 	}
-	if input.Mode != "outline" && input.Mode != "definition" && input.Mode != "references" {
-		return "", fmt.Errorf("mode must be outline, definition, or references")
+	if input.Mode != "outline" && input.Mode != "definition" && input.Mode != "references" && input.Mode != "repo_map" {
+		return "", fmt.Errorf("mode must be outline, definition, references, or repo_map")
 	}
 	if (input.Mode == "definition" || input.Mode == "references") && input.Symbol == "" {
 		return "", fmt.Errorf("symbol is required for %s mode", input.Mode)
@@ -32,6 +33,9 @@ func (w *Workspace) execInspectCode(ctx context.Context, raw json.RawMessage) (s
 	target, err := w.authorizePath(ctx, ActionRead, input.Path)
 	if err != nil {
 		return "", err
+	}
+	if input.Mode == "repo_map" {
+		return w.GenerateRankedRepoMap(target, 1_000, input.Symbol)
 	}
 
 	includeTests := true
@@ -45,10 +49,7 @@ func (w *Workspace) execInspectCode(ctx context.Context, raw json.RawMessage) (s
 		return "", err
 	}
 	if len(files) == 0 {
-		if strings.HasSuffix(input.Path, ".go") {
-			return "", fmt.Errorf("inspect_code only supports Go source files (.go)")
-		}
-		return "", fmt.Errorf("no Go source files found in %s", input.Path)
+		return "", fmt.Errorf("no supported source files (Go, TypeScript, JavaScript, Python, Rust, C++, Java) found in %s", input.Path)
 	}
 
 	fset := token.NewFileSet()
@@ -70,17 +71,19 @@ func (w *Workspace) inspectOutline(fset *token.FileSet, files []string, target s
 	totalSymbols := 0
 
 	for _, file := range files {
-		outline, err := ParseFileOutline(fset, file)
+		outline, err := w.sourceCache.outline(file)
 		if err != nil && outline == nil {
 			continue
 		}
 
 		relPath := relativeSlash(w.root, file)
+		capability, _ := CodeIntelligenceFor(file)
 		if len(files) > 1 || b.Len() == 0 {
 			if b.Len() > 0 {
 				b.WriteString("\n")
 			}
 			b.WriteString(fmt.Sprintf("Outline of %s (package %s)\n", relPath, outline.Package))
+			b.WriteString("Capability: " + capability.Outline + "\n")
 			if len(outline.Imports) > 0 {
 				b.WriteString(fmt.Sprintf("Imports: %s\n", strings.Join(outline.Imports, ", ")))
 			}
@@ -109,9 +112,18 @@ func (w *Workspace) inspectOutline(fset *token.FileSet, files []string, target s
 }
 
 func (w *Workspace) inspectDefinition(fset *token.FileSet, files []string, symbol, target string) (string, error) {
-	results, err := FindDefinitions(fset, files, symbol)
-	if err != nil {
-		return "", err
+	var results []SymbolEntry
+	for _, file := range files {
+		outline, err := w.sourceCache.outline(file)
+		if err != nil && outline == nil {
+			continue
+		}
+		for _, candidate := range outline.Symbols {
+			if candidate.Name == symbol {
+				candidate.File = file
+				results = append(results, candidate)
+			}
+		}
 	}
 
 	if len(results) == 0 {
@@ -119,19 +131,37 @@ func (w *Workspace) inspectDefinition(fset *token.FileSet, files []string, symbo
 	}
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Definitions of %q:\n\n", symbol))
+	b.WriteString(fmt.Sprintf("Definitions of %q (built-in index; not compiler/LSP resolved):\n\n", symbol))
 	for _, entry := range results {
 		relPath := relativeSlash(w.root, entry.File)
-		b.WriteString(fmt.Sprintf("  %s:%d  %s\n", relPath, entry.Line, entry.Signature))
+		capability, _ := CodeIntelligenceFor(entry.File)
+		b.WriteString(fmt.Sprintf("  %s:%d  %s [%s]\n", relPath, entry.Line, entry.Signature, capability.Definition))
 	}
 	b.WriteString(fmt.Sprintf("\n%d definition(s) found.\n", len(results)))
 	return capOutput(b.String()), nil
 }
 
 func (w *Workspace) inspectReferences(fset *token.FileSet, files []string, symbol, target string) (string, error) {
-	results, truncated, err := FindReferences(fset, files, symbol, maxReferences)
+	var goFiles, lexicalFiles []string
+	for _, file := range files {
+		if strings.EqualFold(filepath.Ext(file), ".go") {
+			goFiles = append(goFiles, file)
+		} else {
+			lexicalFiles = append(lexicalFiles, file)
+		}
+	}
+	results, truncated, err := FindReferences(fset, goFiles, symbol, maxReferences)
 	if err != nil {
 		return "", err
+	}
+	if !truncated && len(lexicalFiles) > 0 {
+		remaining := maxReferences - len(results)
+		lexical, lexicalTruncated, lexicalErr := w.findLexicalReferences(lexicalFiles, symbol, remaining)
+		if lexicalErr != nil {
+			return "", lexicalErr
+		}
+		results = append(results, lexical...)
+		truncated = lexicalTruncated
 	}
 
 	if len(results) == 0 {
@@ -139,10 +169,11 @@ func (w *Workspace) inspectReferences(fset *token.FileSet, files []string, symbo
 	}
 
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("References to %q:\n\n", symbol))
+	b.WriteString(fmt.Sprintf("References to %q (identifier matches; not compiler/LSP resolved):\n\n", symbol))
 	for _, ref := range results {
 		relPath := relativeSlash(w.root, ref.File)
-		b.WriteString(fmt.Sprintf("  %s:%d  %s\n", relPath, ref.Line, ref.Context))
+		capability, _ := CodeIntelligenceFor(ref.File)
+		b.WriteString(fmt.Sprintf("  %s:%d  %s [%s]\n", relPath, ref.Line, ref.Context, capability.References))
 	}
 	if truncated {
 		b.WriteString(fmt.Sprintf("\n... %d references shown (capped at %d; use a narrower path).\n", len(results), maxReferences))
@@ -150,6 +181,62 @@ func (w *Workspace) inspectReferences(fset *token.FileSet, files []string, symbo
 		b.WriteString(fmt.Sprintf("\n%d reference(s) found.\n", len(results)))
 	}
 	return capOutput(b.String()), nil
+}
+
+func (w *Workspace) findLexicalReferences(files []string, symbol string, limit int) ([]ReferenceEntry, bool, error) {
+	if limit <= 0 {
+		return nil, true, nil
+	}
+	var results []ReferenceEntry
+	for _, file := range files {
+		source, err := safeReadTargetLimit(w.root, file, MaxReadBytes)
+		if err != nil {
+			continue
+		}
+		for index, line := range strings.Split(string(source), "\n") {
+			if !containsIdentifier(line, symbol) {
+				continue
+			}
+			results = append(results, ReferenceEntry{
+				File: file, Line: index + 1, Context: boundedSourceLine(line),
+			})
+			if len(results) >= limit {
+				return results, true, nil
+			}
+		}
+	}
+	return results, false, nil
+}
+
+func containsIdentifier(line, symbol string) bool {
+	for offset := 0; offset <= len(line)-len(symbol); {
+		index := strings.Index(line[offset:], symbol)
+		if index < 0 {
+			return false
+		}
+		index += offset
+		beforeOK := index == 0 || !identifierByte(line[index-1])
+		end := index + len(symbol)
+		afterOK := end == len(line) || !identifierByte(line[end])
+		if beforeOK && afterOK {
+			return true
+		}
+		offset = index + 1
+	}
+	return false
+}
+
+func identifierByte(value byte) bool {
+	return value == '_' || value == '$' || value >= 'a' && value <= 'z' ||
+		value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
+}
+
+func boundedSourceLine(line string) string {
+	line = strings.TrimSpace(line)
+	if len(line) > 120 {
+		return line[:120]
+	}
+	return line
 }
 
 func capOutput(output string) string {

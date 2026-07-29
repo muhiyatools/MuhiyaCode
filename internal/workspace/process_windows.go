@@ -7,7 +7,10 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
+	"unsafe"
 
+	"github.com/muhiya/muhiyacode/internal/contract"
 	"golang.org/x/sys/windows"
 )
 
@@ -22,8 +25,9 @@ func prepareCommand(cmd *exec.Cmd) {
 // Keying on the *exec.Cmd (not the PID, which Windows recycles) keeps the entry
 // unambiguous for the lifetime of the call.
 var (
-	jobsMu sync.Mutex
-	jobs   = map[*exec.Cmd]windows.Handle{}
+	jobsMu         sync.Mutex
+	jobs           = map[*exec.Cmd]windows.Handle{}
+	openJobObjectW = windows.NewLazySystemDLL("kernel32.dll").NewProc("OpenJobObjectW")
 )
 
 // superviseProcess attaches the started process to a Job Object. Processes it
@@ -37,10 +41,18 @@ func superviseProcess(cmd *exec.Cmd) {
 	if cmd.Process == nil {
 		return
 	}
-	job, err := windows.CreateJobObject(nil, nil)
+	job, err := windows.CreateJobObject(nil, windows.StringToUTF16Ptr(jobName(cmd.Process.Pid)))
 	if err != nil {
 		return // degrade to taskkill in killProcessTree
 	}
+	var limits windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	limits.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	_, _ = windows.SetInformationJobObject(
+		job,
+		windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&limits)),
+		uint32(unsafe.Sizeof(limits)),
+	)
 	proc, err := windows.OpenProcess(windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE, false, uint32(cmd.Process.Pid))
 	if err != nil {
 		_ = windows.CloseHandle(job)
@@ -75,6 +87,11 @@ func killProcessTree(cmd *exec.Cmd) {
 		_ = windows.CloseHandle(job)
 		return
 	}
+	if job, err := openNamedJobObject(0x0008, jobName(cmd.Process.Pid)); err == nil {
+		_ = windows.TerminateJobObject(job, 1)
+		_ = windows.CloseHandle(job)
+		return
+	}
 	kill := exec.Command("taskkill.exe", "/pid", strconv.Itoa(cmd.Process.Pid), "/t", "/f")
 	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	_ = kill.Run()
@@ -95,4 +112,62 @@ func releaseProcess(cmd *exec.Cmd) {
 	if ok {
 		_ = windows.CloseHandle(job)
 	}
+}
+
+func recoverableProcessTree(record contract.BackgroundProcess) bool {
+	pid := record.PID
+	job, err := openNamedJobObject(0x0004, jobName(pid))
+	if err == nil {
+		_ = windows.CloseHandle(job)
+		return true
+	}
+	const stillActive = 259
+	handle, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return time.Since(record.StartedAt) < 24*time.Hour
+	}
+	defer windows.CloseHandle(handle)
+	var exitCode uint32
+	if windows.GetExitCodeProcess(handle, &exitCode) == nil && exitCode == stillActive {
+		return true
+	}
+	return time.Since(record.StartedAt) < 24*time.Hour
+}
+
+func stopRecoveredProcessTree(pid int) error {
+	jobsMu.Lock()
+	for command, job := range jobs {
+		if command.Process != nil && command.Process.Pid == pid {
+			delete(jobs, command)
+			jobsMu.Unlock()
+			err := windows.TerminateJobObject(job, 1)
+			_ = windows.CloseHandle(job)
+			return err
+		}
+	}
+	jobsMu.Unlock()
+	if job, err := openNamedJobObject(0x0008, jobName(pid)); err == nil {
+		terminateErr := windows.TerminateJobObject(job, 1)
+		_ = windows.CloseHandle(job)
+		return terminateErr
+	}
+	kill := exec.Command("taskkill.exe", "/pid", strconv.Itoa(pid), "/t", "/f")
+	kill.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	return kill.Run()
+}
+
+func jobName(pid int) string {
+	return "MuhiyaCode-ProcessTree-" + strconv.Itoa(pid)
+}
+
+func openNamedJobObject(access uint32, name string) (windows.Handle, error) {
+	handle, _, callErr := openJobObjectW.Call(
+		uintptr(access),
+		0,
+		uintptr(unsafe.Pointer(windows.StringToUTF16Ptr(name))),
+	)
+	if handle == 0 {
+		return 0, callErr
+	}
+	return windows.Handle(handle), nil
 }

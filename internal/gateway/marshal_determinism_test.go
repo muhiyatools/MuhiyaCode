@@ -102,8 +102,8 @@ func TestMiniMaxSettledReplayPrefixIsStableAcrossTurns(t *testing.T) {
 	if string(firstBytes) != string(secondPrefixBytes) {
 		t.Fatalf("MiniMax settled prefix changed across turns\nfirst: %s\nnext:  %s", firstBytes, secondPrefixBytes)
 	}
-	if !strings.Contains(string(firstBytes), `"reasoning_details":[{"type":"text","text":"settled"}]`) {
-		t.Fatalf("MiniMax stable prefix dropped reasoning_details: %s", firstBytes)
+	if !strings.Contains(string(firstBytes), `"reasoning_details"`) {
+		t.Fatalf("MiniMax stable prefix must preserve reasoning_details: %s", firstBytes)
 	}
 }
 

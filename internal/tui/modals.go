@@ -32,7 +32,7 @@ func (m *Model) handleAction(action actionMsg) tea.Cmd {
 		return nil
 	}
 	switch action.kind {
-	case "compact", "rewind":
+	case "compact", "rewind", "switch-model":
 		if action.kind == "compact" {
 			m.status = "Ready"
 		}
@@ -101,6 +101,77 @@ func (m *Model) handleAction(action actionMsg) tea.Cmd {
 			m.notify("Session opened: " + payload.runtime.Session.ID)
 			// US1 T020: establish the paging cursor for the switched-in session.
 			return m.loadInitialPageCmd()
+		}
+	case "checkpoint-restore":
+		payload, ok := action.value.(checkpointRestoreValue)
+		if !ok {
+			break
+		}
+		if payload.runtime.Engine != nil {
+			m.runtime = payload.runtime
+			m.items = nil
+			m.activeTools = make(map[string]*toolView)
+			m.draft.Reset()
+			m.followOutput = true
+			m.input.Reset()
+			m.releasePastes()
+			m.resetPaging()
+			m.loadEvents(payload.events)
+			m.plan, m.usage = payload.runtime.Engine.CurrentChecklist(), payload.runtime.Engine.Usage()
+			m.lastStats = nil
+		}
+		m.notify(payload.message)
+		if payload.runtime.Engine != nil {
+			return m.loadInitialPageCmd()
+		}
+	case "checkpoints":
+		checkpoints, _ := action.value.([]contract.CheckpointInfo)
+		if len(checkpoints) == 0 {
+			m.notify("No checkpoints found for this session.")
+			break
+		}
+		choices := make([]contract.QuestionChoice, len(checkpoints))
+		for index, checkpoint := range checkpoints {
+			choices[index] = contract.QuestionChoice{
+				Label:       checkpoint.Description,
+				Description: checkpoint.ID + " · " + checkpoint.CreatedAt.Local().Format("Jan 2 15:04"),
+			}
+		}
+		m.openChoice("Restore checkpoint", "Choose a code snapshot.", choices, func(index int) tea.Cmd {
+			checkpoint := checkpoints[index]
+			scopes := []contract.QuestionChoice{
+				{Label: "Code and conversation", Description: "Restore files and fork conversation at the matching event cursor.", Recommended: true},
+				{Label: "Code only", Description: "Restore files without changing conversation."},
+				{Label: "Conversation only", Description: "Fork conversation without changing files."},
+			}
+			m.openChoice("Restore scope", checkpoint.Description, scopes, func(scopeIndex int) tea.Cmd {
+				scope := []string{"both", "code", "conversation"}[scopeIndex]
+				return m.restoreCheckpointCommand(checkpoint.ID, scope)
+			})
+			return nil
+		})
+	case "processes":
+		processes, _ := action.value.([]contract.BackgroundProcess)
+		if len(processes) == 0 {
+			m.notify("No background processes are owned by this session.")
+			break
+		}
+		choices := make([]contract.QuestionChoice, len(processes))
+		for index, process := range processes {
+			choices[index] = contract.QuestionChoice{
+				Label:       process.Label,
+				Description: fmt.Sprintf("%s · PID %d · started %s", process.ID, process.PID, process.StartedAt.Local().Format("15:04:05")),
+			}
+		}
+		m.openChoice("Background processes", "Choose a process tree to stop.", choices, func(index int) tea.Cmd {
+			process := processes[index]
+			return actionCommand("process-stop", func() (any, error) {
+				return process.ID, m.actions.StopProcess(process.ID)
+			})
+		})
+	case "process-stop":
+		if id, ok := action.value.(string); ok {
+			m.notify("Stopped background process " + id + ".")
 		}
 	case "sessions":
 		sessions, _ := action.value.([]contract.Session)
@@ -261,7 +332,24 @@ func (m *Model) handleModalKey(key tea.KeyPressMsg) tea.Cmd {
 		}
 		return nil
 	}
-	switch key.String() {
+	keyStr := key.String()
+	if len(keyStr) == 1 && keyStr[0] >= '1' && keyStr[0] <= '9' {
+		idx := int(keyStr[0] - '1')
+		if idx < len(modal.choices) {
+			modal.selected = idx
+			if modal.multi {
+				modal.checked[idx] = !modal.checked[idx]
+			} else {
+				index, callback := modal.selected, modal.onSelect
+				m.closeModal(index)
+				if callback != nil && index >= 0 {
+					return callback(index)
+				}
+			}
+		}
+		return nil
+	}
+	switch keyStr {
 	case "up", "k":
 		modal.selected = max(0, modal.selected-1)
 	case "down", "j":

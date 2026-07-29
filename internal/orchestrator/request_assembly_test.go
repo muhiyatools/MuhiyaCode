@@ -72,12 +72,12 @@ func TestValidateCallArgs(t *testing.T) {
 		// protocol. The retired text advised sending "a shorter version", which for
 		// a file write meant dropping the user's features.
 		{"unparseable json", `{"path":`, true, "cut off at the output limit"},
-		{"missing required", `{"mode":"a"}`, true, "missing required field"},
-		{"wrong primitive type", `{"path":123}`, true, "must be a string"},
-		{"numeric enum violation", `{"path":"x","level":9}`, true, "must be one of"},
-		{"string enum violation", `{"path":"x","mode":"z"}`, true, "must be one of"},
+		{"missing required", `{"mode":"a"}`, true, "missing properties"},
+		{"wrong primitive type", `{"path":123}`, true, `want "string"`},
+		{"numeric enum violation", `{"path":"x","level":9}`, true, "does not equal any of"},
+		{"string enum violation", `{"path":"x","mode":"z"}`, true, "does not equal any of"},
 		{"numeric enum valid (B8 regression)", `{"path":"x","level":3}`, false, ""},
-		{"extra unknown field rejected", `{"path":"x","surprise":true}`, true, "unknown property: surprise"},
+		{"extra unknown field rejected", `{"path":"x","surprise":true}`, true, `additional properties ["surprise"]`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

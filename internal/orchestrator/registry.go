@@ -146,9 +146,9 @@ func (r *Registry) Names() []string {
 	return append([]string(nil), r.order...)
 }
 
-func (r *Registry) Execute(ctx context.Context, name string, arguments json.RawMessage, allowed map[string]bool) (string, error) {
+func (r *Registry) Execute(ctx context.Context, name string, arguments json.RawMessage, allowed map[string]bool) contract.ToolResult {
 	if allowed != nil && !allowed[name] {
-		return "", fmt.Errorf("tool %s is not available to this agent", name)
+		return rejectedToolResult(fmt.Errorf("tool %s is not available to this agent", name))
 	}
 	r.mu.RLock()
 	tool := r.tools[name]
@@ -160,17 +160,21 @@ func (r *Registry) Execute(ctx context.Context, name string, arguments json.RawM
 		// does not waste turns retrying it.
 		if strings.HasPrefix(name, "mcp__") {
 			//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
-			return "", fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name)
+			return rejectedToolResult(fmt.Errorf("MCP tool %s is unavailable (server disconnected). Do not retry it this task; use another approach.", name))
 		}
 		// 004 US3 (T034): point a hallucinated tool name at the closest real one so
 		// the model corrects in one step instead of guessing again.
 		if suggestion := r.nearestToolName(name, allowed); suggestion != "" {
 			//lint:ignore ST1005 model-facing instruction, not a wrapped Go error
-			return "", fmt.Errorf("unknown tool %s. Closest available: %s.", name, suggestion)
+			return rejectedToolResult(fmt.Errorf("unknown tool %s. Closest available: %s.", name, suggestion))
 		}
-		return "", fmt.Errorf("unknown tool %s", name)
+		return rejectedToolResult(fmt.Errorf("unknown tool %s", name))
 	}
 	return tool.Execute(ctx, arguments)
+}
+
+func rejectedToolResult(err error) contract.ToolResult {
+	return contract.AdaptToolResult("", contract.ToolNotStarted(err))
 }
 
 // nearestToolName returns the registered (and, if a filter is set, allowed) tool
@@ -230,20 +234,6 @@ func CapToolOutput(output string, cap int) string {
 	head := output[:cap*7/10]
 	tail := output[len(output)-cap*2/10:]
 	return head + fmt.Sprintf("\n... [%d %s (grep/offset/limit) if needed] ...\n", len(output)-len(head)-len(tail), OutputTruncatedMarker) + tail
-}
-
-func IsToolFailure(output string, err error) bool {
-	if err != nil {
-		return true
-	}
-	lower := strings.ToLower(strings.TrimSpace(output))
-	prefixes := []string{"edit failed", "patch failed", "invalid tool", "invalid arguments", "permission denied", "blocked:", "unknown tool", "tool failed"}
-	for _, prefix := range prefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
-	}
-	return false
 }
 
 func toolNames(definitions []contract.ToolDefinition) []string {

@@ -6,6 +6,7 @@ import (
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/muhiya/muhiyacode/internal/contract"
+	"github.com/muhiya/muhiyacode/internal/gateway"
 	"github.com/muhiya/muhiyacode/internal/orchestrator"
 )
 
@@ -52,11 +53,17 @@ type runtimeActionValue struct {
 	events  []contract.Event
 }
 
+type checkpointRestoreValue struct {
+	runtime Runtime
+	events  []contract.Event
+	message string
+}
+
 func (m *Model) runSlash(value string) tea.Cmd {
 	args := strings.Fields(value)
 	command := strings.ToLower(args[0])
 	if m.busy {
-		allowed := command == "/reasoning" || command == "/effort" || command == "/context"
+		allowed := command == "/reasoning" || command == "/effort" || command == "/context" || command == "/requests"
 		if !allowed {
 			m.notify(command + " is unavailable while a task is running. Press Esc to stop it, or send plain text to steer it.")
 			return nil
@@ -65,6 +72,14 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	switch command {
 	case "/context":
 		m.openInfo("Context usage", formatContextReport(m.runtime.Engine.ContextReport(), m.sessionModelName()))
+	case "/requests":
+		m.openInfo("Request diagnostics", formatRequestTrace(m.runtime.Engine))
+	case "/model":
+		if len(args) > 1 {
+			targetID := strings.TrimSpace(args[1])
+			return m.switchActiveModel(targetID)
+		}
+		return m.openModelSelector()
 	case "/compact":
 		if m.busy {
 			m.notify("Stop the running task before compacting.")
@@ -74,11 +89,31 @@ func (m *Model) runSlash(value string) tea.Cmd {
 		m.notify("Compacting conversation — summarizing earlier turns…")
 		return actionCommand("compact", func() (any, error) { return m.runtime.Engine.Compact(m.ctx) })
 	case "/rewind":
+		if len(args) > 1 && m.actions.RestoreCheckpoint != nil {
+			scope := "both"
+			if len(args) > 2 {
+				scope = args[2]
+			}
+			return m.restoreCheckpointCommand(args[1], scope)
+		}
+		if m.actions.ListCheckpoints != nil {
+			return actionCommand("checkpoints", func() (any, error) {
+				return m.actions.ListCheckpoints(m.ctx)
+			})
+		}
 		if m.actions.Rewind == nil {
 			m.notify("Rewind is unavailable in this interface.")
 			return nil
 		}
 		return actionCommand("rewind", func() (any, error) { return m.actions.Rewind(m.ctx) })
+	case "/processes":
+		if m.actions.ListProcesses == nil {
+			m.notify("Background process management is unavailable.")
+			return nil
+		}
+		return actionCommand("processes", func() (any, error) {
+			return m.actions.ListProcesses(), nil
+		})
 	case "/reasoning", "/effort":
 		if m.runtime.Settings == nil { // H-2: guard the Effort deref below
 			return nil
@@ -173,6 +208,13 @@ func (m *Model) runSlash(value string) tea.Cmd {
 	return nil
 }
 
+func (m *Model) restoreCheckpointCommand(id, scope string) tea.Cmd {
+	return actionCommand("checkpoint-restore", func() (any, error) {
+		runtime, events, message, err := m.actions.RestoreCheckpoint(m.ctx, id, scope)
+		return checkpointRestoreValue{runtime: runtime, events: events, message: message}, err
+	})
+}
+
 // reasoningSummary describes each level in terms of the user's choice — how
 // hard the model thinks — with no provider-mapping trivia (013 FR-016). Which
 // internal thinking tier a given model receives is the gateway's business, and
@@ -241,6 +283,28 @@ func (m *Model) setPermission(mode contract.PermissionMode) tea.Cmd {
 		m.notify("Permission mode must be normal or auto-accept.")
 		return nil
 	}
+	if mode == contract.PermissionAutoAccept && m.runtime.Settings != nil && m.runtime.Settings.PermissionMode != contract.PermissionAutoAccept {
+		m.openChoice(
+			"Unsafe full access",
+			"Auto-accept lets tools edit files and run unrestricted host shell commands without asking. It is not sandboxed. Enable it for this session?",
+			[]contract.QuestionChoice{
+				{Label: "Keep normal", Description: "Continue requiring approval for risky actions", Recommended: true},
+				{Label: "Enable full access", Description: "Allow unrestricted unattended execution"},
+			},
+			func(index int) tea.Cmd {
+				if index != 1 {
+					m.notify("Permission mode remains normal.")
+					return nil
+				}
+				return m.applyPermission(contract.PermissionAutoAccept)
+			},
+		)
+		return nil
+	}
+	return m.applyPermission(mode)
+}
+
+func (m *Model) applyPermission(mode contract.PermissionMode) tea.Cmd {
 	if m.runtime.Engine != nil {
 		// Route through the engine's synchronized setter so a mid-task change does
 		// not race the task goroutine reading permission mode (F-1). This writes
@@ -317,4 +381,67 @@ func (m *Model) completeCommand() {
 	m.commandIndex = max(0, min(m.commandIndex, len(matches)-1))
 	m.input.SetValue(matches[m.commandIndex].name)
 	m.input.MoveToEnd()
+}
+
+func (m *Model) openModelSelector() tea.Cmd {
+	if m.runtime.Engine == nil {
+		m.notify("Engine not initialized.")
+		return nil
+	}
+	models := m.runtime.Engine.DiscoveredModels()
+	if len(models) == 0 {
+		m.notify("No gateway models discovered yet. Use `/model <id>` to set a model ID directly.")
+		return nil
+	}
+	choices := make([]contract.QuestionChoice, 0, len(models))
+	activeID := m.runtime.Settings.Provider.ActiveModelID
+	for _, model := range models {
+		label := model.Name
+		if strings.TrimSpace(label) == "" {
+			label = model.ID
+		}
+		desc := fmt.Sprintf("ID: %s", model.ID)
+		if model.ContextLimit > 0 {
+			desc += fmt.Sprintf(" | Context: %d tokens", model.ContextLimit)
+		}
+		rec := model.ID == activeID
+		if rec {
+			desc += " (active)"
+		}
+		choices = append(choices, contract.QuestionChoice{
+			Label: label, Description: desc, Recommended: rec,
+		})
+	}
+	m.openChoice(
+		"Select Model",
+		"Choose a model discovered from the gateway catalog:",
+		choices,
+		func(index int) tea.Cmd {
+			if index >= 0 && index < len(models) {
+				return m.switchActiveModel(models[index].ID)
+			}
+			return nil
+		},
+	)
+	return nil
+}
+
+func (m *Model) switchActiveModel(modelID string) tea.Cmd {
+	if m.busy {
+		m.notify("Stop the running task before switching models.")
+		return nil
+	}
+	if m.runtime.Engine == nil {
+		m.notify("Engine not initialized.")
+		return nil
+	}
+	return actionCommand("switch-model", func() (any, error) {
+		name := m.runtime.Engine.CatalogModelName(modelID)
+		profile := gateway.ResolveModelProfile(modelID + " " + name)
+		if err := m.runtime.Engine.SwitchModel(m.ctx, "main", modelID, name, profile.PromptAddendum); err != nil {
+			return nil, err
+		}
+		m.runtime.Settings.Provider.ActiveModelID = modelID
+		return fmt.Sprintf("Active session model switched to %s (%s). Cache epoch is now %d; the next request starts a new cache lineage.", name, modelID, m.runtime.Engine.CacheEpoch()), nil
+	})
 }

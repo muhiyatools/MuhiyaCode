@@ -86,5 +86,5 @@ func mainPaired(read, miss int) contract.UsageRecord {
 }
 
 func subagentPaired(read, miss int) contract.UsageRecord {
-	return contract.UsageRecord{Stream: contract.UsageStreamSubagent, CacheReadTokens: &read, CacheMissTokens: &miss, Attribution: contract.CacheAttributionNA}
+	return contract.UsageRecord{Stream: contract.UsageStreamAux, CacheReadTokens: &read, CacheMissTokens: &miss, Attribution: contract.CacheAttributionNA}
 }

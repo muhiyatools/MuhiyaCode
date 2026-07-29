@@ -179,8 +179,8 @@ func (t *schemaTool) Definition() contract.ToolDefinition {
 	}, []string{"path"})
 }
 
-func (t *schemaTool) Execute(_ context.Context, _ json.RawMessage) (string, error) {
-	return "configured.", nil
+func (t *schemaTool) Execute(_ context.Context, _ json.RawMessage) contract.ToolResult {
+	return contract.AdaptToolResult("configured.", nil)
 }
 
 // TestMalformedArgsGuidedRetry is the FI-5 invariant: H1 argument validation
@@ -417,11 +417,11 @@ func TestFaultInjectionCatalog(t *testing.T) {
 			want:   outcomeRecordedDegradation,
 		},
 		{
-			name:  "stalled-progress-degrades",
-			tools: []contract.Tool{&recordingTool{name: "read_file"}},
+			name:      "stalled-progress-degrades",
+			tools:     []contract.Tool{&recordingTool{name: "read_file"}},
 			responses: stalledProgressResponses(),
-			prompt: "test stalled progress",
-			want:   outcomeRecordedDegradation,
+			prompt:    "test stalled progress",
+			want:      outcomeRecordedDegradation,
 		},
 		{
 			name:  "verification-failure-guided-success",

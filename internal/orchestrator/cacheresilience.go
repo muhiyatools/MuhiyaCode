@@ -32,13 +32,20 @@ const (
 // notice. previous != nil means a prior main request existed (a resume), which
 // distinguishes an avoidable resume cold read from an unavoidable fresh first request.
 func (e *Engine) flagColdStartIfNeeded(previous *contract.UsageRecord, usage contract.Usage) {
-	if previous == nil || usage.CacheReadTokens == nil || *usage.CacheReadTokens != 0 {
+	if previous == nil || usage.CacheReadTokens == nil || usage.CacheMissTokens == nil {
 		return
 	}
 	if !usage.PromptTokensAvailable && usage.PromptTokens == 0 {
 		return
 	}
-	if usage.PromptTokens < coldNoticeMinTokens {
+	eligible := *usage.CacheReadTokens + *usage.CacheMissTokens
+	if usage.PromptTokens < coldNoticeMinTokens || eligible == 0 {
+		return
+	}
+	// A tiny fixed prefix hit (for example 114 tokens out of a 12k prompt) is
+	// still a catastrophic cache restart. Treat <20% reuse with at least 2k
+	// missed tokens as cold instead of requiring an exact zero.
+	if *usage.CacheReadTokens*100 >= eligible*20 || *usage.CacheMissTokens < 2_048 {
 		return
 	}
 	e.coldStartPending = true
@@ -198,6 +205,7 @@ func (e *Engine) persistPrefixShapeOnce(ctx context.Context, shape PrefixShape) 
 		SystemHash: shape.SystemHash,
 		ToolsHash:  shape.ToolsHash,
 		ModelID:    shape.ModelID,
+		PrefixHash: shape.PrefixHash,
 		Upstream:   e.upstreamPin(),
 	})
 }

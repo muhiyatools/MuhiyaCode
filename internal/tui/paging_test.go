@@ -75,6 +75,23 @@ func TestInitialPageEstablishesCursor(t *testing.T) {
 	}
 }
 
+func TestInitialPageDoesNotReplaceJournalRecentWindow(t *testing.T) {
+	recent := []contract.Event{{Role: "assistant", Type: "message", Content: "journal authority"}}
+	m := NewModel(Options{
+		Runtime: testRuntime(t),
+		Actions: Actions{TranscriptPage: fakeTranscriptPager(10)},
+		Version: "test",
+		Recent:  recent,
+	})
+	m.applyInitialPage(contract.TranscriptPage{
+		Entries:  []contract.TranscriptEvent{{ID: 10, Role: "assistant", Content: "stale legacy projection"}},
+		OldestID: 10,
+	})
+	if len(m.items) != 1 || m.items[0].content != "journal authority" {
+		t.Fatalf("legacy page replaced journal recent window: %+v", m.items)
+	}
+}
+
 // TestScrollToTopLoadsOlderPage (US1 T020/T023) proves scrolling to the top loads
 // and prepends the previous page, advances the cursor, and shifts the viewport so
 // the same content stays in view (anchor compensation).

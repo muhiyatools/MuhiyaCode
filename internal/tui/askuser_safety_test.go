@@ -84,3 +84,18 @@ func TestAskMixedChoicesHandlesEmptySafely(t *testing.T) {
 		t.Fatalf("second (choiceless) answer should be blank, got %+v", answers[1])
 	}
 }
+
+func TestAskCancellationDoesNotSelectRecommendedChoice(t *testing.T) {
+	b := NewBridge()
+	b.SetFallback(func(modalRequest) int { return -1 })
+	_, err := b.Callbacks().Ask(context.Background(), []contract.Question{{
+		Question: "Proceed?",
+		Choices: []contract.QuestionChoice{
+			{Label: "Proceed", Recommended: true},
+			{Label: "Stop"},
+		},
+	}})
+	if err == nil || err != ErrQuestionCancelled {
+		t.Fatalf("cancelled question must fail closed, got %v", err)
+	}
+}

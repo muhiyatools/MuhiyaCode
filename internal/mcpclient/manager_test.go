@@ -174,8 +174,8 @@ func TestPinnedSurfaceAppearsAtBoundaryThenLoadsBeforeHandshake(t *testing.T) {
 	if err != nil || !changed || len(change.Tools) != 1 {
 		t.Fatalf("change=%+v changed=%v err=%v", change, changed, err)
 	}
-	if _, err := change.Tools[0].Execute(context.Background(), json.RawMessage(`{"name":"first"}`)); err != nil {
-		t.Fatal(err)
+	if result := change.Tools[0].Execute(context.Background(), json.RawMessage(`{"name":"first"}`)); result.Err != nil {
+		t.Fatal(result.Err)
 	}
 	if err := first.Close(); err != nil {
 		t.Fatal(err)
@@ -191,15 +191,15 @@ func TestPinnedSurfaceAppearsAtBoundaryThenLoadsBeforeHandshake(t *testing.T) {
 	// it WITHOUT a fresh session-level Refresh still succeeds because the
 	// cached surface triggers an on-demand connect within the lazy start
 	// timeout.
-	output, err := pinned[0].Execute(context.Background(), json.RawMessage(`{"name":"early"}`))
-	if err != nil || !strings.Contains(output, "Hello early") {
-		t.Fatalf("lazy-connect failed: output=%q err=%v", output, err)
+	result := pinned[0].Execute(context.Background(), json.RawMessage(`{"name":"early"}`))
+	if result.Err != nil || !strings.Contains(result.Output, "Hello early") {
+		t.Fatalf("lazy-connect failed: output=%q err=%v", result.Output, result.Err)
 	}
 	// Surface stabilization: subsequent calls hit the live session, no
 	// boundary change is needed.
-	output, err = pinned[0].Execute(context.Background(), json.RawMessage(`{"name":"later"}`))
-	if err != nil || !strings.Contains(output, "Hello later") {
-		t.Fatalf("second execute failed: output=%q err=%v", output, err)
+	result = pinned[0].Execute(context.Background(), json.RawMessage(`{"name":"later"}`))
+	if result.Err != nil || !strings.Contains(result.Output, "Hello later") {
+		t.Fatalf("second execute failed: output=%q err=%v", result.Output, result.Err)
 	}
 	if _, changed, err := second.TakeBoundaryChange(); err != nil || changed {
 		t.Fatalf("known cached server changed in-session: changed=%v err=%v", changed, err)
@@ -510,8 +510,8 @@ func assertMCPGreeting(t *testing.T, manager *Manager, expectedName string) {
 	if _, ok := properties["name"]; !ok {
 		t.Fatalf("MCP input schema was not preserved: %#v", parameters)
 	}
-	output, err := tools[0].Execute(context.Background(), json.RawMessage(`{"name":"Muhiya"}`))
-	if err != nil || !strings.Contains(output, "Hello Muhiya") {
-		t.Fatalf("output=%q err=%v", output, err)
+	result := tools[0].Execute(context.Background(), json.RawMessage(`{"name":"Muhiya"}`))
+	if result.Err != nil || !strings.Contains(result.Output, "Hello Muhiya") {
+		t.Fatalf("output=%q err=%v", result.Output, result.Err)
 	}
 }

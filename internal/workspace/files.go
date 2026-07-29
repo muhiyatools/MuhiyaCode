@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -91,7 +90,7 @@ func (w *Workspace) Read(ctx context.Context, options ReadOptions) (ReadResult, 
 	if err != nil {
 		return ReadResult{}, err
 	}
-	data, err := readTextFile(target, MaxReadBytes)
+	data, err := w.readTextFile(target, MaxReadBytes)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
 			if suggestions := w.suggestByBaseName(target); len(suggestions) > 0 {
@@ -174,7 +173,7 @@ func (w *Workspace) Grep(ctx context.Context, options GrepOptions) (SearchResult
 				continue
 			}
 		}
-		data, readErr := readTextFile(file, MaxSearchBytes)
+		data, readErr := w.readTextFile(file, MaxSearchBytes)
 		if readErr != nil {
 			continue
 		}
@@ -258,8 +257,11 @@ func (w *Workspace) MultiEdit(ctx context.Context, path string, edits []Edit) (E
 	if !w.canOverwrite(target) {
 		return EditResult{}, fmt.Errorf("%w: %s", ErrUnreadOverwrite, path)
 	}
-	data, err := readTextFile(target, MaxReadBytes)
+	data, err := w.readTextFile(target, MaxReadBytes)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return EditResult{}, fmt.Errorf("%w: edit target does not exist: %s", ErrInvalidArguments, path)
+		}
 		return EditResult{}, err
 	}
 	before := string(data)
@@ -288,7 +290,8 @@ func (w *Workspace) MultiEdit(ctx context.Context, path string, edits []Edit) (E
 	}
 
 	if failed {
-		return EditResult{}, fmt.Errorf("multi_edit failed (file unchanged). Status of edits:\n%s\n%s", strings.Join(result.Notes, "\n"), strings.Join(result.Skipped, "\n"))
+		return EditResult{}, fmt.Errorf("multi_edit failed (file unchanged). Status of edits:\n%s\n%s: %w",
+			strings.Join(result.Notes, "\n"), strings.Join(result.Skipped, "\n"), ErrInvalidArguments)
 	}
 
 	// Reset current to before and do actual pass to collect precise stats since all passed
@@ -321,7 +324,7 @@ func (w *Workspace) MultiEdit(ctx context.Context, path string, edits []Edit) (E
 	if err := w.checkpoint(ctx, "before editing "+result.Path, []string{target}); err != nil {
 		return result, err
 	}
-	if err := writeTextPreservingMode(target, []byte(current)); err != nil {
+	if err := w.writeTextPreservingMode(target, []byte(current)); err != nil {
 		return result, err
 	}
 	result.Changed = true
@@ -339,7 +342,7 @@ func (w *Workspace) Write(ctx context.Context, path, content string) (WriteResul
 	if err != nil {
 		return WriteResult{}, err
 	}
-	beforeBytes, readErr := os.ReadFile(target)
+	beforeBytes, _, readErr := safeReadTarget(w.root, target)
 	existed := readErr == nil
 	if readErr != nil && !os.IsNotExist(readErr) {
 		return WriteResult{}, readErr
@@ -354,10 +357,7 @@ func (w *Workspace) Write(ctx context.Context, path, content string) (WriteResul
 	if err := w.checkpoint(ctx, "before writing "+relativeSlash(w.root, target), []string{target}); err != nil {
 		return WriteResult{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return WriteResult{}, err
-	}
-	if err := writeTextPreservingMode(target, []byte(content)); err != nil {
+	if err := w.writeTextPreservingMode(target, []byte(content)); err != nil {
 		return WriteResult{}, err
 	}
 	w.readLedger.add(target)
@@ -376,6 +376,8 @@ func (w *Workspace) RunShell(ctx context.Context, command string, timeout time.D
 	}
 	runner := *w.shell
 	runner.OnOutput = w.options.ShellOutput
+	runner.AllowUnsandboxed = true
+	runner.BypassSandbox = w.guard.Mode() == contract.PermissionAutoAccept
 	return runner.Run(ctx, w.root, command, timeout)
 }
 
@@ -405,6 +407,8 @@ func (w *Workspace) GitDiff(ctx context.Context, options GitDiffOptions) (ShellR
 	if err := w.guard.ApproveShell(ctx, strings.Join(args, " ")); err != nil {
 		return ShellResult{}, err
 	}
+	runner.AllowUnsandboxed = true
+	runner.BypassSandbox = w.guard.Mode() == contract.PermissionAutoAccept
 	return runner.runArgv(ctx, w.root, "git", args, 30*time.Second)
 }
 
@@ -634,23 +638,10 @@ func collectFiles(root string, maxFiles int, skip func(path string, entry fs.Dir
 	return files, err
 }
 
-func readTextFile(path string, limit int64) ([]byte, error) {
-	file, err := os.Open(path)
-	if err != nil {
-		// Return the raw not-exist error unchanged so Read's basename-suggestion
-		// path (errors.Is(fs.ErrNotExist)) still fires; os.Open's message already
-		// names the path in plain English (no opaque GetFileAttributesEx — that is
-		// os.Stat's spelling, handled on the list/search paths via friendlyPathError).
-		return nil, err
-	}
-	defer file.Close()
-	reader := io.LimitReader(file, limit+1)
-	data, err := io.ReadAll(reader)
+func (w *Workspace) readTextFile(path string, limit int64) ([]byte, error) {
+	data, err := safeReadTargetLimit(w.root, path, limit)
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(data)) > limit {
-		return nil, fmt.Errorf(instructions.WorkspaceFileExceedsLimitTmpl, limit)
 	}
 	if bytes.IndexByte(data, 0) >= 0 || !utf8.Valid(data) {
 		return nil, errors.New(instructions.WorkspaceBinaryUnsupportedBody)
@@ -658,36 +649,12 @@ func readTextFile(path string, limit int64) ([]byte, error) {
 	return data, nil
 }
 
-func writeTextPreservingMode(path string, data []byte) error {
+func (w *Workspace) writeTextPreservingMode(path string, data []byte) error {
 	mode := fs.FileMode(0o644)
-	if info, err := os.Stat(path); err == nil {
+	if info, err := safeStatTarget(w.root, path); err == nil {
 		mode = info.Mode().Perm()
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".muhiya-edit-*.tmp")
-	if err != nil {
-		return err
-	}
-	name := temp.Name()
-	defer os.Remove(name)
-	if err := temp.Chmod(mode); err != nil {
-		temp.Close()
-		return err
-	}
-	if _, err := temp.Write(data); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
-	}
-	if err := temp.Close(); err != nil {
-		return err
-	}
-	return replaceAtomic(name, path)
+	return safeWriteTarget(w.root, path, data, mode)
 }
 
 func splitLines(value string) []string {

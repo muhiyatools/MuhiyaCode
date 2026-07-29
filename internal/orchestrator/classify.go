@@ -2,10 +2,8 @@ package orchestrator
 
 import (
 	"fmt"
-	"math"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
@@ -22,37 +20,43 @@ const (
 )
 
 type Assessment struct {
-	Class      TaskClass
-	Risky      bool
-	Reason     string
-	ScopeGuard bool
+	Class                   TaskClass
+	Risky                   bool
+	Reason                  string
+	ScopeGuard              bool
+	SingleArtifactExtension string
 }
 
 type Budget struct {
-	Class        TaskClass
-	Risky        bool
-	ToolCalls    int
-	MaxTurns     int
-	Reasoning    contract.ReasoningTier
-	Verification string
-	Brief        string
+	Class                   TaskClass
+	Risky                   bool
+	ToolCalls               int
+	MaxTurns                int
+	MaxChecks               int
+	MaxTaskTokens           int
+	MaxOutputTokens         int
+	Reasoning               contract.ReasoningTier
+	Verification            string
+	SingleArtifactExtension string
+	Brief                   string
 }
 
 var (
-	greetingRE     = regexp.MustCompile(`(?i)^(hi+|hey+|hello+|yo|sup|hola|salam|salaam|marhaba|ahlan|thanks?|thank you|thx|ty|ok(ay)?|cool|nice|great|good (morning|afternoon|evening|night)|how are you\??|test(ing)?)[\s!.?]*$`)
-	questionRE     = regexp.MustCompile(`(?i)^(what|who|when|where|why|how|is|are|was|were|does|do|did|should i|tell me|explain|define|compare|convert|calculate|translate|summari[sz]e)\b`)
-	continuationRE = regexp.MustCompile(`(?i)^(continue|go (on|ahead)|proceed|keep going|resume|carry on|next( step)?|do it|yes|finish( it)?|and then)[\s!.?]*$`)
-	codeRE         = regexp.MustCompile("(?m)```|=>|;\\s*$|\\b(function|class|import|const|def|struct|interface|func|package)\\b")
-	pathRE         = regexp.MustCompile(`(?i)(^|[\s"'` + "`" + `(])([\w.-]+[/\\])*[\w.-]+\.(ts|tsx|js|jsx|json|go|py|rb|rs|java|kt|cs|cpp|c|h|css|html|vue|svelte|md|yml|yaml|toml|sql|sh|ps1|env)\b|[\w.-]+[/\\][\w.-]+[/\\][\w/\\.-]+`)
-	repoRE         = regexp.MustCompile(`(?i)\b(repo|repository|codebase|project|app|file|files|folder|directory|module|component|function|class|method|test|tests|bug|error|build|compile|lint|typecheck|api|database|schema|diff|package|dependency|ui|page|screen|button|form)\b`)
-	changeRE       = regexp.MustCompile(`(?i)\b(add|fix|change|update|refactor|implement|create|build|make|remove|delete|rename|move|write|convert|improve|optimi[sz]e|integrate|configure|debug|migrate|upgrade|redesign|rewrite|extend|support|polish|enhance)\b`)
-	breadthRE      = regexp.MustCompile(`(?i)\b(entire|whole (codebase|project|app|repo)|all (files|pages|components|modules|tests|routes)|across the|every (file|page|component|module)|rewrite|redesign|overhaul|re-?architect|migration|migrate|audit|from scratch|end[- ]to[- ]end)\b`)
-	tinyRE         = regexp.MustCompile(`(?i)\b(typo|rename|bump|comment|one[- ]?line|quick|tiny|trivial|small tweak|label|placeholder|tooltip|colou?r|padding|margin|font|title|wording|version number)\b`)
-	featureRE      = regexp.MustCompile(`(?i)\b(management|dashboard|admin panel|page|screen|auth(entication)?|login flow|integration|system|workflow|onboarding|settings|profile|notifications?|crud|api for)\b`)
-	riskRE         = regexp.MustCompile(`(?i)\b(delete|drop|truncate|wipe|migration|migrate|auth|login|session|password|token|secret|credential|payment|billing|checkout|production|deploy|release|security|encrypt|permission)\b`)
-	agentRE        = regexp.MustCompile(`(?i)\b(sub-?agents?|delegate|parallel agents?)\b`)
-	qualityRE      = regexp.MustCompile(`(?i)\b(polish(ed)?|perfect(ly)?|flawless|bullet-?proof|production[- ]?(grade|ready)|100\s*%|make sure everything|fully working)\b`)
-	bulletRE       = regexp.MustCompile(`^\s*([-*]|[0-9]+[.)])\s`)
+	greetingRE       = regexp.MustCompile(`(?i)^(hi+|hey+|hello+|yo|sup|hola|salam|salaam|marhaba|ahlan|thanks?|thank you|thx|ty|ok(ay)?|cool|nice|great|good (morning|afternoon|evening|night)|how are you\??|test(ing)?)[\s!.?]*$`)
+	questionRE       = regexp.MustCompile(`(?i)^(what|who|when|where|why|how|is|are|was|were|does|do|did|should i|tell me|explain|define|compare|convert|calculate|translate|summari[sz]e)\b`)
+	continuationRE   = regexp.MustCompile(`(?i)^(continue|go (on|ahead)|proceed|keep going|resume|carry on|next( step)?|do it|yes|finish( it)?|and then)[\s!.?]*$`)
+	codeRE           = regexp.MustCompile("(?m)```|=>|;\\s*$|\\b(function|class|import|const|def|struct|interface|func|package)\\b")
+	pathRE           = regexp.MustCompile(`(?i)(^|[\s"'` + "`" + `(])([\w.-]+[/\\])*[\w.-]+\.(ts|tsx|js|jsx|json|go|py|rb|rs|java|kt|cs|cpp|c|h|css|html|vue|svelte|md|yml|yaml|toml|sql|sh|ps1|env)\b|[\w.-]+[/\\][\w.-]+[/\\][\w/\\.-]+`)
+	repoRE           = regexp.MustCompile(`(?i)\b(repo|repository|codebase|project|app|file|files|folder|directory|module|component|function|class|method|test|tests|bug|error|build|compile|lint|typecheck|api|database|schema|diff|package|dependency|ui|page|screen|button|form)\b`)
+	changeRE         = regexp.MustCompile(`(?i)\b(add|fix|change|update|refactor|implement|create|build|make|remove|delete|rename|move|write|convert|improve|optimi[sz]e|integrate|configure|debug|migrate|upgrade|redesign|rewrite|extend|support|polish|enhance)\b`)
+	breadthRE        = regexp.MustCompile(`(?i)\b(entire|whole (codebase|project|app|repo)|all (files|pages|components|modules|tests|routes)|across the|every (file|page|component|module)|rewrite|redesign|overhaul|re-?architect|migration|migrate|audit|from scratch|end[- ]to[- ]end)\b`)
+	tinyRE           = regexp.MustCompile(`(?i)\b(typo|rename|bump|comment|one[- ]?line|quick|tiny|trivial|small tweak|label|placeholder|tooltip|colou?r|padding|margin|font|title|wording|version number)\b`)
+	featureRE        = regexp.MustCompile(`(?i)\b(management|dashboard|admin panel|page|screen|auth(entication)?|login flow|integration|system|workflow|onboarding|settings|profile|notifications?|crud|api for)\b`)
+	riskRE           = regexp.MustCompile(`(?i)\b(delete|drop|truncate|wipe|migration|migrate|auth|login|session|password|token|secret|credential|payment|billing|checkout|production|deploy|release|security|encrypt|permission)\b`)
+	qualityRE        = regexp.MustCompile(`(?i)\b(polish(ed)?|perfect(ly)?|flawless|bullet-?proof|production[- ]?(grade|ready)|100\s*%|make sure everything|fully working)\b`)
+	simpleArtifactRE = regexp.MustCompile(`(?i)\b(simple|basic|minimal|small|quick)\b.*\b(game|page|site|app|demo)\b`)
+	singleArtifactRE = regexp.MustCompile(`(?i)\b(?:single|one|standalone|self[- ]contained)\s+(?:self[- ]contained\s+)?(html|javascript|js|css|python|py|go)\s+file\b`)
+	bulletRE         = regexp.MustCompile(`^\s*([-*]|[0-9]+[.)])\s`)
 	// planRequestRE (P3b): the user is asking the agent to CREATE a plan (not execute
 	// one). Matches "create/make/write/draft a plan", "plan out/first/before", "plan
 	// how to". Only used to keep such a request out of the chat class.
@@ -88,6 +92,7 @@ func Classify(raw string, previous TaskClass) Assessment {
 	// A planning QUESTION ("how do I write a plan?") is not a request to create one.
 	planRequest := !planDoc && planRequestRE.MatchString(text) && !questionRE.MatchString(text)
 	paths := len(pathRE.FindAllStringIndex(text, 21))
+	singleArtifactExtension := requestedSingleArtifactExtension(text)
 	hasWorkspace := paths > 0 || codeRE.MatchString(text) || repoRE.MatchString(text)
 	if !planRequest && !planDoc && !hasWorkspace && !changeRE.MatchString(text) && len(text) < 400 && (questionRE.MatchString(text) || strings.HasSuffix(text, "?")) {
 		return Assessment{Class: ClassChat, Reason: "general question, no workspace involvement"}
@@ -116,11 +121,6 @@ func Classify(raw string, previous TaskClass) Assessment {
 		}
 	}
 	largeThreshold := 2
-	if reviewLegacyMode {
-		// Baseline mode (MUHIYA_BENCH_LEGACY_REVIEW=1): pre-011 single-signal
-		// escalation, so baseline runs route tasks exactly as the old build did.
-		largeThreshold = 1
-	}
 	assessment := Assessment{Class: ClassStandard, Risky: risky, Reason: "typical multi-step task"}
 	switch {
 	case len(text) > 2500 || breadth >= 2 || (breadth > 0 && len(text) > 1200):
@@ -129,16 +129,15 @@ func Classify(raw string, previous TaskClass) Assessment {
 		assessment.Class, assessment.Reason = ClassLarge, "broad multi-part request"
 	case changeRE.MatchString(text) && featureRE.MatchString(text):
 		assessment.Class, assessment.Reason = ClassStandard, "feature-scope request"
+	case singleArtifactExtension != "" && simpleArtifactRE.MatchString(text) && len(text) <= 400 && bullets <= 2:
+		assessment.Class, assessment.Reason = ClassTiny, "simple single-file artifact"
 	case len(text) <= 200 && bullets == 0 && paths <= 1 && tinyRE.MatchString(text):
 		assessment.Class, assessment.Reason = ClassTiny, "single trivial change"
 	case len(text) <= 400 && bullets <= 2 && paths <= 2:
 		assessment.Class, assessment.Reason = ClassSmall, "single focused change"
 	}
+	assessment.SingleArtifactExtension = singleArtifactExtension
 	assessment.ScopeGuard = qualityRE.MatchString(text) && assessment.Class != ClassChat
-	if agentRE.MatchString(text) && (assessment.Class == ClassChat || assessment.Class == ClassTiny || assessment.Class == ClassSmall) {
-		assessment.Class = ClassStandard
-		assessment.Reason += "; subagents explicitly requested"
-	}
 	// Asking for a plan (or pointing at a plan document) is real work, never
 	// chat/tiny — the model decides how to plan; the classifier only sizes it.
 	if (planRequest || planDoc) && (assessment.Class == ClassChat || assessment.Class == ClassTiny) {
@@ -148,19 +147,12 @@ func Classify(raw string, previous TaskClass) Assessment {
 	return assessment
 }
 
-var classToolBase = map[TaskClass]int{ClassChat: 3, ClassTiny: 8, ClassSmall: 15, ClassStandard: 30, ClassLarge: 60, ClassEpic: 100}
-var classTurns = map[TaskClass]int{ClassChat: 6, ClassTiny: 10, ClassSmall: 16, ClassStandard: 26, ClassLarge: 44, ClassEpic: 64}
-
-// There is deliberately NO per-class subagent allowance. A cap plus the
-// plan/execute split was jointly incoherent: a turn classified as chat got
-// agents=0, the main model is forbidden from mutating files, and the agent
-// was left with no legal action at all — it asked the user to send another
-// message so the next turn might allow work. Delegation scale is now the
-// model's judgment, taught by the DELEGATION section, and bounded by the
-// liveness guards (turn ceiling, failure terminator, repeat limiter) rather
-// than by an arbitrary number.
-var classVerify = map[TaskClass]string{ClassChat: "none", ClassTiny: "targeted", ClassSmall: "targeted", ClassStandard: "standard", ClassLarge: "thorough", ClassEpic: "thorough"}
-var effortScale = map[contract.EffortLevel]float64{contract.EffortLow: .75, contract.EffortMedium: 1, contract.EffortHigh: 1.3, contract.EffortMax: 1.8}
+var classToolCaps = map[TaskClass]int{ClassChat: 6, ClassTiny: 5, ClassSmall: 10, ClassStandard: 20, ClassLarge: 40, ClassEpic: 64}
+var classTurns = map[TaskClass]int{ClassChat: 6, ClassTiny: 5, ClassSmall: 10, ClassStandard: 18, ClassLarge: 32, ClassEpic: 48}
+var classCheckCaps = map[TaskClass]int{ClassChat: 1, ClassTiny: 1, ClassSmall: 2, ClassStandard: 3, ClassLarge: 5, ClassEpic: 8}
+var classTokenCaps = map[TaskClass]int{ClassChat: 0, ClassTiny: 0, ClassSmall: 0, ClassStandard: 0, ClassLarge: 0, ClassEpic: 0}
+var classOutputCaps = map[TaskClass]int{ClassChat: 32_000, ClassTiny: 32_000, ClassSmall: 32_000, ClassStandard: 32_000, ClassLarge: 32_000, ClassEpic: 32_000}
+var classVerify = map[TaskClass]string{ClassChat: "none", ClassTiny: "one-cheap-check", ClassSmall: "targeted", ClassStandard: "standard", ClassLarge: "thorough", ClassEpic: "thorough"}
 
 func BudgetFor(a Assessment, effort EffortProfile) Budget {
 	verification := classVerify[a.Class]
@@ -171,10 +163,14 @@ func BudgetFor(a Assessment, effort EffortProfile) Budget {
 	// the brief reports it so the model knows the depth it is being given.
 	b := Budget{
 		Class: a.Class, Risky: a.Risky,
-		ToolCalls:    int(math.Max(2, math.Round(float64(classToolBase[a.Class])*effortScale[effort.Level]))),
-		MaxTurns:     min(effort.MaxTurns, classTurns[a.Class]),
-		Reasoning:    ReasoningForEffort(effort.Level),
-		Verification: verification,
+		ToolCalls:               classToolCaps[a.Class],
+		MaxTurns:                min(effort.MaxTurns, classTurns[a.Class]),
+		MaxChecks:               classCheckCaps[a.Class],
+		MaxTaskTokens:           classTokenCaps[a.Class],
+		MaxOutputTokens:         classOutputCaps[a.Class],
+		Reasoning:               ReasoningForTask(a.Class, effort.Level),
+		Verification:            verification,
+		SingleArtifactExtension: a.SingleArtifactExtension,
 	}
 	b.Brief = buildBrief(b, a)
 	return b
@@ -186,24 +182,36 @@ func buildBrief(b Budget, a Assessment) string {
 	if a.ScopeGuard {
 		guard = " scope=only the named target; quality words do not widen scope;"
 	}
-	done := " declare DONE before editing;"
-	if a.Class == ClassChat {
-		done = ""
-	}
 	// The brief rides every user-message tail under a ~50-token budget (SC-004,
 	// request-assembly.md §4). It carries no agent count: delegation scale is the
-	// model's judgment, not a number to spend down.
-	return fmt.Sprintf("[task-brief: date=%s; class=%s; tools~%d; turns<=%d; reasoning=%s; verify=%s;%s%s keep tasks.md current]", time.Now().Format("2006-01-02"), b.Class, b.ToolCalls, b.MaxTurns, b.Reasoning, b.Verification, guard, done)
+	// model's judgment, not a number to spend down. It deliberately avoids a
+	// mandatory DONE declaration or tasks.md file: those are useful only when
+	// the task itself needs them.
+	scope := ""
+	if b.SingleArtifactExtension != "" {
+		scope = " single=" + b.SingleArtifactExtension + ",no-scratch;"
+	}
+	tokenStr := "unlimited"
+	if b.MaxTaskTokens > 0 {
+		tokenStr = fmt.Sprintf("%d", b.MaxTaskTokens)
+	}
+	return fmt.Sprintf("[task: %s; hard tools<=%d checks<=%d turns<=%d tokens<=%s; reasoning=%s; verify=%s;%s%s finish]",
+		b.Class, b.ToolCalls, b.MaxChecks, b.MaxTurns, tokenStr, b.Reasoning, b.Verification, scope, guard)
 }
 
-func EscalateClass(value TaskClass) TaskClass {
-	order := []TaskClass{ClassChat, ClassTiny, ClassSmall, ClassStandard, ClassLarge, ClassEpic}
-	for i, class := range order {
-		if class == value && i < len(order)-1 {
-			return order[i+1]
-		}
+func requestedSingleArtifactExtension(text string) string {
+	match := singleArtifactRE.FindStringSubmatch(text)
+	if len(match) < 2 {
+		return ""
 	}
-	return ClassEpic
+	switch strings.ToLower(match[1]) {
+	case "javascript", "js":
+		return ".js"
+	case "python", "py":
+		return ".py"
+	default:
+		return "." + strings.ToLower(match[1])
+	}
 }
 
 func bumpVerification(value string) string {

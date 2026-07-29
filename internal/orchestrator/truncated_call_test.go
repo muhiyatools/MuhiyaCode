@@ -82,6 +82,43 @@ func TestTruncatedWriteIsNeverDispatchedAndNotReBilled(t *testing.T) {
 	}
 }
 
+func TestTruncatedWriteOnNominalLastTurnGetsRecoveryRunway(t *testing.T) {
+	read := func(id string) contract.ChatResponse {
+		return contract.ChatResponse{ToolCalls: []contract.ToolCall{
+			contract.NewToolCall(id, "list_dir", `{"path":"."}`),
+		}}
+	}
+	engine, provider, dir := fieldTestEngine(t,
+		read("r1"),
+		read("r2"),
+		read("r3"),
+		read("r4"),
+		contract.ChatResponse{
+			ToolCalls:      []contract.ToolCall{contract.NewToolCall("cut", "write_file", `{"path":"game.html","content":"`+hugeContent)},
+			FinishReason:   "length",
+			TruncatedCalls: []string{"cut"},
+		},
+		contract.ChatResponse{ToolCalls: []contract.ToolCall{
+			contract.NewToolCall("write", "write_file", `{"path":"game.html","content":"<!doctype html><title>Game</title>"}`),
+		}},
+		contract.ChatResponse{Content: "Created game.html."},
+	)
+
+	_, stats, err := engine.Run(context.Background(), "Make a simple game in a single HTML file")
+	if err != nil {
+		t.Fatalf("run failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "game.html")); err != nil {
+		t.Fatalf("recovery turn never wrote the requested file: %v", err)
+	}
+	if len(provider.requests) < 6 {
+		t.Fatalf("provider got %d requests; cap-hit on turn five must receive recovery runway", len(provider.requests))
+	}
+	if stats.StopCause != "" {
+		t.Fatalf("format recovery must not be reported as an interrupted task: %+v", stats)
+	}
+}
+
 // A truncation must accumulate on the storm breaker so repeats escalate rather
 // than riding to the turn ceiling. Class-keyed: two cuts at different offsets
 // are different strings but the same failure.

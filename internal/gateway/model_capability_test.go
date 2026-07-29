@@ -171,3 +171,19 @@ func TestGenericProfileStrictParams(t *testing.T) {
 		t.Error("a generic profile must support standard parameters by default")
 	}
 }
+
+func TestGrokProfileLimits(t *testing.T) {
+	profile := ResolveModelProfile("grok-4.5")
+	if profile.Family != "grok" {
+		t.Fatalf("expected grok family, got %q", profile.Family)
+	}
+	if profile.MaxOutputTokens != 32_000 {
+		t.Errorf("MaxOutputTokens = %d, want 32000", profile.MaxOutputTokens)
+	}
+	if profile.ReasoningReplay != ReasoningReplayStrip {
+		t.Errorf("ReasoningReplay = %v, want ReasoningReplayStrip", profile.ReasoningReplay)
+	}
+	if profile.ContinuationLinking != ContinuationSupported {
+		t.Errorf("ContinuationLinking = %v, want ContinuationSupported", profile.ContinuationLinking)
+	}
+}

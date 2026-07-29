@@ -48,11 +48,21 @@ func rawEdit(t *testing.T, old, new string, replaceAll bool) json.RawMessage {
 
 func TestEditNotFoundIsFailure(t *testing.T) {
 	w := mismatchWorkspace(t, "package main\n\nfunc real() {}\n")
-	output, err := w.execEdit(context.Background(), rawEdit(t, "func imaginary() {}", "func other() {}", false))
-	if err == nil {
-		t.Fatalf("near-miss edit must be a failure, got success: %q", output)
+	var editTool contract.Tool
+	for _, tool := range w.Tools() {
+		if tool.Definition().Function.Name == "edit_file" {
+			editTool = tool
+			break
+		}
 	}
-	msg := err.Error()
+	result := editTool.Execute(context.Background(), rawEdit(t, "func imaginary() {}", "func other() {}", false))
+	if result.Err == nil {
+		t.Fatalf("near-miss edit must be a failure, got success: %q", result.Output)
+	}
+	if result.State != contract.ToolExecutionNotStarted {
+		t.Fatalf("a no-op edit mismatch is not indeterminate: %+v", result)
+	}
+	msg := result.Err.Error()
 	if !strings.HasPrefix(msg, "multi_edit failed") {
 		t.Fatalf("error must carry the failure-classified prefix, got %q", msg)
 	}
@@ -69,6 +79,24 @@ func TestEditAmbiguousIsFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "times") || !strings.Contains(err.Error(), "oldString appears") {
 		t.Fatalf("ambiguity note must ride inside the error, got %q", err.Error())
+	}
+}
+
+func TestEditOfDeletedFileIsNotIndeterminate(t *testing.T) {
+	w := mismatchWorkspace(t, "before\n")
+	if err := os.Remove(filepath.Join(w.root, "main.go")); err != nil {
+		t.Fatal(err)
+	}
+	var editTool contract.Tool
+	for _, tool := range w.Tools() {
+		if tool.Definition().Function.Name == "edit_file" {
+			editTool = tool
+			break
+		}
+	}
+	result := editTool.Execute(context.Background(), rawEdit(t, "before", "after", false))
+	if result.Err == nil || result.State != contract.ToolExecutionNotStarted {
+		t.Fatalf("editing a deleted target must fail before mutation: %+v", result)
 	}
 }
 
@@ -164,4 +192,3 @@ func TestMultiEditIdempotent(t *testing.T) {
 		t.Errorf("expected idempotent notes, got %v", res.Notes)
 	}
 }
-

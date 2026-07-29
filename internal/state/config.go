@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -55,7 +54,11 @@ func LoadSettings(paths ...Paths) (contract.Settings, error) {
 	}
 	_ = json.Unmarshal(raw, &legacy)
 	if legacy.Provider.Model != "" && !modelExists(settings.Provider.Models, legacy.Provider.Model) {
-		settings.Provider.Models = append(settings.Provider.Models, contract.Model{ID: StableModelID(legacy.Provider.Model), Name: legacy.Provider.Model, Source: "manual", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+		legacyID := StableModelID(legacy.Provider.Model)
+		settings.Provider.Models = append(settings.Provider.Models, contract.Model{ID: legacyID, Name: legacy.Provider.Model, Source: "manual", CreatedAt: time.Now().UTC().Format(time.RFC3339Nano)})
+		if strings.TrimSpace(settings.Provider.ActiveModelID) == "" {
+			settings.Provider.ActiveModelID = legacyID
+		}
 	}
 	normalizeSettings(&settings)
 	if err := ValidateSettings(settings); err != nil {
@@ -73,7 +76,18 @@ func SaveSettings(settings contract.Settings, paths ...Paths) error {
 	if err := ValidateSettings(settings); err != nil {
 		return err
 	}
-	return writeJSON(p.SettingsFile, settings, false)
+	// Gateway-discovered models have their own atomic last-known-good cache.
+	// Keeping them in user settings duplicated truth and let a partial refresh
+	// corrupt both configuration and discovery state.
+	persisted := settings
+	persisted.Provider.Models = nil
+	for _, model := range settings.Provider.Models {
+		if model.Source != "endpoint" {
+			persisted.Provider.Models = append(persisted.Provider.Models, model)
+		}
+	}
+	persisted.Provider.ModelsRefreshedAt = ""
+	return writeJSON(p.SettingsFile, persisted, false)
 }
 
 func LoadSecrets(paths ...Paths) (contract.Secrets, error) {
@@ -142,28 +156,8 @@ func ActiveModel(settings contract.Settings) (contract.Model, bool) {
 	return contract.Model{}, false
 }
 
-func AutoAssignModels(settings *contract.Settings) {
-	if len(settings.Provider.Models) == 0 {
-		return
-	}
-	if modelExists(settings.Provider.Models, settings.Provider.ActiveModelID) {
-		return
-	}
-	ranked := append([]contract.Model(nil), settings.Provider.Models...)
-	sort.SliceStable(ranked, func(i, j int) bool { return modelScore(ranked[i]) > modelScore(ranked[j]) })
-	// Prefer a Pro/Reasoner-class model; fall back to the highest-scoring model
-	// when no name matches (deterministic ranked order).
-	if pro, ok := firstModelMatching(ranked, "pro", "reasoner", "max", "large"); ok {
-		settings.Provider.ActiveModelID = pro.ID
-	} else {
-		settings.Provider.ActiveModelID = ranked[0].ID
-	}
-}
-
-// AssignFreshDefaultModels picks the explicit first-run model. It is
-// intentionally separate from score-based AutoAssignModels: M3's enormous
-// window makes it the right session default, but its context score alone does
-// not reliably beat a "pro"-marked model. An existing choice is never touched.
+// AssignFreshDefaultModels picks MiniMax M3 only when a first-run installation
+// has no configured default. Existing choices are never changed.
 func AssignFreshDefaultModels(settings *contract.Settings) bool {
 	if settings == nil || strings.TrimSpace(settings.Provider.ActiveModelID) != "" {
 		return false
@@ -178,22 +172,6 @@ func AssignFreshDefaultModels(settings *contract.Settings) bool {
 		}
 	}
 	return false
-}
-
-// firstModelMatching returns the first model in ranked order whose id or name
-// contains any of the given lowercase substrings. It lets AutoAssignModels honor
-// an explicit family preference while keeping the score-based ranking as the
-// tiebreaker and fallback.
-func firstModelMatching(models []contract.Model, substrings ...string) (contract.Model, bool) {
-	for _, model := range models {
-		name := strings.ToLower(model.ID + " " + model.Name)
-		for _, sub := range substrings {
-			if strings.Contains(name, sub) {
-				return model, true
-			}
-		}
-	}
-	return contract.Model{}, false
 }
 
 func UpsertModel(settings *contract.Settings, model contract.Model, activate bool) contract.Model {
@@ -231,10 +209,6 @@ func SetConfig(key, value string, settings *contract.Settings, secrets *contract
 		settings.Provider.BaseURL = value
 	case "model":
 		UpsertModel(settings, contract.Model{ID: value, Name: value, Source: "manual"}, true)
-		AutoAssignModels(settings)
-		// An explicit choice pins the model: the advisor proposes, but it never
-		// overrides what the user asked for.
-		settings.Provider.RolesPinned = true
 	case "contextLimit":
 		limit, err := strconv.Atoi(value)
 		if err != nil || limit <= 0 {
@@ -257,24 +231,6 @@ func SetConfig(key, value string, settings *contract.Settings, secrets *contract
 			return fmt.Errorf("reasoning effort must be low, medium, high, or max")
 		}
 		settings.Effort = effort
-	case "reviewGating":
-		normalized := strings.TrimSpace(strings.ToLower(value))
-		switch normalized {
-		case "", "default", "conservative", "off":
-			settings.ReviewGating = normalized
-		default:
-			return fmt.Errorf("reviewGating must be off, conservative, or default")
-		}
-	case "advisor":
-		// The session-start model advisor: "auto" (default) proposes a pairing on
-		// the first prompt of a session; "off" always uses the configured models.
-		normalized := strings.TrimSpace(strings.ToLower(value))
-		switch normalized {
-		case "", "auto", "off":
-			settings.Provider.Advisor = normalized
-		default:
-			return fmt.Errorf("advisor must be auto or off")
-		}
 	case "rtlMode":
 		settings.RTL.Mode = value
 	case "rtlAlign":
@@ -335,7 +291,6 @@ func normalizeSettings(settings *contract.Settings) {
 			settings.Provider.Models[i].ID = StableModelID(settings.Provider.Models[i].Name)
 		}
 	}
-	AutoAssignModels(settings)
 }
 
 func normalizeEffort(value string) (contract.EffortLevel, bool) {
@@ -360,16 +315,4 @@ func modelExists(models []contract.Model, value string) bool {
 		}
 	}
 	return false
-}
-
-func modelScore(model contract.Model) int {
-	score := model.ContextLimit
-	name := strings.ToLower(model.ID + " " + model.Name)
-	if strings.Contains(name, "pro") || strings.Contains(name, "max") || strings.Contains(name, "reasoner") || strings.Contains(name, "large") {
-		score += 5_000_000
-	}
-	if strings.Contains(name, "flash") || strings.Contains(name, "mini") || strings.Contains(name, "lite") || strings.Contains(name, "fast") || strings.Contains(name, "small") {
-		score -= 2_000_000
-	}
-	return score
 }

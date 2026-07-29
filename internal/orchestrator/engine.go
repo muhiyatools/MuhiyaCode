@@ -2,21 +2,22 @@ package orchestrator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 	"github.com/muhiya/muhiyacode/internal/gateway"
 )
 
 const (
-	outputReserveTokens = 12_000
-	// hardTurnCeiling is the liveness backstop at MEDIUM effort; the effective
-	// bound scales with the effort profile (see Engine.hardTurnCeiling). Tests
-	// that assert against this constant run at medium, where the two are equal.
-	hardTurnCeiling          = 120
+	// hardTurnCeiling is a fixed emergency bound, not purchasable runway.
+	// Normal progress is governed by task action/evidence budgets; effort cannot
+	// multiply this backstop.
+	hardTurnCeiling          = 96
 	maintenanceFloorRatio    = 0.60
 	maintenanceHardFoldRatio = 0.80 // C4: hard fold boundary
 	// maintenanceMinYieldPercent (A1/T008) is the minimum reclaimable yield, as a
@@ -36,10 +37,12 @@ const (
 )
 
 type Persistence struct {
-	AddEvent           func(context.Context, string, string, string, string) error
-	AppendTranscript   func(context.Context, map[string]any) error
-	AppendUsage        func(context.Context, contract.UsageRecord) error
-	AppendInvalidation func(context.Context, contract.InvalidationEvent) error
+	AddEvent              func(context.Context, string, string, string, string) error
+	AppendExecutionEvent  func(context.Context, contract.ExecutionEvent) error
+	AppendExecutionEvents func(context.Context, []contract.ExecutionEvent) error
+	AppendTranscript      func(context.Context, map[string]any) error
+	AppendUsage           func(context.Context, contract.UsageRecord) error
+	AppendInvalidation    func(context.Context, contract.InvalidationEvent) error
 	// WriteProjectContext (005 US3) atomically persists the typed per-session
 	// project-context sidecar. Used to persist the applied instruction/memory
 	// cursors alongside history growth.
@@ -48,6 +51,9 @@ type Persistence struct {
 	// so the next resume can attribute a skills/tools/model change vs a silent cold
 	// start. Optional: a nil hook leaves resume attribution dormant.
 	WritePrefixShape func(context.Context, contract.PrefixShapeSnapshot) error
+	// WriteSessionModel persists an explicit model switch before the in-memory
+	// runtime changes. It makes `/model` survive crashes and resume.
+	WriteSessionModel func(context.Context, string, uint64) error
 }
 
 type RescueFunc func(string, []string) ([]contract.ToolCall, string)
@@ -73,6 +79,7 @@ type EngineConfig struct {
 	Prompt               PromptContext
 	InitialUsageRecords  []contract.UsageRecord
 	InitialInvalidations []contract.InvalidationEvent
+	InitialTaskGraph     contract.TaskGraph
 	BoundaryTools        BoundaryToolSource
 	Rescue               RescueFunc
 	Redact               func(string) string
@@ -99,12 +106,19 @@ type EngineConfig struct {
 	SkillCatalog []SkillListing
 	LoadSkill    SkillLoader
 	Seed         *int
+	// RecoveryBlockReason is non-empty when the durable execution journal has
+	// an unresolved mutation or tool dispatch from a prior process. Read-only
+	// inspection remains available, but new mutations fail closed until the
+	// operator reconciles the journal and restarts the session.
+	RecoveryBlockReason  string
+	WorkspaceFingerprint func(context.Context) (string, error)
 }
 
 type Engine struct {
 	settings      *contract.Settings
 	secrets       contract.Secrets
 	session       contract.Session
+	cacheEpoch    uint64
 	memoryDir     string
 	provider      contract.Provider
 	registry      *Registry
@@ -117,13 +131,13 @@ type Engine struct {
 	rescue        RescueFunc
 	redactFn      func(string) string
 	boundaryTools BoundaryToolSource
-	// skills is the session-frozen skill catalog behind read_skill and
-	// run_subagent's skills argument (013 US1). Built from the same listing that
-	// renders the SKILLS prefix section, so name resolution can never disagree
-	// with what the model was shown. Never mutated after construction.
-	skills      *SkillCatalog
-	skillLoader SkillLoader
-	seed        *int
+	// skills is the session-frozen catalog behind read_skill. It is built from
+	// the same listing rendered in the stable prefix.
+	skills               *SkillCatalog
+	skillLoader          SkillLoader
+	seed                 *int
+	recoveryBlockReason  string
+	workspaceFingerprint func(context.Context) (string, error)
 
 	tokenBudget int
 	costBudget  float64
@@ -135,7 +149,9 @@ type Engine struct {
 	// checklist mirrors the workspace tasks.md checklist for the to-do panel;
 	// it is parsed from the file whenever a tool call writes it, never authored
 	// by the harness.
-	checklist contract.Plan
+	checklist  contract.Plan
+	taskGraph  contract.TaskGraph
+	fileLeases *fileLeaseSet
 	// activeChecklistPath is the tasks.md most recently written this session
 	// (TA01). Empty means "none written yet" and the workspace root is used, which
 	// preserves the historical behavior for sessions that keep the checklist there.
@@ -212,36 +228,21 @@ type Engine struct {
 	assemblyPromptChars  int
 	assemblyToolDefChars int
 	assemblyProjectChars int
-	// taskUsageStart snapshots sessionUsage at task start. Live Usage callbacks
-	// emit subtractUsage(sessionUsage, taskUsageStart) — the cumulative usage of
-	// EVERY request this task made (main + subagent + aux) — so the activity
-	// line and the end-of-task summary always agree on task-lifecycle numbers.
+	// taskUsageStart lets live usage and the final summary use the same
+	// task-relative totals.
 	taskUsageStart  contract.Usage
 	taskPeakContext float64
 	taskDuplicates  int
 	taskOverBudget  int
-	// taskReviewDecision (feature 011) is the review-gating outcome that governed
-	// this task — set by whichever trigger site consulted the gate first, or by
-	// the informational end-of-task evaluation; surfaced on TaskStats (SC-009).
-	taskReviewDecision *ReviewDecision
-	// taskTerminalReads counts run_shell invocations that merely read a file
-	// where a dedicated tool sufficed (feature 011 SC-006 violation counter).
-	taskTerminalReads int
 	// taskFilesChanged is the scope-agnostic tally of files this task changed —
 	// the execution agent's writes count exactly like the main loop's would.
 	taskFilesChanged map[string]bool
-	// freshSessionAdvised bounds the "start a new session" advisory to once per
-	// session — it is guidance, not nagging.
-	freshSessionAdvised bool
 	// harnessEvents is the bounded (harnessEventRingCap) in-memory ring of
 	// harness-caused friction events (T010), guarded by taskMu. It backs /errors
 	// and the task-summary friction marker without a DB read; the same events are
 	// also persisted via AddEvent for durable telemetry.
 	harnessEvents []contract.HarnessEvent
-	// taskCounters holds the per-scope dispatch-gate state (repeats, failed
-	// cache, storm classes, plan violations). One instance per task for the main
-	// loop; subagents get a fresh instance so their gate state never pollutes the
-	// parent's. (B6/T024.)
+	// taskCounters holds task-scoped dispatch-gate state.
 	taskCounters *callCounters
 	taskFailures []int // H5: turn numbers of failed tool calls (sliding window for the distinct-failure terminator)
 	// taskSkillsProvided (013 FR-008) holds the lowercased names of skills whose
@@ -249,63 +250,19 @@ type Engine struct {
 	// /skills markers in the submitted prompt, then extended by each read_skill.
 	// Guarded by taskMu because read_skill runs on the dispatch path.
 	taskSkillsProvided map[string]bool
+	taskActiveDeferred map[string]bool
+	taskExecutionID    string
+	taskEvidenceError  string
+	taskBudget         Budget
+	taskToolAttempts   int
+	taskCheckAttempts  int
+	taskCheckRetries   int
+	taskFinalizing     bool
+	verificationMu     sync.Mutex
+	verificationCache  map[string]verificationCacheEntry
 }
 
-type toolOutcome struct {
-	Call   contract.ToolCall
-	Output string
-	Failed bool
-	// GateRejected is true when a PRE-DISPATCH gate refused the call — H1 argument
-	// validation, the H2 verbatim-repeat short-circuit, the repeat limiter, or an
-	// output-cap truncation — rather than the tool running and failing. Such a
-	// refusal is recoverable guidance (fix the arguments, change approach), so it
-	// must NOT feed the H5 distinct-failure terminator, which force-finalizes the
-	// task with a misleading "genuine blocker" report. The gate's own escalation
-	// ladder, the B7 all-failed-turn guard, the consecutive-failure nudge, and the
-	// hard turn ceiling remain the backstops.
-	GateRejected bool
-	// Err carries the underlying dispatch error when Failed is true.
-	Err error
-	// DurationMS captures the tool execution time for the transcript.
-	DurationMS int64
-}
-
-type pressureSnapshot struct {
-	Tokens    int
-	Estimated bool
-	Ratio     float64
-}
-
-type mainUsageObservation struct {
-	model         string
-	usage         contract.Usage
-	changeReasons []string
-	messageCount  int
-	durationMS    *int64 // provider-request wall time (feature 008 UD-6); nil = unknown
-	// rewriteVersion is the history revision this request was built from. It is
-	// what makes the warm-model ledger honest: a model is only warm for the
-	// conversation shape it actually saw, so a compaction or a trim retires
-	// every model's warmth instead of leaving a stale claim behind (switchcost.go).
-	rewriteVersion int
-}
-
-type usageRecordInput struct {
-	model       string
-	stream      contract.UsageStream
-	pin         string
-	usage       contract.Usage
-	reasons     []string
-	attribution contract.CacheAttribution
-	durationMS  *int64
-}
-
-type cacheMissContext struct {
-	previous             *contract.UsageRecord
-	usage                contract.Usage
-	newTail              int
-	previousMessageCount int
-	currentMessageCount  int
-}
+type toolOutcome = contract.ToolOutcome
 
 func NewEngine(config EngineConfig) (*Engine, error) {
 	if config.Settings == nil || config.Provider == nil || config.Registry == nil {
@@ -315,7 +272,7 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		config.History = NewHistory(HistorySnapshot{Version: 1}, nil)
 	}
 	if config.Inspection == nil {
-		config.Inspection = NewInspection(InspectionSnapshot{Version: 3}, nil)
+		config.Inspection = NewInspection(InspectionSnapshot{Version: 3}, nil, config.Session.WorkspacePath)
 	}
 	if config.Knowledge == nil {
 		config.Knowledge = NewKnowledge(KnowledgeSnapshot{Version: 1}, nil)
@@ -335,6 +292,7 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		settings:              config.Settings,
 		secrets:               config.Secrets,
 		session:               config.Session,
+		cacheEpoch:            config.Session.CacheEpoch,
 		memoryDir:             config.MemoryDir,
 		provider:              config.Provider,
 		registry:              config.Registry,
@@ -350,6 +308,8 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		skills:                NewSkillCatalog(config.SkillCatalog),
 		skillLoader:           config.LoadSkill,
 		seed:                  config.Seed,
+		recoveryBlockReason:   strings.TrimSpace(config.RecoveryBlockReason),
+		workspaceFingerprint:  config.WorkspaceFingerprint,
 		sessionUsage:          usageFromAggregate(aggregate),
 		usageRecords:          usageRecords,
 		usageAggregate:        aggregate,
@@ -359,6 +319,9 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 		latestPromptTokens:    latestPromptTokens,
 		latestPromptAvailable: latestPromptAvailable,
 		projectContextProbe:   config.ProjectContextProbe,
+		taskGraph:             cloneTaskGraph(config.InitialTaskGraph),
+		fileLeases:            newFileLeaseSet(),
+		verificationCache:     make(map[string]verificationCacheEntry),
 	}
 	// 005 US3: restore the project-context boot snapshot and applied cursors so a
 	// resumed session never re-emits a <memory-update> for events it already
@@ -391,6 +354,7 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 	}
 	// Seed the checklist from the workspace so a resumed session shows the work
 	// already in flight. Best-effort: a missing tasks.md just leaves it empty.
+	engine.seedChecklistFromGraph()
 	engine.refreshChecklist()
 	return engine, nil
 }
@@ -401,7 +365,6 @@ func NewEngine(config EngineConfig) (*Engine, error) {
 func (e *Engine) resetTaskState(budget Budget) {
 	e.taskMu.Lock()
 	e.taskDuplicates, e.taskOverBudget = 0, 0
-	e.taskReviewDecision, e.taskTerminalReads = nil, 0
 	e.taskFilesChanged = nil
 	e.taskPeakContext = 0
 	e.taskCounters = newCallCounters()
@@ -409,6 +372,13 @@ func (e *Engine) resetTaskState(budget Budget) {
 	// 013 FR-008: the provided-skills set is per task. seedProvidedSkills fills it
 	// from the submitted prompt right after this reset.
 	e.taskSkillsProvided = nil
+	e.taskActiveDeferred = nil
+	e.taskEvidenceError = ""
+	e.taskBudget = budget
+	e.taskToolAttempts = 0
+	e.taskCheckAttempts = 0
+	e.taskCheckRetries = 0
+	e.taskFinalizing = false
 	e.taskMu.Unlock()
 	// Phase VI F21: clear the soft-notice and routed-window latches so a new
 	// task gets its own advisory budget for "context is filling" notices and
@@ -500,24 +470,76 @@ func (e *Engine) SwitchModel(ctx context.Context, role, id, name, addendum strin
 // that record fails, and re-arm prefix-shape persistence.
 //
 // It deliberately omits the busy check. Engine.Run claims the task slot before
-// its prologue runs, so a session-start advisor calling through SwitchModel
-// would be refused on EVERY session and — under a silent-fallback policy —
-// would never switch anything, with no visible symptom. The prologue is safe
-// because it executes before the session's first Chat, which is the hazard the
-// busy check exists to prevent.
+// its deterministic task-boundary router runs, so routing through SwitchModel
+// would otherwise be refused every time. The prologue is safe because it
+// executes before the task's first Chat request.
 // The role parameter is retained for the CLI's SwitchModel signature but there
 // is only one model now; the "subagent" branch went with the subagents.
 func (e *Engine) applyModelSwitch(ctx context.Context, role, id, name, addendum string) error {
 	e.mu.Lock()
 	oldPrompt := e.prompt
 	old := e.settings.Provider.ActiveModelID
+	oldEpoch := e.cacheEpoch
 	if old == id {
 		e.mu.Unlock()
 		return nil
 	}
+	nextEpoch := uint64(0)
+	targetLineage, lineageExists := e.session.ModelLineages[id]
+	if lineageExists {
+		nextEpoch = targetLineage.CacheEpoch
+	}
+	for _, model := range e.settings.Provider.Models {
+		if model.ID == id && targetLineage.CompatibilityEpoch > 0 &&
+			model.CompatibilityEpoch > 0 && model.CompatibilityEpoch != targetLineage.CompatibilityEpoch {
+			nextEpoch++
+			break
+		}
+	}
+	e.mu.Unlock()
+
+	if e.persistence.WriteSessionModel != nil {
+		if err := e.persistence.WriteSessionModel(ctx, id, nextEpoch); err != nil {
+			return fmt.Errorf("persist session model: %w", err)
+		}
+	}
+
+	e.mu.Lock()
 	e.settings.Provider.ActiveModelID = id
 	e.prompt.Model = name
 	e.prompt.ModelAddendum = addendum
+	e.cacheEpoch = nextEpoch
+	if e.session.ModelLineages == nil {
+		e.session.ModelLineages = make(map[string]contract.ModelLineage)
+	}
+	targetLineage.CacheEpoch = nextEpoch
+	targetLineage.UpdatedAt = time.Now().UTC()
+	for _, model := range e.settings.Provider.Models {
+		if model.ID == id {
+			targetLineage.CompatibilityEpoch = model.CompatibilityEpoch
+			break
+		}
+	}
+	e.session.ModelLineages[id] = targetLineage
+	e.session.ModelID = id
+	e.session.CacheEpoch = nextEpoch
+	found := false
+	for _, m := range e.settings.Provider.Models {
+		if m.ID == id || strings.EqualFold(m.ID, id) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		profile := gateway.ResolveModelProfile(id)
+		e.settings.Provider.Models = append(e.settings.Provider.Models, contract.Model{
+			ID:           id,
+			Name:         name,
+			ContextLimit: profile.DefaultContextWindow,
+			MaxOutput:    profile.MaxOutputTokens,
+			Source:       "user-selected",
+		})
+	}
 	e.mu.Unlock()
 
 	event := contract.InvalidationEvent{
@@ -528,13 +550,35 @@ func (e *Engine) applyModelSwitch(ctx context.Context, role, id, name, addendum 
 		e.mu.Lock()
 		e.settings.Provider.ActiveModelID = old
 		e.prompt = oldPrompt
+		e.cacheEpoch = oldEpoch
+		e.session.ModelID = old
+		e.session.CacheEpoch = oldEpoch
+		if !lineageExists {
+			delete(e.session.ModelLineages, id)
+		}
 		e.mu.Unlock()
+		if e.persistence.WriteSessionModel != nil {
+			_ = e.persistence.WriteSessionModel(ctx, old, oldEpoch)
+		}
 		return err
 	}
 	// C3: the model changed, so the persisted prefix shape is now stale — re-arm
 	// the one-shot persist so the next request records the new stable shape.
 	e.prefixShapeSaved = false
 	return nil
+}
+
+func (e *Engine) CacheEpoch() uint64 {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.cacheEpoch
+}
+
+func (e *Engine) cacheSessionID(purpose string) string {
+	e.mu.Lock()
+	modelID, epoch := e.settings.Provider.ActiveModelID, e.cacheEpoch
+	e.mu.Unlock()
+	return fmt.Sprintf("%s:%s:%s:e%d", e.session.ID, modelID, purpose, epoch)
 }
 
 func (e *Engine) effort() contract.EffortLevel {
@@ -571,14 +615,75 @@ func (e *Engine) Cancel() {
 // MaxOutput — parsed from the models endpoint and previously unused anywhere —
 // takes precedence over the family default; the profile clamps the result.
 func (e *Engine) outputBudget(modelID string) int {
-	catalog := 0
+	return e.catalogModelProfile(modelID).OutputBudget(e.catalogModelMaxOutput(modelID))
+}
+
+func (e *Engine) needsToolCallRescue() bool {
+	modelID := e.settings.Provider.ActiveModelID
+	return e.catalogModelProfile(modelID).NeedsToolCallRescue
+}
+
+type requestBudgetReserve struct {
+	Total              int
+	ToolTokens         int
+	ToolBytes          int
+	CoreToolTokens     int
+	CoreToolBytes      int
+	DeferredToolTokens int
+	DeferredToolBytes  int
+}
+
+func (e *Engine) requestReserve(definitions []contract.ToolDefinition) requestBudgetReserve {
+	toolBytes := 0
+	if raw, err := json.Marshal(definitions); err == nil {
+		toolBytes = len(raw)
+	}
+	toolTokens := e.history.TokensForChars(toolBytes)
+	coreBytes := 0
+	if raw, err := json.Marshal(e.coreDefinitions()); err == nil {
+		coreBytes = len(raw)
+	}
+	coreBytes = min(coreBytes, toolBytes)
+	coreTokens := e.history.TokensForChars(coreBytes)
+	modelID := e.settings.Provider.ActiveModelID
+	profile := e.catalogModelProfile(modelID)
+	return requestBudgetReserve{
+		Total:              profile.ContextOutputReserve(e.catalogModelMaxOutput(modelID)) + toolTokens + 512,
+		ToolTokens:         toolTokens,
+		ToolBytes:          toolBytes,
+		CoreToolTokens:     coreTokens,
+		CoreToolBytes:      coreBytes,
+		DeferredToolTokens: max(0, toolTokens-coreTokens),
+		DeferredToolBytes:  max(0, toolBytes-coreBytes),
+	}
+}
+
+func (e *Engine) currentPromptBudgetTokens() int {
+	e.taskMu.Lock()
+	toolChars := e.assemblyToolDefChars
+	e.taskMu.Unlock()
+	modelID := e.settings.Provider.ActiveModelID
+	profile := e.catalogModelProfile(modelID)
+	reserve := profile.ContextOutputReserve(e.catalogModelMaxOutput(modelID)) + e.history.TokensForChars(toolChars) + 512
+	return max(1, e.contextLimit()-reserve)
+}
+
+func (e *Engine) catalogModelMaxOutput(modelID string) int {
 	for _, model := range e.settings.Provider.Models {
 		if model.ID == modelID {
-			catalog = model.MaxOutput
-			break
+			return model.MaxOutput
 		}
 	}
-	return gateway.ResolveModelProfile(modelID + " " + e.catalogModelName(modelID)).OutputBudget(catalog)
+	return 0
+}
+
+func (e *Engine) catalogModelProfile(modelID string) gateway.ModelProfile {
+	for _, model := range e.settings.Provider.Models {
+		if model.ID == modelID || strings.EqualFold(model.ID, modelID) {
+			return gateway.ResolveCatalogModelProfile(model)
+		}
+	}
+	return gateway.ResolveModelProfile(modelID)
 }
 
 // RouteShellOutput streams a run_shell output chunk to the transcript's
@@ -659,7 +764,7 @@ func (e *Engine) contextLimit() int {
 	// never exceed the provider's documented context window, or the pipeline could
 	// build an over-limit request. A no-op for the default 128k; a guard against a
 	// misconfigured ContextLimit.
-	if ceiling := gateway.ResolveModelProfile(e.settings.Provider.ActiveModelID).ContextWindowLimit; ceiling > 0 && limit > ceiling {
+	if ceiling := e.catalogModelProfile(e.settings.Provider.ActiveModelID).ContextWindowLimit; ceiling > 0 && limit > ceiling {
 		limit = ceiling
 	}
 	return limit

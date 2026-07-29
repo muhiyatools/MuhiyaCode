@@ -15,6 +15,10 @@ import (
 // UsageResponse is the parsed GET /v1/usage payload (contract usage-api.md §2).
 // Credits are in credits (1 credit = $0.01); window/spend figures are USD.
 type UsageResponse struct {
+	User struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"user"`
 	Plan struct {
 		Name    string `json:"name"`
 		Windows []struct {

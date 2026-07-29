@@ -154,40 +154,37 @@ func deleteSwitches(flags []string, unix bool) (recursive, force bool) {
 	return recursive, force
 }
 
-var shellRiskPatternsNonAutoAccept = shellRiskPatterns // keep pointing to full list for normal mode
-
 var shellRiskPatternsAutoAccept = buildAutoAcceptPatterns()
 
 func buildAutoAcceptPatterns() []riskPattern {
-    result := make([]riskPattern, 0, len(shellRiskPatterns))
-    for _, p := range shellRiskPatterns {
-        // Drop env enumeration and chmod 777 patterns - permitted in auto-accept
-        if p.reason == "environment secret enumeration" || p.reason == "world-writable permission change" {
-            continue
-        }
-        result = append(result, p)
-    }
-    return result
+	result := make([]riskPattern, 0, len(shellRiskPatterns))
+	for _, p := range shellRiskPatterns {
+		// Drop env enumeration and chmod 777 patterns - permitted in auto-accept
+		if p.reason == "environment secret enumeration" || p.reason == "world-writable permission change" {
+			continue
+		}
+		result = append(result, p)
+	}
+	return result
 }
 
 var gitPublishPattern = regexp.MustCompile(`(?i)\bgit\s+(?:commit|push|add\b)`)
 
 func ClassifyShellAutoAccept(command, workspaceRoot string) ShellRisk {
-    if gitPublishPattern.MatchString(command) {
-        return ShellRisk{Blocked: true, Reason: "git repository publication is not permitted in benchmark mode"}
-    }
-    if registryHiveRef.MatchString(command) && registryMutationCmdlet.MatchString(command) {
-        return ShellRisk{Blocked: true, Reason: "registry mutation"}
-    }
-    for _, pattern := range shellRiskPatternsAutoAccept {
-        if pattern.re.MatchString(command) {
-            return ShellRisk{Blocked: true, Reason: pattern.reason}
-        }
-    }
-    return destructiveDeleteRiskAutoAccept(command, workspaceRoot)
+	if gitPublishPattern.MatchString(command) {
+		return ShellRisk{Blocked: true, Reason: "git repository publication is not permitted in benchmark mode"}
+	}
+	if registryHiveRef.MatchString(command) && registryMutationCmdlet.MatchString(command) {
+		return ShellRisk{Blocked: true, Reason: "registry mutation"}
+	}
+	for _, pattern := range shellRiskPatternsAutoAccept {
+		if pattern.re.MatchString(command) {
+			return ShellRisk{Blocked: true, Reason: pattern.reason}
+		}
+	}
+	return destructiveDeleteRiskAutoAccept(command, workspaceRoot)
 }
 
 func destructiveDeleteRiskAutoAccept(command, workspaceRoot string) ShellRisk {
-    return destructiveDeleteRisk(command)
+	return destructiveDeleteRisk(command)
 }
-

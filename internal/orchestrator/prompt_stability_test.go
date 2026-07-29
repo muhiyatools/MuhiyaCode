@@ -9,14 +9,14 @@ import (
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
 
-func TestPromptStabilityDynamicDateLivesOnlyInTaskBrief(t *testing.T) {
+func TestPromptStabilityExcludesDynamicDateFromPrefixAndTail(t *testing.T) {
 	prompt := SystemPrompt(PromptContext{Workspace: "workspace", OS: "windows", Shell: "pwsh", Model: "model"})
 	if strings.Contains(prompt, "date:") || strings.Contains(prompt, time.Now().Format("2006-01-02")) {
 		t.Fatal("system prompt contains a wall-clock date")
 	}
 	brief := BudgetFor(Classify("hi", ""), Profile(contract.EffortLow)).Brief
-	if !strings.Contains(brief, "date="+time.Now().Format("2006-01-02")) {
-		t.Fatalf("task brief does not carry current date: %s", brief)
+	if strings.Contains(brief, time.Now().Format("2006-01-02")) || strings.Contains(brief, "date=") {
+		t.Fatalf("task brief carries a cache-hostile wall-clock date: %s", brief)
 	}
 }
 
@@ -31,8 +31,8 @@ func TestSystemPromptByteIdenticalAcrossConstructions(t *testing.T) {
 	if a != b {
 		t.Fatal("system prompt is not byte-identical across two constructions with identical config")
 	}
-	if !strings.Contains(a, "CACHE DISCIPLINE") {
-		t.Fatal("cache-discipline section (T037/A4.1) is missing from the system prompt")
+	if !strings.Contains(a, "do not repeat an unchanged read") {
+		t.Fatal("compact cache discipline is missing from the system prompt")
 	}
 	if strings.Contains(a, time.Now().Format("2006-01-02")) {
 		t.Fatal("system prompt leaked a wall-clock date (dynamic value in the cached prefix)")

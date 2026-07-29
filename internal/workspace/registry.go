@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -17,8 +18,20 @@ type functionTool struct {
 }
 
 func (t functionTool) Definition() contract.ToolDefinition { return t.definition }
-func (t functionTool) Execute(ctx context.Context, input json.RawMessage) (string, error) {
-	return t.execute(ctx, input)
+func (t functionTool) Execute(ctx context.Context, input json.RawMessage) contract.ToolResult {
+	output, err := t.execute(ctx, input)
+	if workspaceDispatchNotStarted(err) {
+		err = contract.ToolNotStarted(err)
+	}
+	return contract.AdaptToolResult(output, err)
+}
+
+func workspaceDispatchNotStarted(err error) bool {
+	return errors.Is(err, ErrPermissionDenied) ||
+		errors.Is(err, ErrSensitivePath) ||
+		errors.Is(err, ErrOutsideWorkspace) ||
+		errors.Is(err, ErrUnreadOverwrite) ||
+		errors.Is(err, ErrInvalidArguments)
 }
 
 func (w *Workspace) Tools() []contract.Tool {
@@ -35,7 +48,7 @@ func (w *Workspace) Tools() []contract.Tool {
 		w.tool("run_shell", instructions.ToolRunShellDescription, object(map[string]any{"command": stringProp("Shell command"), "timeoutMs": intProp(1, 600000)}, []string{"command"}), w.execShell),
 		w.tool("git_status", instructions.ToolGitStatusDescription, object(map[string]any{}, nil), w.execGitStatus),
 		w.tool("git_diff", instructions.ToolGitDiffDescription, object(map[string]any{"staged": boolProp(), "path": stringProp("Optional path"), "context": intProp(1, 100)}, nil), w.execGitDiff),
-		w.tool("inspect_code", "[Go only] "+instructions.ToolInspectCodeDescription, object(map[string]any{"mode": map[string]any{"type": "string", "enum": []string{"outline", "definition", "references"}}, "path": stringProp("File or directory"), "symbol": stringProp("Symbol name (for definition/references)"), "testFiles": boolProp()}, []string{"mode", "path"}), w.execInspectCode),
+		w.tool("inspect_code", instructions.ToolInspectCodeDescription, object(map[string]any{"mode": map[string]any{"type": "string", "enum": []string{"outline", "definition", "references", "repo_map"}}, "path": stringProp("File or directory"), "symbol": stringProp("Symbol name, or ranking query for repo_map"), "testFiles": boolProp()}, []string{"mode", "path"}), w.execInspectCode),
 	}
 }
 
@@ -217,8 +230,7 @@ func formatEdit(result EditResult) string {
 //     stay successes (DG-10) — they are correct outcomes, not fumbles.
 //
 // The error text carries the full note — including the "closest region" recovery
-// hint — so the model keeps its guidance; the "edit failed:" prefix also matches
-// the orchestrator's failure-prefix classification as belt-and-suspenders.
+// hint — so the model keeps its guidance.
 func editMismatchError(result EditResult) error {
 	if result.Diff != "" {
 		return nil
@@ -226,7 +238,7 @@ func editMismatchError(result EditResult) error {
 	joined := strings.Join(append(append([]string{result.Summary}, result.Notes...), result.Skipped...), "\n")
 	if strings.Contains(joined, "oldString not found") ||
 		(strings.Contains(joined, "oldString appears ") && strings.Contains(joined, " times")) {
-		return fmt.Errorf("edit failed: %s", joined)
+		return fmt.Errorf("%w: edit failed: %s", ErrInvalidArguments, joined)
 	}
 	return nil
 }
@@ -281,7 +293,7 @@ func (w *Workspace) execShell(ctx context.Context, raw json.RawMessage) (string,
 	if err != nil {
 		return "", err
 	}
-	return formatShellResult(result), nil
+	return formatShellResult(result), shellResultError(result)
 }
 
 func (w *Workspace) execGitStatus(ctx context.Context, _ json.RawMessage) (string, error) {
@@ -289,7 +301,7 @@ func (w *Workspace) execGitStatus(ctx context.Context, _ json.RawMessage) (strin
 	if err != nil {
 		return "", err
 	}
-	return formatShellResult(result), nil
+	return formatShellResult(result), shellResultError(result)
 }
 
 func (w *Workspace) execGitDiff(ctx context.Context, raw json.RawMessage) (string, error) {
@@ -301,23 +313,39 @@ func (w *Workspace) execGitDiff(ctx context.Context, raw json.RawMessage) (strin
 	if err != nil {
 		return "", err
 	}
-	return formatShellResult(result), nil
+	return formatShellResult(result), shellResultError(result)
 }
 
-// formatShellResult renders a shell result for the model. A timed-out command is
-// given a recognized "tool failed:" prefix — so IsToolFailure and the loop guard
-// engage instead of the model blindly re-running a hang — and both timeout and
-// cancellation name the elapsed time and that the process tree was killed, which
-// a bare "exit code: N" hid (C-4).
+func shellResultError(result ShellResult) error {
+	switch {
+	case result.TimedOut:
+		return context.DeadlineExceeded
+	case result.Cancelled:
+		return context.Canceled
+	case result.ExitCode != 0:
+		return fmt.Errorf("command exited with code %d", result.ExitCode)
+	default:
+		return nil
+	}
+}
+
+// formatShellResult renders diagnostics for the model. Typed shell errors drive
+// control flow; the text explains elapsed time and process-tree termination.
 func formatShellResult(result ShellResult) string {
 	body := fmt.Sprintf("exit code: %d\n%s", result.ExitCode, result.Output)
 	switch {
 	case result.TimedOut:
 		return fmt.Sprintf("tool failed: command timed out after %s and the process tree was killed — re-run with a larger timeoutMs or narrow the command so it finishes sooner.\n%s", result.Duration.Round(time.Millisecond), body)
 	case result.Cancelled:
-		return fmt.Sprintf("[cancelled after %s — the process tree was killed]\n%s", result.Duration.Round(time.Millisecond), body)
+		return fmt.Sprintf("tool failed: command was cancelled after %s and the process tree was killed.\n%s", result.Duration.Round(time.Millisecond), body)
+	case result.ExitCode != 0:
+		return fmt.Sprintf("tool failed: command exited with code %d.\n%s", result.ExitCode, body)
 	case result.BackgroundLeft:
-		return fmt.Sprintf("note: the command returned but left a background process running; MuhiyaCode stopped capturing its output after %s. A server or long-lived process started here keeps running — this call will not capture its later output, so do not wait on it. To run something that must finish, run it in the foreground instead.\n%s", result.Duration.Round(time.Millisecond), body)
+		process := ""
+		if result.BackgroundProcessID != "" {
+			process = " Owned process ID: " + result.BackgroundProcessID + "."
+		}
+		return fmt.Sprintf("note: the command returned but left a background process running; MuhiyaCode stopped capturing its output after %s.%s This call will not capture later output; list or stop the owned process instead of waiting on this tool call.\n%s", result.Duration.Round(time.Millisecond), process, body)
 	default:
 		return body
 	}
@@ -328,7 +356,7 @@ func decode(raw json.RawMessage, output any) error {
 		raw = json.RawMessage(`{}`)
 	}
 	if err := json.Unmarshal(raw, output); err != nil {
-		return fmt.Errorf("invalid tool arguments: %w", err)
+		return fmt.Errorf("%w: %v", ErrInvalidArguments, err)
 	}
 	return nil
 }

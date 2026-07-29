@@ -17,12 +17,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/muhiya/muhiyacode/internal/contract"
+	gatewayclient "github.com/muhiya/muhiyacode/internal/gateway"
 	"github.com/muhiya/muhiyacode/internal/mcpclient"
 	"github.com/muhiya/muhiyacode/internal/state"
 	"github.com/spf13/cobra"
 )
 
 const oauthClientID = "muhiyacode"
+
+type tokenExchangeRequest struct {
+	platformURL string
+	code        string
+	verifier    string
+	redirectURI string
+}
 
 // newLoginCommand implements a browser-based sign-in (RFC 8252 native-app flow:
 // loopback redirect + PKCE). It opens the Muhiya PLATFORM (not the gateway),
@@ -191,22 +200,59 @@ func performBrowserLogin(ctx context.Context, platformOverride string, onURL fun
 		return "", "", fmt.Errorf("timed out waiting for browser authorization")
 	}
 
-	token, baseURL, email, err := exchangeToken(waitCtx, platformURL, code, verifier, redirectURI)
+	token, baseURL, email, userID, err := exchangeToken(waitCtx, tokenExchangeRequest{
+		platformURL: platformURL,
+		code:        code,
+		verifier:    verifier,
+		redirectURI: redirectURI,
+	})
 	if err != nil {
 		return "", "", err
 	}
 
-	secrets.ProviderAPIKey = token
 	if strings.TrimSpace(baseURL) != "" {
 		settings.Provider.BaseURL = baseURL
+	}
+	if err := verifyGatewayIdentity(waitCtx, settings, token, userID); err != nil {
+		return "", "", err
+	}
+
+	secrets.ProviderAPIKey = token
+	if err := state.SaveSettings(settings, paths); err != nil {
+		return "", "", err
 	}
 	if err := state.SaveSecrets(secrets, paths); err != nil {
 		return "", "", err
 	}
-	if err := state.SaveSettings(settings, paths); err != nil {
-		return "", "", err
-	}
 	return email, token, nil
+}
+
+func verifyGatewayIdentity(ctx context.Context, settings contract.Settings, token, oauthUserID string) error {
+	gatewayUserID, err := authenticatedGatewayUserID(ctx, settings, token)
+	if err != nil {
+		return err
+	}
+	if oauthUserID == "" || gatewayUserID != oauthUserID {
+		return fmt.Errorf(
+			"gateway identity mismatch: OAuth user %q, token user %q",
+			oauthUserID, gatewayUserID,
+		)
+	}
+	return nil
+}
+
+func authenticatedGatewayUserID(ctx context.Context, settings contract.Settings, token string) (string, error) {
+	if strings.HasPrefix(strings.TrimSpace(token), "vk-") {
+		return "", fmt.Errorf("gateway key IDs cannot authenticate requests; paste the sk-virt bearer token")
+	}
+	usage, err := gatewayclient.FetchUsage(ctx, settings, token)
+	if err != nil {
+		return "", fmt.Errorf("verify gateway identity: %w", err)
+	}
+	if strings.TrimSpace(usage.User.ID) == "" {
+		return "", fmt.Errorf("verify gateway identity: usage response has no user ID")
+	}
+	return usage.User.ID, nil
 }
 
 // resolvePlatformURL picks the platform base URL: explicit flag, then
@@ -234,27 +280,30 @@ func derivePlatformFromGateway(gatewayBase string) string {
 	if err != nil || u.Host == "" {
 		return ""
 	}
+	if u.Port() == "8090" || strings.Contains(u.Host, "localhost:8090") || strings.Contains(u.Host, "127.0.0.1:8090") {
+		return "http://localhost:3000"
+	}
 	host := strings.TrimPrefix(u.Host, "api.")
 	return u.Scheme + "://" + host
 }
 
-func exchangeToken(ctx context.Context, platformURL, code, verifier, redirectURI string) (token, baseURL, email string, err error) {
+func exchangeToken(ctx context.Context, exchange tokenExchangeRequest) (token, baseURL, email, userID string, err error) {
 	payload, _ := json.Marshal(map[string]string{
 		"grant_type":    "authorization_code",
-		"code":          code,
-		"code_verifier": verifier,
-		"redirect_uri":  redirectURI,
+		"code":          exchange.code,
+		"code_verifier": exchange.verifier,
+		"redirect_uri":  exchange.redirectURI,
 		"client_id":     oauthClientID,
 	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, platformURL+"/api/oauth/token", bytes.NewReader(payload))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, exchange.platformURL+"/api/oauth/token", bytes.NewReader(payload))
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", "", err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 30 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", "", fmt.Errorf("contact platform: %w", err)
+		return "", "", "", "", fmt.Errorf("contact platform: %w", err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
@@ -264,22 +313,26 @@ func exchangeToken(ctx context.Context, platformURL, code, verifier, redirectURI
 		}
 		_ = json.Unmarshal(body, &e)
 		if e.Error != "" {
-			return "", "", "", fmt.Errorf("token exchange failed: %s", e.Error)
+			return "", "", "", "", fmt.Errorf("token exchange failed: %s", e.Error)
 		}
-		return "", "", "", fmt.Errorf("token exchange failed (HTTP %d)", resp.StatusCode)
+		return "", "", "", "", fmt.Errorf("token exchange failed (HTTP %d)", resp.StatusCode)
 	}
-	var okResp struct {
+	var tokenResponse struct {
 		AccessToken string `json:"access_token"`
 		BaseURL     string `json:"base_url"`
 		Email       string `json:"email"`
+		UserID      string `json:"user_id"`
 	}
-	if err := json.Unmarshal(body, &okResp); err != nil {
-		return "", "", "", err
+	if err := json.Unmarshal(body, &tokenResponse); err != nil {
+		return "", "", "", "", err
 	}
-	if strings.TrimSpace(okResp.AccessToken) == "" {
-		return "", "", "", fmt.Errorf("platform returned no access token")
+	if strings.TrimSpace(tokenResponse.AccessToken) == "" {
+		return "", "", "", "", fmt.Errorf("platform returned no access token")
 	}
-	return okResp.AccessToken, okResp.BaseURL, okResp.Email, nil
+	if strings.TrimSpace(tokenResponse.UserID) == "" {
+		return "", "", "", "", fmt.Errorf("platform returned no user identity")
+	}
+	return tokenResponse.AccessToken, tokenResponse.BaseURL, tokenResponse.Email, tokenResponse.UserID, nil
 }
 
 func randomURLToken(n int) string {

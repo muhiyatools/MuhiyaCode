@@ -16,6 +16,10 @@ const (
 	PrefixReasonModel   = "model"
 )
 
+type wireRequestNormalizer interface {
+	StableRequestMessages(contract.ChatRequest) ([]contract.Message, error)
+}
+
 // PrefixShape is a compact diagnostic identity for all stable request regions.
 type PrefixShape struct {
 	SystemHash     string `json:"system_hash"`
@@ -25,6 +29,7 @@ type PrefixShape struct {
 	MessageCount   int    `json:"message_count"`
 	RewriteVersion int    `json:"rewrite_version"`
 	ModelID        string `json:"model_id"`
+	PrefixHash     string `json:"prefix_hash"`
 }
 
 // NewPrefixShape hashes exactly the serialized system message and canonical
@@ -72,7 +77,7 @@ func NewWirePrefixShape(request contract.ChatRequest, settledCount, rewriteVersi
 	if err != nil {
 		return PrefixShape{}, err
 	}
-	return PrefixShape{
+	shape := PrefixShape{
 		SystemHash:     hashBytes(systemBytes),
 		ToolsHash:      hashBytes(toolBytes),
 		HistoryHash:    hashBytes(historyBytes),
@@ -80,7 +85,12 @@ func NewWirePrefixShape(request contract.ChatRequest, settledCount, rewriteVersi
 		MessageCount:   len(request.Messages),
 		RewriteVersion: rewriteVersion,
 		ModelID:        request.ModelID,
-	}, nil
+	}
+	shape.PrefixHash = hashBytes([]byte(
+		shape.SystemHash + "\x00" + shape.ToolsHash + "\x00" +
+			shape.SettledHash + "\x00" + shape.ModelID,
+	))
+	return shape, nil
 }
 
 // CompareShape reports every changed stable region in deterministic order.

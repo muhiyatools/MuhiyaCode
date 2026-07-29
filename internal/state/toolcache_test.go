@@ -53,3 +53,23 @@ func TestProbeStoreLastGoodIsCallerControlled(t *testing.T) {
 		t.Fatalf("snapshot=%+v ok=%v", got, ok)
 	}
 }
+
+func TestProbeStorePreservesUnknownCapability(t *testing.T) {
+	paths := testPaths(t)
+	store, err := NewProbeStore(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fingerprint := ProbeFingerprint("https://example/v1", "secret")
+	if err := store.Put(ProbeSnapshot{Fingerprint: fingerprint, WebSearch: ProbeUnknown, CheckedAt: time.Unix(1, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := NewProbeStore(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reloaded.Get(fingerprint)
+	if !ok || got.WebSearch != ProbeUnknown {
+		t.Fatalf("snapshot=%+v ok=%v", got, ok)
+	}
+}

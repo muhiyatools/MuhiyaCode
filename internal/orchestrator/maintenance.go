@@ -8,7 +8,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/muhiya/muhiyacode/internal/contract"
 )
@@ -52,50 +51,18 @@ func (e *Engine) compact(ctx context.Context, reason string) error {
 		content := contract.Digest(message.Content, 500)
 		lines = append(lines, fmt.Sprintf("- %s: %s", message.Role, content))
 	}
-	// T042: digests accumulate, so the summarizer covers ONLY the region being
+	// P0 single-model invariant: the model-based compaction call was removed.
+	// An auxiliary LLM call (even on the session model) partitioned model
+	// execution and could add uncontrolled turns. Use the mechanical fallback
+	// (folded digests) until Phase 4 supplies typed deterministic checkpoints.
+	// T042: digests accumulate, so the summary covers ONLY the region being
 	// folded — prior digests are preserved verbatim (via CompactTo accumulation)
 	// and carried forward in the request prefix, never re-summarized.
-	request := []contract.Message{{Role: contract.RoleSystem, Content: "Compress a coding-agent session under headings GOAL, STATE, FILES, DECISIONS, COMMANDS, PENDING. Preserve all durable facts and exact paths; use terse bullets."}, {Role: contract.RoleUser, Content: "Reason: " + reason + "\nDurable facts:\n" + strings.Join(e.knowledge.CompactionFacts(), "\n") + "\nConversation:\n" + strings.Join(lines, "\n")}}
-	temperature := .1
-	// Compaction shares the main stream's pin: it uses ActiveModelID, so it
-	// belongs under the same gateway routing pin as the main loop (C1).
-	// C3/T011: this is an intentionally COLD, one-shot isolated stream — a single
-	// request built from a fresh system+user pair, never appended to. It is not
-	// covered by the main-loop prefix-shape guard (there is no prior shape to
-	// compare against and no settled prefix to preserve), and that is correct:
-	// its cache miss is a deliberate, once-per-compaction cost.
-	// T042: bound the summarizer to 90s and allow one retry on a non-timeout
-	// failure; a timeout or a second failure falls through to the mechanical
-	// fallback below so compaction always frees context and never loops.
-	summaryCtx, cancel := context.WithTimeout(ctx, 90*time.Second)
-	defer cancel()
-	var response contract.ChatResponse
-	var err error
-	summaryStart := time.Now()
-	for attempt := 0; attempt < 2; attempt++ {
-		response, err = e.provider.Chat(summaryCtx, contract.ChatRequest{SessionID: e.session.ID + ":main", Messages: request, ModelID: e.settings.Provider.ActiveModelID, MaxTokens: 1600, Temperature: &temperature, Reasoning: contract.ReasoningLow, PinUpstream: e.upstreamPin()})
-		if err == nil || summaryCtx.Err() != nil {
-			break
-		}
-	}
-	summary := ""
-	if usageErr := e.recordUsageAndEmit(func() error {
-		return e.recordAuxUsage(ctx, e.settings.Provider.ActiveModelID, ":aux", response.Usage, elapsedMS(summaryStart))
-	}); usageErr != nil {
-		return fmt.Errorf("persist compaction usage: %w", usageErr)
-	}
-	if err == nil {
-		summary = strings.TrimSpace(response.Content)
-	}
-	if summary == "" {
-		summary = strings.Join(lines, "\n")
-	}
-	// T042: pass just the digest (accumulated by CompactTo). The workspace path
-	// already lives in the cache-stable system prompt, so repeating it per
-	// accumulated digest would only bloat the summary.
-	e.history.CompactTo(summary, 2)
+	summary := strings.Join(lines, "\n")
+	record := e.history.CompactToWithReason(summary, 2, reason)
 	if e.persistence.AddEvent != nil {
-		_ = e.persistence.AddEvent(ctx, "system", "compact_summary", e.redact(summary), "")
+		metadata := fmt.Sprintf("source=%s messages=%d chars=%d summary=%s", record.SourceHash, record.SourceMessages, record.SourceChars, record.SummaryHash)
+		_ = e.persistence.AddEvent(ctx, "system", "compact_summary", e.redact(summary), metadata)
 	}
 	return nil
 }
@@ -109,7 +76,7 @@ func (e *Engine) contextPressure() pressureSnapshot {
 	reported, available := e.latestPromptTokens, e.latestPromptAvailable
 	e.taskMu.Unlock()
 	input := e.history.PressureInput(reported, available)
-	usable := max(8000, e.contextLimit()-outputReserveTokens)
+	usable := e.currentPromptBudgetTokens()
 	return pressureSnapshot{Tokens: input.Tokens, Estimated: input.Estimated, Ratio: float64(input.Tokens) / float64(usable)}
 }
 
@@ -145,7 +112,7 @@ func (e *Engine) runMaintenanceBoundary(ctx context.Context, profile EffortProfi
 	// prefix-shape guard with an unexplained change and hard-failed the session.
 	// Near the hard-fold threshold we always reclaim (compaction is imminent
 	// anyway), matching Reasonix's force semantics.
-	usable := max(8000, e.contextLimit()-outputReserveTokens)
+	usable := e.currentPromptBudgetTokens()
 	minYield := usable * maintenanceMinYieldPercent / 100
 	if e.history.EstimateMaintainYield(profile.KeepFullToolOutputs, profile.TrimmedToolOutputChars, 4) < minYield &&
 		pressure.Ratio < maintenanceHardFoldRatio {

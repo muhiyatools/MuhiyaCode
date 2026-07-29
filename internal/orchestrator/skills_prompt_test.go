@@ -35,12 +35,15 @@ func TestSkillsSectionDeterministic(t *testing.T) {
 	// 013 T006: paths left the rendered listing. read_skill resolves by name, and
 	// skills now come from home roots whose absolute paths would leak a user's
 	// directory layout into the cached prefix for no benefit.
-	t.Run("listing renders names and descriptions, never paths", func(t *testing.T) {
+	t.Run("listing renders names only, never descriptions or paths", func(t *testing.T) {
 		ctx := base
 		ctx.Skills = []SkillListing{{Name: "frontend-design", Path: `C:\Users\dev\.agents\skills\frontend-design\SKILL.md`, Description: "Build distinctive frontends."}}
 		out := SystemPrompt(ctx)
-		if !strings.Contains(out, "- frontend-design: Build distinctive frontends.") {
-			t.Fatalf("described form missing:\n%s", out)
+		if !strings.Contains(out, "- frontend-design") {
+			t.Fatalf("skill name missing:\n%s", out)
+		}
+		if strings.Contains(out, "Build distinctive frontends.") {
+			t.Fatalf("skill descriptions must load on demand:\n%s", out)
 		}
 		if strings.Contains(out, "SKILL.md") || strings.Contains(out, `C:\Users`) {
 			t.Fatalf("skill paths must not reach the prompt:\n%s", out)
@@ -79,7 +82,7 @@ func TestSkillsSectionDeterministic(t *testing.T) {
 		out := SystemPrompt(ctx)
 		// The equip-a-delegate clause went with the subagent system: the session
 		// reads its own skills, so there is no one to name a skill for.
-		for _, want := range []string{"read_skill", "BEFORE you start"} {
+		for _, want := range []string{"read_skill", "before using"} {
 			if !strings.Contains(out, want) {
 				t.Fatalf("skills hint missing %q:\n%s", want, out)
 			}

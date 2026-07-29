@@ -130,10 +130,12 @@ func (e *Engine) readSkillTool(_ context.Context, raw json.RawMessage) (string, 
 	}
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
+		//lint:ignore ST1005 This error is model-facing recovery guidance.
 		return "", errors.New(instructions.ToolReadSkillEmptyNameBody)
 	}
 	entry, ok := e.skills.Lookup(name)
 	if !ok {
+		//lint:ignore ST1005 This error is model-facing recovery guidance.
 		return "", fmt.Errorf(instructions.ToolReadSkillUnknownTmpl, name)
 	}
 	// Already in hand: the manual /skills flow put this skill in the prompt, or
@@ -144,9 +146,11 @@ func (e *Engine) readSkillTool(_ context.Context, raw json.RawMessage) (string, 
 	}
 	body, err := e.loadSkill(entry)
 	if err != nil {
+		//lint:ignore ST1005 This error is model-facing recovery guidance.
 		return "", fmt.Errorf(instructions.ToolReadSkillUnreadableTmpl, entry.Name)
 	}
 	if strings.TrimSpace(body) == "" {
+		//lint:ignore ST1005 This error is model-facing recovery guidance.
 		return "", fmt.Errorf(instructions.ToolReadSkillEmptyBodyTmpl, entry.Name)
 	}
 	e.markSkillProvided(entry.Name)

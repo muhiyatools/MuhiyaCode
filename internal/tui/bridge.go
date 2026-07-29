@@ -3,6 +3,8 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -13,7 +15,11 @@ import (
 type statusMsg string
 type noticeMsg string
 type streamMsg struct{ text string }
+type streamResetMsg struct{}
 type mcpRefreshTickMsg struct{}
+
+var ErrQuestionCancelled = errors.New("question cancelled without a selection")
+
 type toolStartMsg struct {
 	name  string
 	input json.RawMessage
@@ -91,6 +97,9 @@ func (b *Bridge) Callbacks() contract.Callbacks {
 		Status: func(value string) { b.send(statusMsg(value)) },
 		Notice: func(value string) { b.send(noticeMsg(value)) },
 		Token:  func(value string) { b.queueStream(value) },
+		StreamReset: func() {
+			b.sendAfterFlush(streamResetMsg{})
+		},
 		// ReasoningToken is deliberately absent: raw model thinking must never
 		// stream into the visible transcript (live incident — reasoning text
 		// rendered as a raw gutter line). Leaving the callback nil switches the
@@ -113,7 +122,8 @@ func (b *Bridge) Callbacks() contract.Callbacks {
 		},
 		Ask: func(ctx context.Context, questions []contract.Question) ([]contract.Answer, error) {
 			answers := make([]contract.Answer, 0, len(questions))
-			for _, question := range questions {
+			total := len(questions)
+			for i, question := range questions {
 				// Defense in depth: the engine rejects choiceless questions, but never
 				// index an empty slice here — a malformed question degrades to a blank
 				// answer instead of panicking the event loop.
@@ -121,12 +131,16 @@ func (b *Bridge) Callbacks() contract.Callbacks {
 					answers = append(answers, contract.Answer{Question: question.Question, Choice: contract.QuestionChoice{}, Index: -1})
 					continue
 				}
-				index, err := b.request(ctx, modalRequest{title: "Choose", message: question.Question, choices: question.Choices})
+				title := "Question"
+				if total > 1 {
+					title = fmt.Sprintf("Question %d of %d", i+1, total)
+				}
+				index, err := b.request(ctx, modalRequest{title: title, message: question.Question, choices: question.Choices})
 				if err != nil {
 					return nil, err
 				}
 				if index < 0 || index >= len(question.Choices) {
-					index = recommendedChoice(question.Choices)
+					return nil, ErrQuestionCancelled
 				}
 				answers = append(answers, contract.Answer{Question: question.Question, Choice: question.Choices[index], Index: index})
 			}

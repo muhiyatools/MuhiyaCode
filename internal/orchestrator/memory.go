@@ -85,14 +85,14 @@ func (e *Engine) confirmMemoryMutation(ctx context.Context, tool, prompt string)
 		return nil
 	}
 	if e.callbacks.Confirm == nil {
-		return fmt.Errorf("permission denied: %s requires interactive approval and no approver is available", tool)
+		return contract.ToolNotStarted(fmt.Errorf("permission denied: %s requires interactive approval and no approver is available", tool))
 	}
 	approved, err := e.callbacks.Confirm(ctx, prompt)
 	if err != nil {
 		return err
 	}
 	if !approved {
-		return fmt.Errorf("permission denied: the user declined the memory %s", strings.TrimSuffix(tool, "_memory"))
+		return contract.ToolNotStarted(fmt.Errorf("permission denied: the user declined the memory %s", strings.TrimSuffix(tool, "_memory")))
 	}
 	return nil
 }

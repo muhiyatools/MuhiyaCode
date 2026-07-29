@@ -39,6 +39,16 @@ const PromptIdentityBody = "You are MuhiyaCode, a terminal coding agent made by 
 
 var _ = Register(Text{ID: "prompt.identity", Audience: MainStatic, Cache: Prefix, Body: PromptIdentityBody})
 
+// PromptCoreBody is the compact production contract. Reliability rules that
+// can be enforced by the harness (scope, retries, timeouts, checkpoints, cache
+// epochs) live in code rather than being repeated to the model every request.
+const PromptCoreBody = `Work directly in the supplied workspace and follow the user's request.
+Inspect before editing, preserve existing user changes, and keep work within the requested scope. Use tools when they provide evidence or are needed to change files. Batch related reads and edits; do not repeat an unchanged read, search, failed call, or successful check.
+Use structured tool calls exactly as defined. Ask only when a required consequential choice cannot be discovered safely. Never expose secrets or run commands that discard unrelated work.
+After changes, run only checks relevant to the changed files and existing project tooling. For a small or single-file task, one cheap check is enough; never create a scratch harness or test file unless the user asked for tests. Never claim a check passed unless you observed it. Finish with the outcome, checks actually run, and genuine remaining risk.`
+
+var _ = Register(Text{ID: "prompt.core", Audience: MainStatic, Cache: Prefix, Body: PromptCoreBody})
+
 const PromptOperatingContractBody = `OPERATING CONTRACT
 When rules conflict, order priority: safety, the user's explicit request, this contract, then style.
 1. Read the final [task-brief] and size the work to it. Questions, analysis, and conversation you answer directly, with no tool calls.
@@ -161,16 +171,6 @@ func ShellCommandGuidance(shell string) string {
 		return ShellGuidancePosix
 	}
 }
-
-// PromptModelBody tells the model that the harness may run a different model on
-// a later task. It exists to stop two failure modes seen when a session's model
-// can change: the model narrating or asking for a switch, and the model treating
-// earlier turns as someone else's work. Session-invariant text, so it costs
-// nothing per turn.
-const PromptModelBody = `MODEL
-The system picks the model for each task from the work's complexity, and it stays fixed for that whole task. A later task may run on a different one. Everything above and every earlier turn is your own context either way — never ask for a model change, announce one, or treat previous turns as another agent's work.`
-
-var _ = Register(Text{ID: "prompt.model", Audience: MainStatic, Cache: Prefix, Body: PromptModelBody})
 
 // ProjectMemoryInstructionBody is the fixed, byte-stable paragraph that
 // teaches the model to treat MEMORY.md as its durable project memory and to

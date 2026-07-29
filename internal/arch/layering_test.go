@@ -40,17 +40,19 @@ var allowedInternalImports = map[string][]string{
 	// used by both destructive-command gates (workspace.ClassifyShell and
 	// orchestrator.IsReadOnlyShell), so the two cannot drift.
 	"shellsafe":    {},
+	"processenv":   {},
+	"secrecy":      {},
 	"gateway":      {"contract", "instructions"},
-	"workspace":    {"contract", "instructions", "shellsafe"},
-	"state":        {"contract"},
-	"mcpclient":    {"contract", "state"},
+	"workspace":    {"contract", "instructions", "shellsafe", "processenv"},
+	"state":        {"contract", "secrecy"},
+	"mcpclient":    {"contract", "state", "processenv", "workspace"},
 	"orchestrator": {"contract", "gateway", "instructions", "shellsafe"},
 	// app is the frontend-neutral core seam: it holds the types and prompt
 	// assembly every frontend shares, so it may reach the orchestrator but must
 	// NEVER import a frontend (tui). That one-way edge is what lets the planned
 	// desktop app reuse the core without pulling in the terminal renderer.
 	"app":     {"contract", "orchestrator"},
-	"tui":     {"contract", "gateway", "orchestrator", "buildinfo", "updatecheck", "app"},
+	"tui":     {"contract", "gateway", "orchestrator", "buildinfo", "updatecheck", "app", "secrecy"},
 	"command": {"*"},
 }
 

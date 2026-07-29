@@ -79,14 +79,24 @@ func TestApplicationDiscoversModelRunsAndResumes(t *testing.T) {
 	if err := app.Close(); err != nil {
 		t.Fatal(err)
 	}
-
-	loaded, err := state.LoadSettings(paths)
+	sessionDir, err := state.SessionDir(paths, sessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	model, ok := state.ActiveModel(loaded)
-	if !ok || model.ID != "go-agent-model" || model.ContextLimit != 64000 {
-		t.Fatalf("model discovery was not persisted: %+v", loaded.Provider)
+	if err := os.WriteFile(filepath.Join(sessionDir, "history.json"), []byte(`{"corrupt":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sessionDir, "usage.jsonl"), []byte(`{"corrupt":`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	loadedCatalog, err := state.LoadModelCatalog(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loadedCatalog.Models) != 1 || loadedCatalog.Models[0].ID != "go-agent-model" ||
+		loadedCatalog.Models[0].ContextLimit != 64000 {
+		t.Fatalf("model discovery was not persisted in catalog cache: %+v", loadedCatalog)
 	}
 	resumed, err := OpenApplication(ApplicationOptions{Context: context.Background(), SessionID: sessionID, DisableMCP: true})
 	if err != nil {

@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/muhiya/muhiyacode/internal/processenv"
 )
 
 type ShellResult struct {
@@ -25,8 +27,10 @@ type ShellResult struct {
 	// spawned (a server, a detached job) kept the output pipe open past the kill
 	// grace. The command did not fail — MuhiyaCode simply stopped waiting on the
 	// inherited pipe so the agent stays responsive instead of hanging.
-	BackgroundLeft bool
-	Duration       time.Duration
+	BackgroundLeft      bool
+	BackgroundProcessID string
+	Duration            time.Duration
+	Sandbox             SandboxCapability
 }
 
 // shellKillGrace bounds how long Run waits for a process's inherited output
@@ -46,6 +50,12 @@ type ShellRunner struct {
 	Timeout     time.Duration
 	OutputLimit int
 	OnOutput    func(string)
+	Sandbox     SandboxBackend
+	// AllowUnsandboxed must only be set after an explicit policy decision.
+	AllowUnsandboxed bool
+	// BypassSandbox represents the explicitly unsafe full-access mode.
+	BypassSandbox bool
+	Processes     *ProcessManager
 }
 
 func ChooseShell(preferred string) (string, error) {
@@ -113,15 +123,24 @@ func (r *ShellRunner) runArgv(parent context.Context, cwd, label string, args []
 	}
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
+	executableArgs, sandbox, err := sandboxCommand(
+		r.Sandbox,
+		SandboxRequest{Arguments: args, CWD: cwd},
+		r.AllowUnsandboxed,
+		r.BypassSandbox,
+	)
+	if err != nil {
+		return ShellResult{Shell: label, Sandbox: sandbox}, err
+	}
 	// CommandContext ties the process to ctx: on deadline or task cancellation Go
 	// invokes cmd.Cancel (below) and then, after WaitDelay, force-closes the
 	// inherited I/O pipes so Wait always returns. Without WaitDelay a detached
 	// grandchild that keeps stdout open (a server started via Start-Process, a
 	// backgrounded job) blocks Wait forever — the root cause of a shell call that
 	// runs for minutes after it should have stopped.
-	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+	cmd := exec.CommandContext(ctx, executableArgs[0], executableArgs[1:]...)
 	cmd.Dir = cwd
-	cmd.Env = os.Environ()
+	cmd.Env = processenv.Sanitized(os.Environ())
 	cmd.Cancel = func() error { killProcessTree(cmd); return nil }
 	cmd.WaitDelay = shellKillGrace
 	prepareCommand(cmd)
@@ -137,7 +156,12 @@ func (r *ShellRunner) runArgv(parent context.Context, cwd, label string, args []
 	// outlived the wrapper shell. releaseProcess detaches without killing on the
 	// normal path so an intentionally-backgrounded process is left running.
 	superviseProcess(cmd)
-	defer releaseProcess(cmd)
+	adopted := false
+	defer func() {
+		if !adopted {
+			releaseProcess(cmd)
+		}
+	}()
 	done := make(chan error, 1)
 	go func() { done <- cmd.Wait() }()
 	var waitErr error
@@ -161,7 +185,7 @@ func (r *ShellRunner) runArgv(parent context.Context, cwd, label string, args []
 	if truncated {
 		output = strings.TrimRight(output, " \t\r\n") + "\n... output truncated ..."
 	}
-	result := ShellResult{Shell: label, ExitCode: 0, Output: output, TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Cancelled: errors.Is(parent.Err(), context.Canceled), Truncated: truncated, Duration: time.Since(started)}
+	result := ShellResult{Shell: label, ExitCode: 0, Output: output, TimedOut: errors.Is(ctx.Err(), context.DeadlineExceeded), Cancelled: errors.Is(parent.Err(), context.Canceled), Truncated: truncated, Duration: time.Since(started), Sandbox: sandbox}
 	if cmd.ProcessState != nil {
 		result.ExitCode = cmd.ProcessState.ExitCode()
 	}
@@ -180,6 +204,15 @@ func (r *ShellRunner) runArgv(parent context.Context, cwd, label string, args []
 				return result, waitErr
 			}
 		}
+	}
+	if result.BackgroundLeft && r.Processes != nil {
+		id, adoptErr := r.Processes.adopt(cmd, label)
+		if adoptErr != nil {
+			killProcessTree(cmd)
+			return result, fmt.Errorf("own background process: %w", adoptErr)
+		}
+		result.BackgroundProcessID = id
+		adopted = true
 	}
 	return result, nil
 }

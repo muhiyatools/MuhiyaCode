@@ -96,8 +96,8 @@ func TestCtrlSOpensResumeWhenIdleAndBlocksWhenBusy(t *testing.T) {
 	}
 }
 
-// TestShiftTabCyclesPermissionMode pins shift+tab as the permission-mode cycle
-// (the same transition /permissions and /mode drive).
+// TestShiftTabCyclesPermissionMode pins shift+tab as the permission-mode entry,
+// with explicit confirmation before the unsafe direction.
 func TestShiftTabCyclesPermissionMode(t *testing.T) {
 	m := NewModel(Options{Runtime: testRuntime(t), Version: "test"})
 	m = mustUpdate(t, m, tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -106,8 +106,14 @@ func TestShiftTabCyclesPermissionMode(t *testing.T) {
 	}
 
 	m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	if got := m.runtime.Settings.PermissionMode; got != "normal" || m.modal == nil {
+		t.Fatalf("shift+tab must open confirmation without changing mode, got mode=%q modal=%v", got, m.modal)
+	}
+	callback := m.modal.onSelect
+	m.closeModal(1)
+	callback(1)
 	if got := m.runtime.Settings.PermissionMode; got != "auto-accept" {
-		t.Fatalf("shift+tab did not cycle normal -> auto-accept, got %q", got)
+		t.Fatalf("explicit confirmation did not enable auto-accept, got %q", got)
 	}
 
 	m.handleKey(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})

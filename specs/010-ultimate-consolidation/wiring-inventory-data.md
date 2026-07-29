@@ -40,14 +40,14 @@ together by the session prefix golden.
 | Tool | list_files | List a directory (recursive optional, capped at maxEntries); use once to map a workspace | internal/workspace/workspace_test.go:181 (TestListGlobWriteAndGitToolBehaviors, recursive List) + internal/orchestrator/instructions_wiring_test.go:162 (TestWiring_PrefixBytesGolden, schema wiring) | wired |
 | Tool | read_file | Read a UTF-8 file with line numbers; offset/limit page large files | internal/workspace/workspace_test.go:73 (TestReadEditPatchAndCheckpoint) + internal/workspace/read_suggest_test.go:36 (TestReadNotFoundSuggestsBasenameMatch) | wired |
 | Tool | grep | Regex or literal search; file, line, and text results, capped at maxResults | internal/workspace/workspace_test.go:125 (TestGrepInvalidPatternGuidance) + internal/orchestrator/faultinjection_test.go:494 (FI-9, invalid-regex-through-real-grep, full Run) | wired |
-| Tool | search_text | Fast literal text search (execSearch forces Literal=true onto the same Grep path) | internal/workspace/workspace_test.go:147 (TestGrepInvalidPatternGuidance's literal=true assertion, the exact code path execSearch uses) | wired |
-| Tool | glob | Find files by doublestar glob pattern, capped at maxResults | internal/workspace/workspace_test.go:188 (TestListGlobWriteAndGitToolBehaviors) | wired |
+| Tool | search_text | REMOVED from the model-facing surface; grep provides literal and regex search through one schema | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
+| Tool | glob | REMOVED from the model-facing surface; list_files and grep cover discovery without another schema | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 | Tool | edit_file | Replace exact text in a file already read; returns a compact diff; requires a prior read for existing files | internal/workspace/workspace_test.go:91 (TestReadEditPatchAndCheckpoint) + internal/workspace/edit_mismatch_test.go:49,64,75,87 (not-found/ambiguous/idempotent classification) | wired |
 | Tool | multi_edit | Apply several ordered exact replacements to one read file (max 30) | internal/workspace/edit_mismatch_test.go:94 (TestMultiEditPartialApplicationStaysSuccess) + edit_mismatch_test.go:114 (TestMultiEditAllMissesIsFailure) | wired |
 | Tool | write_file | Write a file; overwriting an existing file requires a prior read (same permission-rule sentence as the system prompt, IS-5) | internal/workspace/workspace_test.go:196 (TestListGlobWriteAndGitToolBehaviors) + internal/orchestrator/cachehit_guard_test.go (full-Run write_file dispatch) | wired |
-| Tool | apply_patch | Apply a standard unified diff to files already read; atomic rollback on partial failure | internal/workspace/workspace_test.go:99-107 (TestReadEditPatchAndCheckpoint's ApplyPatch section) | wired |
+| Tool | apply_patch | REMOVED from the model-facing surface; edit_file/multi_edit/write_file are the stable edit interface | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 | Tool | run_shell | Run a shell command with streaming output and context-based cancellation | internal/workspace/workspace_test.go:255 (TestShellStreamingAndCancellation) | wired |
-| Tool | git_status | Show concise `git status --short` | internal/workspace/workspace_test.go:207 (TestListGlobWriteAndGitToolBehaviors) | wired |
+| Tool | git_status | REMOVED from the model-facing surface; git_diff provides task-relevant change evidence | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 | Tool | git_diff | Show the workspace `git diff` (optionally staged/path/context-scoped) | internal/workspace/workspace_test.go:215 (TestListGlobWriteAndGitToolBehaviors) | wired |
 | Tool | inspect_code | Inspect Go source structure: outline (declarations), definition (symbol lookup), or references (usage sites) | internal/workspace/codeindex_test.go:161 (TestExecInspectCode_OutlineMode) | wired |
 | Tool | read_plan | REMOVED in v1.1.0 with the planning pipeline — the checklist lives in the workspace tasks.md, which ordinary read_file reaches | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
@@ -64,10 +64,12 @@ ever appear in a subagent's real `Allowed` map (pinned by
 |---|---|---|---|---|
 | Tool | update_plan | REMOVED in v1.1.0 — the model maintains a tasks.md checklist with ordinary file tools instead | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 | Tool | ask_user | Ask 1-3 blocking multiple-choice questions | internal/tui/askuser_safety_test.go:45 (TestAskEmptyChoicesDoesNotPanic, the Callbacks.Ask consumer e.askUser dispatches to) + instructions_wiring_test.go:162 (schema wiring) | wired |
-| Tool | propose_changes | Request approval before broad or risky edits | internal/orchestrator/mode_scenario_test.go:51 (TestProposeChangesNonInteractiveIsHonest) | wired |
-| Tool | save_memory | Save one durable project fact to the memory-store index, or (with topic) into a topic file plus a one-line index pointer; 500-char cap; repeats dedupe as already known | internal/orchestrator/memory_test.go:148 (TestSaveMemoryToolApprovalGateParity) + memory_test.go:191 (TestSaveMemoryToolAutoAcceptSaves) + memory_test.go (TestSaveMemoryTopicRouting) | wired |
-| Tool | recall_memory | Read one project-memory topic file whose pointer appears in the always-loaded index (on-demand detail) | internal/orchestrator/memory_test.go (TestRecallMemoryRoundTrip) | wired |
-| Tool | edit_memory | Update or delete exactly one saved memory entry (index or topic file) by matching enough of its line; empty new deletes; deleting a topic's last entry dissolves the file and its index pointer; same approval gate as save_memory | internal/orchestrator/memory_test.go (TestEditMemoryReplaceAndDelete + TestEditMemoryDissolvesEmptyTopic + TestEditMemoryApprovalGateParity) | wired |
+| Tool | propose_changes | REMOVED from the default surface; path/command policy and checkpoints enforce scope in the harness | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
+| Tool | save_memory | REMOVED from the default model surface to avoid persistent schema cost | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
+| Tool | recall_memory | REMOVED from the default model surface to avoid persistent schema cost | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
+| Tool | edit_memory | REMOVED from the default model surface to avoid persistent schema cost | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
+| Tool | activate_tools | REMOVED; task-scoped schema hydration invalidated the prompt prefix | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
+| Tool | integration_tools | List or call optional MCP integrations through one stable schema without hydrating their definitions into the prompt | internal/orchestrator/tool_hydration_test.go + internal/tui/wiring_inventory_test.go | wired |
 | Tool | run_subagent | REMOVED 2026-07-21 (unified-session overhaul): the subagent system was deleted and the session does its own work with the full toolset | UNIFIED_SESSION_OVERHAUL_PLAN.md | removed |
 | Tool | exit_plan_mode | REMOVED in v1.1.0 with Planning Mode | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 
@@ -78,7 +80,7 @@ ever appear in a subagent's real `Allowed` map (pinned by
 | Tool | web_search | Search the live web for current/niche facts; gated on a one-time, fingerprint-cached provider probe at session build (internal/command/runtime_build.go's webSearchAvailable, gated on BaseURL+APIKey both being set); verifying interface is the gateway's WebSearchTool, not a live network call in CI | internal/tui/wiring_inventory_test.go (TestWiringInventoryMatchesLiveSurface's structural gateway.WebSearchTool{}.Definition() check) + internal/gateway/cost_and_web_test.go:11 (TestWebSearchNeverLeaksProvider, Search behavior) + manual: the probe/fingerprint gate itself has no automated test and is verified by a live session with a provider that does/does not advertise web_search | wired |
 | Tool | mcp__* (dynamic) | Any number of mcp__<server>__<tool> definitions, discovered per configured MCP server at session start; BaseDefinitions excludes them (byte-stable session prefix) while Definitions/MCPDefinitions includes them | internal/tui/wiring_inventory_test.go (TestWiringInventoryMatchesLiveSurface's mcpRegistrySupportsDynamicTools structural round-trip) + internal/mcpclient/manager_test.go:63 (TestManagerStdioDiscoveryExecutionAndRefresh) + manager_test.go:156 (TestPinnedSurfaceAppearsAtBoundaryThenLoadsBeforeHandshake) | wired |
 
-## Slash commands — canonical (16)
+## Slash commands — canonical (18)
 
 The command palette (`var commands` in `internal/tui/model.go`); every entry
 is driven end to end through the real Enter-key path by one shared test.
@@ -86,13 +88,15 @@ is driven end to end through the real Enter-key path by one shared test.
 | Surface | Identifier | Advertised behavior | Verified-by | Status |
 |---|---|---|---|---|
 | Slash Command | /context | Inspect context usage (opens the simplified context card) | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) + context_panel_test.go (card content, dropped diagnostics) | wired |
+| Slash Command | /requests | Inspect completed model requests, cache attribution, prefix hashes, route affinity, token counts, latency, and gateway request IDs | internal/tui/requests_test.go (TestFormatRequestTraceShowsCacheLineage) | wired |
 | Slash Command | /errors | REMOVED in 013 — harness friction is engine telemetry, not user-facing; the panel and the task-summary marker are gone (recording itself is retained for benchmarks) | internal/tui/wiring_inventory_test.go (absence enforced) + slash_alias_test.go (TestRemovedCommandsAreUnknown) | removed |
 | Slash Command | /compact | Compact the conversation (summarize earlier turns) | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) | wired |
-| Slash Command | /rewind | Restore the latest checkpoint | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree, Actions.Rewind wired) | wired |
+| Slash Command | /rewind | List selectable checkpoints and restore code, conversation, or both at the matching event cursor | internal/tui/wiring_inventory_test.go + internal/workspace/patch_journal_test.go | wired |
+| Slash Command | /processes | List and stop background process trees owned by the active session | internal/tui/wiring_inventory_test.go + internal/workspace/shell_hang_test.go | wired |
 | Slash Command | /reasoning | Set reasoning effort (low-max); bare command opens a choice modal | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) + slash_alias_test.go:22 (TestEffortAliasMatchesCanonicalCommand) | wired |
 | Slash Command | /goal | REMOVED in v1.1.0 — the goal auto-continue system is gone; the agent follows the user's instructions directly | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
 | Slash Command | /permissions | REMOVED in 013 — Shift+Tab cycles the mode and the footer names the current one with the shortcut beneath it, so the command duplicated a two-state toggle | internal/tui/wiring_inventory_test.go (absence enforced) + slash_alias_test.go (TestRemovedCommandsAreUnknown) | removed |
-| Slash Command | /model | REMOVED in v1.1.0 — models are session-stable and set with `muhiyacode config set model`; /context discloses the current pairing | internal/tui/wiring_inventory_test.go (absence enforced) | removed |
+| Slash Command | /model | Select the explicit model for the active session; the choice persists and starts a new cache epoch | internal/tui/wiring_inventory_test.go + internal/orchestrator/usage_record_test.go | wired |
 | Slash Command | /login | Store the API key (interactive builds only) | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) + command_visibility_test.go:12 (TestCommandVisibilityTracksSignIn) | wired |
 | Slash Command | /logout | Clear the stored API key | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) + command_visibility_test.go:12 (TestCommandVisibilityTracksSignIn) | wired |
 | Slash Command | /usage | View account usage (signed-in only) | internal/tui/tui_test.go:496 (TestEverySlashCommandFlowIsCrashFree) + command_visibility_test.go:12 (TestCommandVisibilityTracksSignIn) | wired |
@@ -156,11 +160,8 @@ was removed in this feature (WI-5) — see the "removed" row below and
 | Settings Field | provider.subagentModelId | The subagent model id | — | removed |
 | Settings Field | provider.models | The configured model catalog | internal/state/config_defaults_test.go (AutoAssign family) + internal/tui/model_switch_test.go | wired |
 | Settings Field | provider.modelsRefreshedAt | When the gateway catalog was last discovered; drives the 24h TTL refresh that keeps the model list current | internal/command/runtime_build.go (catalogStale) | wired |
-| Settings Field | provider.rolesPinned | The user chose the models explicitly, so the session advisor never overrides them | internal/state/config.go (SetConfig model/subagentModel) | wired |
-| Settings Field | provider.advisor | Session-start model advisor: auto (default) or off | internal/state/config.go (SetConfig advisor) | wired |
 | Settings Field | permissionMode | normal (confirm mutations) or auto-accept | internal/tui/keys_test.go:101 (TestShiftTabCyclesPermissionMode) + slash_alias_test.go:44 (TestModeAliasMatchesCanonicalCommand) | wired |
 | Settings Field | effort | Reasoning effort: low/medium/high/max | internal/tui/slash_alias_test.go:22 (TestEffortAliasMatchesCanonicalCommand) + internal/state/config_defaults_test.go:10 (TestDefaultEffortIsHigh) | wired |
-| Settings Field | reviewGating | Review-gate mode (feature 011): off/conservative/default; explicit review requests always run | internal/orchestrator/reviewgate_test.go:202 (TestNormalizeReviewGating) + reviewgate_test.go:26 (TestDecideHardRules) | wired |
 | Settings Field | contextLinking | Subagent context-linking mode (feature 012 FR-017) | — | removed |
 | Settings Field | theme | The color theme name | internal/tui/theme_test.go:38 (TestThemePaletteIsSingleSource) | wired |
 | Settings Field | shell.preferred | Preferred shell: auto/pwsh/powershell/cmd/sh | internal/workspace/workspace_test.go:255 (TestShellStreamingAndCancellation, ShellRunner.Preferred) | wired |
@@ -196,7 +197,7 @@ TUI itself never reads.
 |---|---|---|---|---|
 | AgentEvent Field | Handoff | The rendered subagent launch contract, for delegation-benchmark auditing only (the TUI does not render it) | benchmarks/delegationbench/audit.go:133 (handoffCompliant(event.Handoff)) + specs/010-ultimate-consolidation/removal-ledger.md RL-021 | wired |
 
-## Callbacks members (15)
+## Callbacks members (16)
 
 `contract.Callbacks`; producers in `internal/orchestrator`, consumed by
 `internal/tui/bridge.go`'s `Callbacks()` (interactive) or
@@ -210,6 +211,7 @@ conditional surfaces to name).
 | Callbacks Member | Notice | A transient user-facing announcement that outlives the next status update | internal/orchestrator/pipeline.go:90,109,145,318 (producer) + internal/tui/bridge.go's Notice->noticeMsg | wired |
 | Callbacks Member | Token | Streamed assistant answer tokens | internal/tui/bridge_test.go:7 (TestBridgeCoalescesAssistantChunks) | wired |
 | Callbacks Member | ReasoningToken | Streamed reasoning/thinking tokens | internal/tui/bridge_test.go:7 (TestBridgeCoalescesAssistantChunks, cb.ReasoningToken) | wired |
+| Callbacks Member | StreamReset | Retract visible assistant deltas from an abandoned provider-stream attempt before retry output arrives | internal/gateway/resilience_test.go (TestDiedStreamIsRetriedOnce) + internal/tui/stream_reset_test.go (TestResetStreamDraftRemovesAbandonedAttempt) | wired |
 | Callbacks Member | ToolStart | A tool call is starting (name + raw arguments) | internal/orchestrator/dispatch.go:100,182 (producer) + internal/tui/bridge_test.go:56 (TestBridgeFlushClearsBuffers) | wired |
 | Callbacks Member | ToolOutput | Streaming tool/shell output chunks | internal/tui/bridge_test.go:28 (TestBridgeCoalescesToolOutputPerTool) | wired |
 | Callbacks Member | ToolEnd | A tool call finished (name + final output) | internal/orchestrator/dispatch.go:242 (producer) + internal/tui/bridge_test.go:56 (TestBridgeFlushClearsBuffers) | wired |
@@ -224,10 +226,10 @@ conditional surfaces to name).
 
 ## Acceptance
 
-- Row count: 92 (91 `wired` + 1 `removed`), matching WI-1's enumerated
+- Row count: 93 (92 `wired` + 1 `removed`), matching WI-1's enumerated
   surface exactly (12 registry + 6 synthetic + 1 conditional + 1 dynamic
   tools = 20; 17 canonical + 4 alias slash commands = 21; 13 keybindings; 16
-  Settings fields; 6 AgentEvent kinds; 1 AgentEvent field; 15 Callbacks
+  Settings fields; 6 AgentEvent kinds; 1 AgentEvent field; 16 Callbacks
   members).
 - Zero unresolved entries: every row has a non-empty Verified-by and a
   Status of exactly `wired` or `removed` (WI-2), checked mechanically by
