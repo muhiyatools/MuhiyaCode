@@ -2,6 +2,10 @@
 
 All notable MuhiyaCode changes are documented here. Releases follow semantic versioning.
 
+## 1.3.3
+
+- Maintenance and UI release preparing for GitHub release with GoReleaser and NPM package publishing.
+
 ## 1.3.2
 
 - Version maintenance release preparing for GitHub release and npm distribution.
